@@ -49,6 +49,10 @@ public sealed class Plugin : IDalamudPlugin
 
     internal MenuService MenuService { get; private set; } = null!;
 
+    internal LifestreamIpc Lifestream { get; private set; } = null!;
+
+    internal AetheryteService AetheryteService { get; private set; } = null!;
+
     public Plugin(IDalamudPluginInterface pluginInterface)
     {
         P = this;
@@ -74,6 +78,8 @@ public sealed class Plugin : IDalamudPlugin
         this.AddonOwnership = new AddonOwnershipTracker(this.AnomalyLog);
         this.Vnavmesh = new VnavmeshIpc(this.AnomalyLog);
         this.MenuService = new MenuService(this.AnomalyLog);
+        this.Lifestream = new LifestreamIpc(this.AnomalyLog);
+        this.AetheryteService = new AetheryteService(this.AnomalyLog);
         this.ExchangeExecutor = new ExchangeExecutor(
             this.AnomalyLog,
             this.ShopService,
@@ -82,7 +88,9 @@ public sealed class Plugin : IDalamudPlugin
             new NavigationService(this.AnomalyLog, this.Vnavmesh),
             new InteractionService(this.AnomalyLog),
             this.MenuService,
-            this.AddonOwnership);
+            this.AddonOwnership,
+            this.AetheryteService,
+            this.Lifestream);
 
         Svc.Framework.Update += this.OnFrameworkUpdate;
 

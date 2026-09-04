@@ -42,6 +42,18 @@ public sealed class VnavmeshIpc(AnomalyLog anomalyLog) : IpcGateBase("vnavmesh",
             () => this.Func<Vector3, bool, float, bool>("vnavmesh.SimpleMove.PathfindAndMoveCloseTo").InvokeFunc(destination, fly, range),
             out accepted);
 
+    /// <summary>
+    /// 指定座標の真下にある床の座標を返す。
+    ///
+    /// 配置ファイル由来の NPC 座標はナビメッシュ上に乗っていないことがあり、
+    /// そのまま目的地にすると経路探索が失敗しやすい。多層構造の都市で特に問題になる。
+    /// </summary>
+    public bool TryPointOnFloor(Vector3 position, out Vector3? onFloor)
+        => this.TryInvoke(
+            "Query.Mesh.PointOnFloor",
+            () => this.Func<Vector3, bool, float, Vector3?>("vnavmesh.Query.Mesh.PointOnFloor").InvokeFunc(position, false, 5f),
+            out onFloor);
+
     /// <summary>移動を停止する。</summary>
     public bool TryStop()
         => this.TryAction("Path.Stop", () => this.Func<object>("vnavmesh.Path.Stop").InvokeAction());
