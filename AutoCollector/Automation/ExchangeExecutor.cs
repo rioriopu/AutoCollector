@@ -1,12 +1,15 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Numerics;
 using AutoCollector.Diagnostics;
 using AutoCollector.Game;
+using AutoCollector.Ipc;
 using ECommons;
 using ECommons.Automation;
 using ECommons.Configuration;
 using ECommons.DalamudServices;
+using ECommons.GameHelpers;
 using ECommons.Throttlers;
 using ECommons.UIHelpers.AddonMasterImplementations;
 using FFXIVClientStructs.FFXIV.Component.GUI;
@@ -17,6 +20,12 @@ namespace AutoCollector.Automation;
 public enum ExchangeStep
 {
     Idle,
+
+    /// <summary>目的のエリアへテレポートしている。</summary>
+    Teleport,
+
+    /// <summary>エーテライト網で都市内を短縮移動している。</summary>
+    AethernetHop,
 
     /// <summary>NPC のいる場所へ移動している。</summary>
     Navigate,
@@ -78,6 +87,9 @@ public enum ExchangeFailure
     MenuResolutionFailed,
     MenuAmbiguous,
     NotSafeToStart,
+    TeleportUnavailable,
+    TeleportFailed,
+    AetheryteNotAttuned,
 }
 
 /// <summary>
@@ -130,7 +142,9 @@ public sealed unsafe class ExchangeExecutor(
     NavigationService navigation,
     InteractionService interaction,
     MenuService menu,
-    AddonOwnershipTracker ownership)
+    AddonOwnershipTracker ownership,
+    AetheryteService aetheryte,
+    LifestreamIpc lifestream)
 {
     /// <summary>交換コマンド。0 が購入であることの根拠は実測のみ。他の用途に流用しない。</summary>
     private const int ExchangeCommand = 0;
@@ -155,6 +169,13 @@ public sealed unsafe class ExchangeExecutor(
     private readonly InteractionService interaction = interaction;
     private readonly MenuService menu = menu;
     private readonly AddonOwnershipTracker ownership = ownership;
+    private readonly AetheryteService aetheryte = aetheryte;
+    private readonly LifestreamIpc lifestream = lifestream;
+
+    private int teleportAttempts;
+    private bool aethernetTried;
+    private Vector3 hopStartPosition;
+    private Vector3 navigationDestination;
 
     /// <summary>移動から始める場合の対象。null なら手動でショップを開いた状態からの実行。</summary>
     private ExchangeDefinition? travelTarget;
@@ -266,6 +287,19 @@ public sealed unsafe class ExchangeExecutor(
             this.anomalyLog.Warn("Cleanup", $"移動を停止できませんでした: {ex.Message}");
         }
 
+        // 1-2. Lifestream が自分の依頼で動いている場合に備えて中断を送る
+        try
+        {
+            if (this.lifestream.TryIsBusy(out var lifestreamBusy) && lifestreamBusy)
+            {
+                this.lifestream.TryAbort();
+            }
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Warn("Cleanup", $"Lifestream を中断できませんでした: {ex.Message}");
+        }
+
         // 2. エリアが変わっているならウィンドウは既に破棄されている。触ってはいけない。
         var territoryChanged = this.travelTarget is not null && Svc.ClientState.TerritoryType != this.travelTarget.TerritoryId;
 
@@ -367,14 +401,29 @@ public sealed unsafe class ExchangeExecutor(
             return false;
         }
 
-        if (Svc.ClientState.TerritoryType != definition.TerritoryId)
+        var needsTeleport = Svc.ClientState.TerritoryType != definition.TerritoryId;
+
+        if (needsTeleport)
         {
-            this.pendingRequest = null;
-            this.Fail(
-                ExchangeFailure.WrongTerritory,
-                $"交換先は {NpcLocationService.GetTerritoryName(definition.TerritoryId)} です。テレポートは未実装のため、同じエリアにいる必要があります");
-            reason = this.StatusDetail;
-            return false;
+            if (!this.lifestream.IsLoaded)
+            {
+                this.pendingRequest = null;
+                this.Fail(
+                    ExchangeFailure.TeleportUnavailable,
+                    $"交換先は {NpcLocationService.GetTerritoryName(definition.TerritoryId)} です。Lifestream が導入されていないため移動できません");
+                reason = this.StatusDetail;
+                return false;
+            }
+
+            if (!this.aetheryte.TryFindTarget(definition.TerritoryId, out _))
+            {
+                this.pendingRequest = null;
+                this.Fail(
+                    ExchangeFailure.AetheryteNotAttuned,
+                    $"{NpcLocationService.GetTerritoryName(definition.TerritoryId)} のエーテライトにアクセスしていないため、テレポートできません");
+                reason = this.StatusDetail;
+                return false;
+            }
         }
 
         if (!this.navigation.IsAvailable)
@@ -388,19 +437,26 @@ public sealed unsafe class ExchangeExecutor(
         // 移動から始めるので、Armed ではなく Navigate から入る。
         this.pendingRequest = null;
         this.travelTarget = definition;
+        this.aethernetTried = false;
         this.ownership.Clear();
         this.ownership.IsClaiming = true;
 
-        if (!this.navigation.BeginMove(definition.NpcPosition, Plugin.C.NpcApproachRange, out var navFailure))
+        if (needsTeleport)
+        {
+            this.teleportAttempts = 0;
+            this.Step = ExchangeStep.Teleport;
+            this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(90);
+            this.StatusDetail = $"{NpcLocationService.GetTerritoryName(definition.TerritoryId)} へテレポートしています";
+            return true;
+        }
+
+        if (!this.BeginTravelToNpc(definition, out var navFailure))
         {
             this.Fail(ExchangeFailure.NavigationFailed, navFailure);
             reason = this.StatusDetail;
             return false;
         }
 
-        this.Step = ExchangeStep.Navigate;
-        this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(180);
-        this.StatusDetail = $"{definition.NpcName} のところへ移動しています";
         return true;
     }
 
@@ -409,6 +465,14 @@ public sealed unsafe class ExchangeExecutor(
     {
         switch (this.Step)
         {
+            case ExchangeStep.Teleport:
+                this.TickTeleport();
+                break;
+
+            case ExchangeStep.AethernetHop:
+                this.TickAethernetHop();
+                break;
+
             case ExchangeStep.Navigate:
                 this.TickNavigate();
                 break;
@@ -439,6 +503,178 @@ public sealed unsafe class ExchangeExecutor(
         }
     }
 
+    /// <summary>
+    /// 移動の手前で、エーテライト網で短縮できるならそちらを先に使う。
+    /// 都市は広く、多層構造の場所では徒歩だと経路探索が詰まりやすい。
+    /// </summary>
+    private bool BeginTravelToNpc(ExchangeDefinition definition, out string failureReason)
+    {
+        failureReason = string.Empty;
+
+        if (!this.aethernetTried &&
+            this.lifestream.IsLoaded &&
+            this.aetheryte.TryFindAethernetShortcut(definition.NpcPosition, 40f, out var shardId, out var shardName, out var gain))
+        {
+            this.aethernetTried = true;
+            this.hopStartPosition = Player.Available ? Player.Position : default;
+
+            if (this.lifestream.TryAethernetTeleportById(shardId, out var accepted) && accepted)
+            {
+                this.anomalyLog.Info("Travel", $"「{shardName}」へ転送します（約 {gain:F0} 短縮）");
+                this.Step = ExchangeStep.AethernetHop;
+                this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(60);
+                this.StatusDetail = $"「{shardName}」へ転送しています";
+                return true;
+            }
+
+            // 受け付けられなかったら徒歩に切り替える。失敗にはしない。
+            this.anomalyLog.Info("Travel", $"「{shardName}」への転送は使えなかったため、徒歩で向かいます");
+        }
+
+        return this.BeginNavigation(definition, out failureReason);
+    }
+
+    /// <summary>移動を開始して状態を Navigate にする。</summary>
+    private bool BeginNavigation(ExchangeDefinition definition, out string failureReason)
+    {
+        // 配置ファイル由来の座標はナビメッシュに乗っていないことがある。
+        // 床にスナップできるならそちらを目的地にする。
+        var destination = definition.NpcPosition;
+        if (this.navigation.TrySnapToFloor(destination, out var snapped))
+        {
+            destination = snapped;
+        }
+
+        if (!this.navigation.BeginMove(destination, Plugin.C.NpcApproachRange, out failureReason))
+        {
+            return false;
+        }
+
+        this.navigationDestination = destination;
+        this.Step = ExchangeStep.Navigate;
+        this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(180);
+        this.StatusDetail = $"{definition.NpcName} のところへ移動しています";
+        return true;
+    }
+
+    /// <summary>エーテライト網の転送完了を待つ。</summary>
+    private void TickAethernetHop()
+    {
+        var target = this.travelTarget;
+        if (target is null)
+        {
+            this.Step = ExchangeStep.Idle;
+            return;
+        }
+
+        var busyKnown = this.lifestream.TryIsBusy(out var busy);
+        var moved = Player.Available && Vector3.DistanceSquared(Player.Position, this.hopStartPosition) > 100f;
+
+        // Lifestream の処理が終わり、実際に移動していれば完了とみなす。
+        if (busyKnown && !busy && moved && GenericHelpers.IsScreenReady() && Player.Interactable)
+        {
+            if (!this.BeginNavigation(target, out var navFailure))
+            {
+                this.Fail(ExchangeFailure.NavigationFailed, navFailure);
+            }
+
+            return;
+        }
+
+        if (DateTime.UtcNow > this.stepDeadlineUtc)
+        {
+            // 転送が完了しなくても徒歩で向かえばよい。失敗にはしない。
+            this.anomalyLog.Warn("Travel", "エーテライト網の転送が完了しなかったため、徒歩で向かいます");
+            if (!this.BeginNavigation(target, out var navFailure))
+            {
+                this.Fail(ExchangeFailure.NavigationFailed, navFailure);
+            }
+        }
+    }
+
+    /// <summary>
+    /// テレポート。
+    ///
+    /// Lifestream の IPC 版 Teleport は待機なしの経路を通るため、
+    /// 呼んだあと IsBusy() は true にならない。エリア遷移はこちらで待つ。
+    /// </summary>
+    private void TickTeleport()
+    {
+        var target = this.travelTarget;
+        if (target is null)
+        {
+            this.Step = ExchangeStep.Idle;
+            return;
+        }
+
+        // 到着したかを見る。読み込み中の状態では判定しない。
+        if (Svc.ClientState.TerritoryType == target.TerritoryId)
+        {
+            if (!GenericHelpers.IsScreenReady() || !Player.Available || !Player.Interactable)
+            {
+                return;
+            }
+
+            if (!this.BeginTravelToNpc(target, out var navFailure))
+            {
+                this.Fail(ExchangeFailure.NavigationFailed, navFailure);
+            }
+
+            return;
+        }
+
+        if (DateTime.UtcNow > this.stepDeadlineUtc)
+        {
+            this.Fail(ExchangeFailure.TeleportFailed, "テレポートがタイムアウトしました");
+            return;
+        }
+
+        // 詠唱中・操作不能のときは送らない
+        if (!Player.Available || Player.IsCasting || GenericHelpers.IsOccupied() || !GenericHelpers.IsScreenReady())
+        {
+            return;
+        }
+
+        if (this.lifestream.TryIsBusy(out var busy) && busy)
+        {
+            return;
+        }
+
+        // 送りすぎないよう間隔を空ける。回数にも上限を設ける。
+        if (!EzThrottler.Throttle("AutoCollector.Teleport", 3000))
+        {
+            return;
+        }
+
+        if (this.teleportAttempts >= 3)
+        {
+            this.Fail(ExchangeFailure.TeleportFailed, "テレポートを開始できませんでした");
+            return;
+        }
+
+        if (!this.aetheryte.TryFindTarget(target.TerritoryId, out var destination) || destination is null)
+        {
+            this.Fail(ExchangeFailure.AetheryteNotAttuned, "テレポート先のエーテライトが見つかりません");
+            return;
+        }
+
+        this.teleportAttempts++;
+
+        if (!this.lifestream.TryTeleport(destination.AetheryteId, destination.SubIndex, out var accepted))
+        {
+            this.Fail(ExchangeFailure.TeleportFailed, "Lifestream へテレポートを依頼できませんでした");
+            return;
+        }
+
+        if (!accepted)
+        {
+            this.anomalyLog.Warn("Teleport", $"{destination.Name} へのテレポートを受け付けてもらえませんでした（{this.teleportAttempts} 回目）");
+            return;
+        }
+
+        this.StatusDetail = $"{destination.Name} へテレポートしています";
+    }
+
     private void TickNavigate()
     {
         var target = this.travelTarget;
@@ -457,7 +693,7 @@ public sealed unsafe class ExchangeExecutor(
             return;
         }
 
-        var status = this.navigation.Tick(target.NpcPosition, Plugin.C.NpcApproachRange);
+        var status = this.navigation.Tick(this.navigationDestination, Plugin.C.NpcApproachRange);
 
         switch (status)
         {

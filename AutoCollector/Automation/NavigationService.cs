@@ -51,6 +51,29 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
 
     public bool IsAvailable => this.vnavmesh.IsLoaded;
 
+    /// <summary>
+    /// 目的地をナビメッシュ上の床へスナップする。
+    /// 配置ファイル由来の座標はメッシュに乗っていないことがあり、経路探索が失敗しやすい。
+    /// </summary>
+    public bool TrySnapToFloor(Vector3 position, out Vector3 snapped)
+    {
+        snapped = position;
+
+        if (!this.vnavmesh.TryPointOnFloor(position, out var result) || result is null)
+        {
+            return false;
+        }
+
+        // 大きく離れた場所を返された場合は採用しない。別の階層の床を拾うことがある。
+        if (Vector3.Distance(result.Value, position) > 10f)
+        {
+            return false;
+        }
+
+        snapped = result.Value;
+        return true;
+    }
+
     /// <summary>移動を開始する。1 回だけ発行し、以降は状態を監視するだけにする。</summary>
     public bool BeginMove(Vector3 destination, float range, out string failureReason)
     {

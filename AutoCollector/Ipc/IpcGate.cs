@@ -47,6 +47,9 @@ public abstract class IpcGateBase(string internalName, AnomalyLog anomalyLog)
     protected ICallGateSubscriber<T1, TRet> Func<T1, TRet>(string name)
         => Svc.PluginInterface.GetIpcSubscriber<T1, TRet>(name);
 
+    protected ICallGateSubscriber<T1, T2, TRet> Func<T1, T2, TRet>(string name)
+        => Svc.PluginInterface.GetIpcSubscriber<T1, T2, TRet>(name);
+
     protected ICallGateSubscriber<T1, T2, T3, TRet> Func<T1, T2, T3, TRet>(string name)
         => Svc.PluginInterface.GetIpcSubscriber<T1, T2, T3, TRet>(name);
 

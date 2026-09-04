@@ -599,13 +599,29 @@ public sealed class MainWindow(Plugin plugin)
         var sameArea = Svc.ClientState.TerritoryType == definition.TerritoryId;
         if (!sameArea)
         {
-            ImGui.TextColored(ImGuiColors.DalamudGrey, "別エリア");
-            if (ImGui.IsItemHovered())
+            // 別エリアならテレポートが必要になる。
+            // Lifestream が無いかエーテライト未アクセスなら、押せても失敗するので理由を出す。
+            if (!this.plugin.Lifestream.IsLoaded)
             {
-                ImGui.SetTooltip("テレポートは未実装です。同じエリアにいる必要があります。");
+                ImGui.TextColored(ImGuiColors.DalamudGrey, "Lifestream 未導入");
+                if (ImGui.IsItemHovered())
+                {
+                    ImGui.SetTooltip("別エリアへの移動には Lifestream が必要です。");
+                }
+
+                return;
             }
 
-            return;
+            if (!this.plugin.AetheryteService.CanReach(definition.TerritoryId))
+            {
+                ImGui.TextColored(ImGuiColors.DalamudGrey, "未アクセス");
+                if (ImGui.IsItemHovered())
+                {
+                    ImGui.SetTooltip($"{NpcLocationService.GetTerritoryName(definition.TerritoryId)} のエーテライトにアクセスしていないため、テレポートできません。");
+                }
+
+                return;
+            }
         }
 
         if (!executor.CanRequest)
@@ -626,7 +642,9 @@ public sealed class MainWindow(Plugin plugin)
 
         if (ImGui.IsItemHovered())
         {
-            ImGui.SetTooltip($"{definition.NpcName} まで移動して 1 個交換します。通貨を消費します。");
+            ImGui.SetTooltip(sameArea
+                ? $"{definition.NpcName} まで移動して 1 個交換します。通貨を消費します。"
+                : $"{NpcLocationService.GetTerritoryName(definition.TerritoryId)} へテレポートし、{definition.NpcName} まで移動して 1 個交換します。通貨を消費します。");
         }
     }
 
