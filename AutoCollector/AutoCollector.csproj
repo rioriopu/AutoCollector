@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project Sdk="Dalamud.NET.Sdk/15.0.0">
+
+  <!--
+    TargetFramework / LangVersion / Platforms / Nullable / AllowUnsafeBlocks /
+    DalamudLibPath / DalamudPackager の参照はすべて Dalamud.NET.Sdk の既定値を使う。
+    上書きすると SDK 更新に追従できなくなるため、ここでは書かない。
+  -->
+  <PropertyGroup>
+    <Version>0.1.0.0</Version>
+    <RootNamespace>AutoCollector</RootNamespace>
+    <AssemblyName>AutoCollector</AssemblyName>
+    <Description>通貨が閾値に到達したら自動処理を停止し、交換所へ移動して交換し、復帰する</Description>
+    <Authors>rioriopu</Authors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- manifest 本体。DalamudPackager が InternalName / AssemblyVersion / DalamudApiLevel を補完する -->
+    <Content Include="AutoCollector.json" />
+    <!--
+      補助データは出力へのコピー挙動に依存させたくないため埋め込みリソースにする。
+      初回起動時にプラグイン設定ディレクトリへ展開し、以後はユーザーが編集できる。
+    -->
+    <EmbeddedResource Include="Data\atkvalue_layout.json" />
+    <EmbeddedResource Include="Data\special_currency_map.json" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ECommons" Version="3.2.1.17" />
+  </ItemGroup>
+
+  <!-- Debug ビルドは dev プラグイン置き場へ直接出力する -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
+    <OutputPath>C:\DevPlugins\AutoCollector\</OutputPath>
+  </PropertyGroup>
+
+</Project>

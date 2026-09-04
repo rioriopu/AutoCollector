@@ -1,0 +1,19 @@
+{
+  "_comment": [
+    "ShopExchangeCurrency アドオンの AtkValues 配置。",
+    "この配置はゲーム／Dalamud のアップデートでずれることがあるため、コードに埋め込まず外出ししている。",
+    "ずれた場合、AtkReader が範囲外・型不一致で例外を出すか、ItemId 照合が不一致になって安全停止する。",
+    "誤った index で別のアイテムを購入することはない。復旧はこのファイルの数値を直すだけでよい。",
+    "既定値は ECommons 3.2.1.17 (2026-08-08) 時点の配置。"
+  ],
+  "ShopExchangeCurrency": {
+    "NumEntries": 4,
+    "CurrencyAmount": 86,
+    "CurrencyIcon": 87,
+    "EntryCost": 456,
+    "EntryItemId": 1066,
+    "EntryIndex": 1310,
+    "EntryStride": 1,
+    "MaxEntries": 240
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "Author": "rioriopu",
+  "Name": "Auto Collector",
+  "Punchline": "通貨が貯まったら自動で交換所へ行って交換する",
+  "Description": "通貨が閾値へ到達したら実行中の自動処理を安全に停止し、交換所へ移動して交換し、元の処理へ復帰します。\n\nAutoDuty / vnavmesh / Lifestream / AutoRetainer と連携しますが、いずれも必須ではありません。",
+  "ApplicableVersion": "any",
+  "RepoUrl": "https://github.com/rioriopu/AutoCollector",
+  "Tags": [
+    "automation",
+    "currency",
+    "exchange",
+    "tomestone"
+  ],
+  "LoadPriority": 0
+}
