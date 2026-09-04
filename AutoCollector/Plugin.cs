@@ -1,6 +1,7 @@
 using System;
 using AutoCollector.Automation;
 using AutoCollector.Diagnostics;
+using AutoCollector.Ipc;
 using AutoCollector.Game;
 using AutoCollector.Ui;
 using Dalamud.Plugin;
@@ -42,6 +43,12 @@ public sealed class Plugin : IDalamudPlugin
 
     internal ExchangeExecutor ExchangeExecutor { get; private set; } = null!;
 
+    internal AddonOwnershipTracker AddonOwnership { get; private set; } = null!;
+
+    internal VnavmeshIpc Vnavmesh { get; private set; } = null!;
+
+    internal MenuService MenuService { get; private set; } = null!;
+
     public Plugin(IDalamudPluginInterface pluginInterface)
     {
         P = this;
@@ -64,7 +71,18 @@ public sealed class Plugin : IDalamudPlugin
         this.ExchangeResolver = new ExchangeResolver(this.AnomalyLog, this.TomestoneService, this.NpcLocationService);
         this.ShopService = new ShopService(this.AnomalyLog, DataFileLoader.LoadShopLayout(this.AnomalyLog));
         this.CallbackRecorder = new CallbackRecorder(this.AnomalyLog);
-        this.ExchangeExecutor = new ExchangeExecutor(this.AnomalyLog, this.ShopService, this.CurrencyService, this.ExchangeResolver);
+        this.AddonOwnership = new AddonOwnershipTracker(this.AnomalyLog);
+        this.Vnavmesh = new VnavmeshIpc(this.AnomalyLog);
+        this.MenuService = new MenuService(this.AnomalyLog);
+        this.ExchangeExecutor = new ExchangeExecutor(
+            this.AnomalyLog,
+            this.ShopService,
+            this.CurrencyService,
+            this.ExchangeResolver,
+            new NavigationService(this.AnomalyLog, this.Vnavmesh),
+            new InteractionService(this.AnomalyLog),
+            this.MenuService,
+            this.AddonOwnership);
 
         Svc.Framework.Update += this.OnFrameworkUpdate;
 
@@ -177,6 +195,15 @@ public sealed class Plugin : IDalamudPlugin
         // ハンドラの解除を最優先で行う。ここが漏れると
         // AutomaticReloading 時に古いインスタンスが動き続ける。
         Svc.Framework.Update -= this.OnFrameworkUpdate;
+
+        try
+        {
+            this.AddonOwnership?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            Svc.Log.Error($"[Auto Collector] ウィンドウ追跡の解放に失敗しました: {ex}");
+        }
 
         try
         {

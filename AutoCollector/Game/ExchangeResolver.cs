@@ -36,6 +36,9 @@ public sealed class ExchangeResolver(AnomalyLog anomalyLog, TomestoneService tom
     /// <summary>構築中の一時データ: ShopId → その ShopId を持つ NPC の集合。</summary>
     private readonly Dictionary<uint, List<NpcHandlerRecord>> shopToNpcs = [];
 
+    /// <summary>ShopId → SpecialShop.Name。会話メニューの選択肢と照合するために保持する。</summary>
+    private readonly Dictionary<uint, string> shopNames = [];
+
     private List<ExchangeDefinition> results = [];
     private IReadOnlyList<ExchangeDefinition>? liveResults;
     private uint targetCurrencyItemId;
@@ -54,6 +57,7 @@ public sealed class ExchangeResolver(AnomalyLog anomalyLog, TomestoneService tom
     {
         this.shopEntries.Clear();
         this.shopToNpcs.Clear();
+        this.shopNames.Clear();
         this.results = [];
         this.liveResults = null;
         this.targetCurrencyItemId = currencyItemId;
@@ -174,6 +178,7 @@ public sealed class ExchangeResolver(AnomalyLog anomalyLog, TomestoneService tom
                     if (!this.shopEntries.TryGetValue(shop.RowId, out var list))
                     {
                         this.shopEntries[shop.RowId] = list = [];
+                        this.shopNames[shop.RowId] = shop.Name.ExtractText();
                     }
 
                     list.Add(new ShopEntryRecord(
@@ -442,6 +447,7 @@ public sealed class ExchangeResolver(AnomalyLog anomalyLog, TomestoneService tom
                         CostType = entry.CostType,
                         SingleReward = entry.SingleReward,
                         SingleCost = entry.SingleCost,
+                        ShopName = this.shopNames.GetValueOrDefault(shopId, string.Empty),
                     });
                     continue;
                 }
@@ -462,6 +468,7 @@ public sealed class ExchangeResolver(AnomalyLog anomalyLog, TomestoneService tom
                         CostType = entry.CostType,
                         SingleReward = entry.SingleReward,
                         SingleCost = entry.SingleCost,
+                        ShopName = this.shopNames.GetValueOrDefault(shopId, string.Empty),
                         NpcDataId = npc.NpcId,
                         NpcName = NpcLocationService.GetName(npc.NpcId),
                         TerritoryId = hasLocation ? location.TerritoryId : 0,
