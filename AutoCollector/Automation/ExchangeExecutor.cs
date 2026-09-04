@@ -18,6 +18,15 @@ public enum ExchangeStep
 {
     Idle,
 
+    /// <summary>NPC のいる場所へ移動している。</summary>
+    Navigate,
+
+    /// <summary>NPC に話しかけている。</summary>
+    Interact,
+
+    /// <summary>会話メニューを通過している。</summary>
+    SelectMenu,
+
     /// <summary>次の Framework.Update で事前条件を評価し、通れば発火する。</summary>
     Armed,
 
@@ -61,6 +70,14 @@ public enum ExchangeFailure
     ConfirmDialogTimeout,
     ConfirmDialogUnexpected,
     ConfirmDialogNotConfirmable,
+    NavigationUnavailable,
+    NavigationFailed,
+    NpcNotFound,
+    WrongTerritory,
+    InteractFailed,
+    MenuResolutionFailed,
+    MenuAmbiguous,
+    NotSafeToStart,
 }
 
 /// <summary>
@@ -109,7 +126,11 @@ public sealed unsafe class ExchangeExecutor(
     AnomalyLog anomalyLog,
     ShopService shopService,
     CurrencyService currencyService,
-    ExchangeResolver resolver)
+    ExchangeResolver resolver,
+    NavigationService navigation,
+    InteractionService interaction,
+    MenuService menu,
+    AddonOwnershipTracker ownership)
 {
     /// <summary>交換コマンド。0 が購入であることの根拠は実測のみ。他の用途に流用しない。</summary>
     private const int ExchangeCommand = 0;
@@ -130,6 +151,14 @@ public sealed unsafe class ExchangeExecutor(
     private readonly ShopService shopService = shopService;
     private readonly CurrencyService currencyService = currencyService;
     private readonly ExchangeResolver resolver = resolver;
+    private readonly NavigationService navigation = navigation;
+    private readonly InteractionService interaction = interaction;
+    private readonly MenuService menu = menu;
+    private readonly AddonOwnershipTracker ownership = ownership;
+
+    /// <summary>移動から始める場合の対象。null なら手動でショップを開いた状態からの実行。</summary>
+    private ExchangeDefinition? travelTarget;
+    private DateTime stepDeadlineUtc;
 
     private ExchangeDefinition? pendingRequest;
     private DateTime outcomeDeadlineUtc;
@@ -196,15 +225,116 @@ public sealed unsafe class ExchangeExecutor(
         }
     }
 
-    /// <summary>緊急停止。発火経路を封鎖する。inFlight はクリアしない。</summary>
+    /// <summary>
+    /// 緊急停止。発火経路を封鎖してから後始末する。
+    /// inFlight はクリアしない（結果が未確認のまま残す）。
+    /// </summary>
     public void Abort(string reason)
     {
+        // 何よりも先に封鎖する
         this.aborted = true;
         this.pendingRequest = null;
+        this.travelTarget = null;
+
+        this.Cleanup();
 
         if (this.Step is not (ExchangeStep.Idle or ExchangeStep.Done))
         {
             this.Fail(ExchangeFailure.Aborted, $"停止しました: {reason}");
+        }
+    }
+
+    /// <summary>
+    /// 自分が握った制御だけを解放する。
+    ///
+    /// 各手順はべき等で、失敗しても次の手順を止めない。
+    /// 内側（ダイアログ）から外側（ショップ）の順に閉じる。
+    /// 逆順にするとダイアログだけが孤立して残る。
+    ///
+    /// 自分が開いたウィンドウでなければ触らない。
+    /// 他プラグインやユーザーが手動で開いたものを閉じると、そちらの操作を壊す。
+    /// </summary>
+    public void Cleanup()
+    {
+        // 1. 自分が開始した移動だけを止める
+        try
+        {
+            this.navigation.Stop();
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Warn("Cleanup", $"移動を停止できませんでした: {ex.Message}");
+        }
+
+        // 2. エリアが変わっているならウィンドウは既に破棄されている。触ってはいけない。
+        var territoryChanged = this.travelTarget is not null && Svc.ClientState.TerritoryType != this.travelTarget.TerritoryId;
+
+        if (!territoryChanged)
+        {
+            // 3. 内側のダイアログ。確認ダイアログは絶対に Yes を押さない。
+            this.CloseOwned("SelectYesno", useCloseFirst: false);
+            this.CloseOwned("ShopExchangeCurrencyDialog", useCloseFirst: false);
+
+            // 4. ショップ本体
+            this.CloseOwned("ShopExchangeCurrency", useCloseFirst: true);
+
+            // 5. 会話メニューの残骸
+            this.CloseOwned("SelectString", useCloseFirst: false);
+            this.CloseOwned("SelectIconString", useCloseFirst: false);
+        }
+        else
+        {
+            this.anomalyLog.Info("Cleanup", "エリアが変わっているため、ウィンドウの操作は行いません");
+        }
+
+        // 6. ターゲット解除
+        try
+        {
+            Svc.Targets.Target = null;
+        }
+        catch
+        {
+            // 解除できなくても続行する
+        }
+
+        this.ownership.Clear();
+    }
+
+    /// <summary>
+    /// 自分が開いたウィンドウなら閉じる。そうでなければ何もしない。
+    ///
+    /// ショップ本体は Close(true) を先に試す。
+    /// Callback.Fire(addon, true, -1) は購入コマンドと同じ経路を通るため、
+    /// 値の取り違えが購入として解釈される余地がある。誤爆しにくい方を先にする。
+    /// </summary>
+    private void CloseOwned(string addonName, bool useCloseFirst)
+    {
+        if (!this.ownership.TryGetOwned(addonName, out var addon))
+        {
+            if (GenericHelpers.TryGetAddonByName<AtkUnitBase>(addonName, out var foreign) && GenericHelpers.IsAddonReady(foreign))
+            {
+                this.anomalyLog.Info("Cleanup", $"{addonName} は自分が開いたものではないため閉じません");
+            }
+
+            return;
+        }
+
+        try
+        {
+            if (useCloseFirst)
+            {
+                addon->Close(true);
+            }
+            else
+            {
+                Callback.Fire(addon, true, -1);
+            }
+
+            this.anomalyLog.Info("Cleanup", $"{addonName} を閉じました");
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Warn("Cleanup", $"{addonName} を閉じられませんでした: {ex.Message}");
         }
     }
 
@@ -218,11 +348,79 @@ public sealed unsafe class ExchangeExecutor(
         }
     }
 
+    /// <summary>
+    /// NPC のところまで移動してから交換する。
+    /// テレポートは行わないため、同じエリアにいる必要がある。
+    /// </summary>
+    public bool RequestWithTravel(ExchangeDefinition definition, out string reason)
+    {
+        if (!this.Request(definition, out reason))
+        {
+            return false;
+        }
+
+        if (!definition.HasLocation)
+        {
+            this.pendingRequest = null;
+            this.Fail(ExchangeFailure.NpcNotFound, "この交換先は NPC の座標が解決できていません");
+            reason = this.StatusDetail;
+            return false;
+        }
+
+        if (Svc.ClientState.TerritoryType != definition.TerritoryId)
+        {
+            this.pendingRequest = null;
+            this.Fail(
+                ExchangeFailure.WrongTerritory,
+                $"交換先は {NpcLocationService.GetTerritoryName(definition.TerritoryId)} です。テレポートは未実装のため、同じエリアにいる必要があります");
+            reason = this.StatusDetail;
+            return false;
+        }
+
+        if (!this.navigation.IsAvailable)
+        {
+            this.pendingRequest = null;
+            this.Fail(ExchangeFailure.NavigationUnavailable, "vnavmesh が導入されていないため移動できません");
+            reason = this.StatusDetail;
+            return false;
+        }
+
+        // 移動から始めるので、Armed ではなく Navigate から入る。
+        this.pendingRequest = null;
+        this.travelTarget = definition;
+        this.ownership.Clear();
+        this.ownership.IsClaiming = true;
+
+        if (!this.navigation.BeginMove(definition.NpcPosition, Plugin.C.NpcApproachRange, out var navFailure))
+        {
+            this.Fail(ExchangeFailure.NavigationFailed, navFailure);
+            reason = this.StatusDetail;
+            return false;
+        }
+
+        this.Step = ExchangeStep.Navigate;
+        this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(180);
+        this.StatusDetail = $"{definition.NpcName} のところへ移動しています";
+        return true;
+    }
+
     /// <summary>Framework.Update から毎フレーム呼ぶ。</summary>
     public void Tick()
     {
         switch (this.Step)
         {
+            case ExchangeStep.Navigate:
+                this.TickNavigate();
+                break;
+
+            case ExchangeStep.Interact:
+                this.TickInteract();
+                break;
+
+            case ExchangeStep.SelectMenu:
+                this.TickSelectMenu();
+                break;
+
             case ExchangeStep.Armed:
                 this.TickArmed();
                 break;
@@ -239,6 +437,181 @@ public sealed unsafe class ExchangeExecutor(
                 this.TickCancelDialog();
                 break;
         }
+    }
+
+    private void TickNavigate()
+    {
+        var target = this.travelTarget;
+        if (target is null)
+        {
+            this.Step = ExchangeStep.Idle;
+            return;
+        }
+
+        // ショップがもう開いているなら移動は不要。
+        if (this.shopService.IsShopOpen())
+        {
+            this.navigation.Stop();
+            this.pendingRequest = target;
+            this.Step = ExchangeStep.Armed;
+            return;
+        }
+
+        var status = this.navigation.Tick(target.NpcPosition, Plugin.C.NpcApproachRange);
+
+        switch (status)
+        {
+            case MoveStatus.Arrived:
+                this.navigation.Stop();
+                this.Step = ExchangeStep.Interact;
+                this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(30);
+                this.StatusDetail = $"{target.NpcName} に話しかけています";
+                return;
+
+            case MoveStatus.Stuck:
+                this.navigation.Stop();
+                this.Fail(ExchangeFailure.NavigationFailed, "移動が進まなくなりました");
+                return;
+
+            case MoveStatus.Failed:
+                this.navigation.Stop();
+                this.Fail(ExchangeFailure.NavigationFailed, "移動に失敗しました");
+                return;
+        }
+
+        if (DateTime.UtcNow > this.stepDeadlineUtc)
+        {
+            this.navigation.Stop();
+            this.Fail(ExchangeFailure.NavigationFailed, "移動がタイムアウトしました");
+        }
+    }
+
+    private void TickInteract()
+    {
+        var target = this.travelTarget;
+        if (target is null)
+        {
+            this.Step = ExchangeStep.Idle;
+            return;
+        }
+
+        // ショップが開いたら事前条件の評価へ進む。
+        if (this.shopService.IsShopOpen())
+        {
+            this.pendingRequest = target;
+            this.Step = ExchangeStep.Armed;
+            return;
+        }
+
+        // 会話メニューが出たらそちらを処理する。
+        if (this.menu.IsMenuOpen())
+        {
+            this.Step = ExchangeStep.SelectMenu;
+            this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(45);
+            this.StatusDetail = "会話メニューを処理しています";
+            return;
+        }
+
+        if (this.interaction.TryFindNpc(target.NpcDataId, out var npc) && npc is not null)
+        {
+            this.interaction.StepInteract(npc);
+        }
+        else if (DateTime.UtcNow > this.stepDeadlineUtc)
+        {
+            this.Fail(ExchangeFailure.NpcNotFound, $"{target.NpcName} が見つかりません");
+            return;
+        }
+
+        if (DateTime.UtcNow > this.stepDeadlineUtc)
+        {
+            this.Fail(ExchangeFailure.InteractFailed, "話しかけてもショップが開きませんでした");
+        }
+    }
+
+    private void TickSelectMenu()
+    {
+        var target = this.travelTarget;
+        if (target is null)
+        {
+            this.Step = ExchangeStep.Idle;
+            return;
+        }
+
+        if (this.shopService.IsShopOpen())
+        {
+            this.pendingRequest = target;
+            this.Step = ExchangeStep.Armed;
+            return;
+        }
+
+        if (!this.menu.IsMenuOpen())
+        {
+            // 閉じただけかもしれないので、対話からやり直す。
+            this.Step = ExchangeStep.Interact;
+            this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(30);
+            return;
+        }
+
+        // ヒントの候補を順に試す。
+        //
+        // NPC が複数のショップを持つ場合、話しかけると SpecialShop.Name が選択肢として並ぶ。
+        // TopicSelect を経由する場合は、先に話題を選んでからショップ名の一覧になることもある。
+        // メニューは開いている限り毎フレームここへ来るため、候補を順に試すだけで多段のメニューも通過できる。
+        var candidates = new List<string>();
+        if (!string.IsNullOrWhiteSpace(target.ShopName))
+        {
+            candidates.Add(target.ShopName);
+        }
+
+        if (!string.IsNullOrWhiteSpace(target.MenuHint))
+        {
+            candidates.Add(target.MenuHint);
+        }
+
+        if (candidates.Count == 0)
+        {
+            var entries = this.menu.ListEntries();
+            this.Fail(
+                ExchangeFailure.MenuResolutionFailed,
+                $"会話メニューのどれを選ぶべきか分かりません。選択肢: {string.Join(" / ", entries)}");
+            return;
+        }
+
+        var ambiguous = false;
+
+        foreach (var hint in candidates)
+        {
+            if (this.menu.TrySelectByText(hint, out var failure))
+            {
+                this.StatusDetail = $"「{hint}」を選びました";
+                return;
+            }
+
+            if (failure == MenuSelectFailure.Ambiguous)
+            {
+                ambiguous = true;
+            }
+        }
+
+        if (DateTime.UtcNow <= this.stepDeadlineUtc)
+        {
+            // まだ猶予がある。メニューが切り替わる途中の可能性もあるので待つ。
+            return;
+        }
+
+        var shown = this.menu.ListEntries();
+
+        if (ambiguous)
+        {
+            this.Fail(
+                ExchangeFailure.MenuAmbiguous,
+                $"選択肢を 1 つに絞れませんでした。候補: {string.Join(" / ", candidates)} / 選択肢: {string.Join(" / ", shown)}");
+            return;
+        }
+
+        this.Fail(
+            ExchangeFailure.MenuResolutionFailed,
+            $"一致する選択肢がありません。候補: {string.Join(" / ", candidates)} / 選択肢: {string.Join(" / ", shown)}");
     }
 
     /// <summary>
@@ -506,6 +879,8 @@ public sealed unsafe class ExchangeExecutor(
             this.Step = ExchangeStep.Done;
             this.Failure = ExchangeFailure.None;
             this.StatusDetail = attempt.Outcome;
+            this.travelTarget = null;
+            this.ownership.Clear();
             return true;
         }
 

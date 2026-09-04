@@ -69,7 +69,15 @@ public sealed record ExchangeDefinition
 
     public HandlerPath Path { get; init; } = HandlerPath.Direct;
 
-    /// <summary>SelectString 等で選択肢を絞るためのヒント文字列。</summary>
+    /// <summary>
+    /// SpecialShop.Name。
+    ///
+    /// NPC が複数のショップを持つ場合、話しかけると選択肢としてこの名前が並ぶ。
+    /// 会話メニューを通過する際の第一候補として使う。
+    /// </summary>
+    public string ShopName { get; init; } = string.Empty;
+
+    /// <summary>TopicSelect.Name / CustomTalk.MainOption 由来のヒント。ショップ名で決まらないときの候補。</summary>
     public string? MenuHint { get; init; }
 
     /// <summary>NPC の座標が解決できているか。false のものは自動実行の対象にしない。</summary>

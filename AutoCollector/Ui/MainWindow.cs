@@ -8,6 +8,7 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Colors;
 using Dalamud.Interface.Utility.Raii;
 using ECommons.Configuration;
+using ECommons.DalamudServices;
 
 namespace AutoCollector.Ui;
 
@@ -521,7 +522,7 @@ public sealed class MainWindow(Plugin plugin)
                 continue;
             }
 
-            using var table = ImRaii.Table($"##defs{group.RewardItemId}", 6, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp);
+            using var table = ImRaii.Table($"##defs{group.RewardItemId}", 7, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp);
             if (!table)
             {
                 continue;
@@ -533,6 +534,7 @@ public sealed class MainWindow(Plugin plugin)
             ImGui.TableSetupColumn("エリア");
             ImGui.TableSetupColumn("座標", ImGuiTableColumnFlags.WidthFixed, 150f);
             ImGui.TableSetupColumn("経路", ImGuiTableColumnFlags.WidthFixed, 90f);
+            ImGui.TableSetupColumn("実行", ImGuiTableColumnFlags.WidthFixed, 130f);
             ImGui.TableHeadersRow();
 
             foreach (var def in group.Definitions)
@@ -569,12 +571,62 @@ public sealed class MainWindow(Plugin plugin)
                 {
                     ImGui.SetTooltip($"選択肢ヒント: {def.MenuHint}\nShopId: {def.ShopId}");
                 }
+
+                ImGui.TableNextColumn();
+                this.DrawTravelButton(def);
             }
         }
 
         if (filtered.Count > 300)
         {
             ImGui.TextColored(ImGuiColors.DalamudYellow, $"{filtered.Count - 300} 件は表示していません。絞り込んでください。");
+        }
+    }
+
+    /// <summary>
+    /// NPC のところまで移動して交換する。同じエリアにいる必要がある（テレポート未実装）。
+    /// </summary>
+    private void DrawTravelButton(ExchangeDefinition definition)
+    {
+        var executor = this.plugin.ExchangeExecutor;
+
+        if (!definition.HasLocation)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudGrey, "座標未解決");
+            return;
+        }
+
+        var sameArea = Svc.ClientState.TerritoryType == definition.TerritoryId;
+        if (!sameArea)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudGrey, "別エリア");
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip("テレポートは未実装です。同じエリアにいる必要があります。");
+            }
+
+            return;
+        }
+
+        if (!executor.CanRequest)
+        {
+            ImGui.BeginDisabled();
+            ImGui.Button($"行って交換##travel{definition.ShopId}_{definition.RewardItemId}_{definition.NpcDataId}");
+            ImGui.EndDisabled();
+            return;
+        }
+
+        if (ImGui.Button($"行って交換##travel{definition.ShopId}_{definition.RewardItemId}_{definition.NpcDataId}"))
+        {
+            if (!executor.RequestWithTravel(definition, out var reason))
+            {
+                this.plugin.AnomalyLog.Warn("Exchange", reason);
+            }
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip($"{definition.NpcName} まで移動して 1 個交換します。通貨を消費します。");
         }
     }
 
