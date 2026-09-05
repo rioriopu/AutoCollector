@@ -41,6 +41,8 @@ public sealed class Plugin : IDalamudPlugin
 
     internal ShopService ShopService { get; private set; } = null!;
 
+    internal InclusionShopService InclusionShopService { get; private set; } = null!;
+
     internal CallbackRecorder CallbackRecorder { get; private set; } = null!;
 
     internal ExchangeExecutor ExchangeExecutor { get; private set; } = null!;
@@ -58,6 +60,10 @@ public sealed class Plugin : IDalamudPlugin
     internal AutoDutyIpc AutoDuty { get; private set; } = null!;
 
     internal AutoRetainerIpc AutoRetainer { get; private set; } = null!;
+
+    internal ArtisanIpc Artisan { get; private set; } = null!;
+
+    internal ExternalAutomationGate AutomationGate { get; private set; } = null!;
 
     internal MonitorService MonitorService { get; private set; } = null!;
 
@@ -83,6 +89,7 @@ public sealed class Plugin : IDalamudPlugin
         this.SpecialCurrencyMap = new SpecialCurrencyMap(this.AnomalyLog);
         this.ExchangeResolver = new ExchangeResolver(this.AnomalyLog, this.TomestoneService, this.NpcLocationService, this.SpecialCurrencyMap);
         this.ShopService = new ShopService(this.AnomalyLog, DataFileLoader.LoadShopLayout(this.AnomalyLog));
+        this.InclusionShopService = new InclusionShopService(this.AnomalyLog, this.SpecialCurrencyMap);
         this.CallbackRecorder = new CallbackRecorder(this.AnomalyLog);
         this.AddonOwnership = new AddonOwnershipTracker(this.AnomalyLog);
         this.Vnavmesh = new VnavmeshIpc(this.AnomalyLog);
@@ -91,6 +98,8 @@ public sealed class Plugin : IDalamudPlugin
         this.AetheryteService = new AetheryteService(this.AnomalyLog);
         this.AutoDuty = new AutoDutyIpc(this.AnomalyLog);
         this.AutoRetainer = new AutoRetainerIpc(this.AnomalyLog);
+        this.Artisan = new ArtisanIpc(this.AnomalyLog);
+        this.AutomationGate = new ExternalAutomationGate(this.AutoDuty, this.Artisan);
         this.ExchangeExecutor = new ExchangeExecutor(
             this.AnomalyLog,
             this.ShopService,
@@ -109,7 +118,8 @@ public sealed class Plugin : IDalamudPlugin
             this.CurrencyService,
             this.TomestoneService,
             this.ExchangeResolver,
-            this.ExchangeExecutor);
+            this.ExchangeExecutor,
+            this.AutomationGate);
 
         Svc.Framework.Update += this.OnFrameworkUpdate;
 
@@ -118,6 +128,9 @@ public sealed class Plugin : IDalamudPlugin
 
         EzCmd.Add(MainCommand, this.OnCommand, "Auto Collector を開く。/autocollector stop で緊急停止");
         this.TryRegisterShortCommand();
+
+        // 特殊通貨の対応表はクライアントが持っている。ログイン後に取得し直す。
+        this.SpecialCurrencyMap.RefreshFromClient();
 
         this.SelfCheck.RunAll();
 
@@ -180,18 +193,41 @@ public sealed class Plugin : IDalamudPlugin
     /// <summary>
     /// 毎フレームの処理。重い処理はここで budget を切って少しずつ進める。
     /// </summary>
+    /// <summary>
+    /// 状態機械を回す間隔。
+    ///
+    /// 毎フレーム回す必要はない。交換の発火は「読み取りから発火までを 1 回の呼び出しで
+    /// 完結させる」ことが要件であって、呼ばれる頻度とは関係がない。
+    /// 移動やダイアログの処理も、100 ミリ秒遅れて体感差は出ない。
+    /// </summary>
+    private static readonly TimeSpan TickInterval = TimeSpan.FromMilliseconds(100);
+
+    private DateTime nextTickUtc = DateTime.MinValue;
+
     private void OnFrameworkUpdate(IFramework framework)
     {
         try
         {
-            // 索引構築は 1 フレームあたりの処理量を制限して進める。
-            // NPC 配置の索引が先に完成していないと、交換定義に座標を付けられない。
+            // 索引構築だけは毎フレーム進める。1 フレームあたりの処理量を制限してあるため、
+            // 呼ぶ回数を減らすとその分だけ完成が遅れる。完成後は即座に戻る。
             if (!this.NpcLocationService.TickBuild())
             {
                 return;
             }
 
-            this.ExchangeResolver.TickBuild();
+            if (!this.ExchangeResolver.TickBuild())
+            {
+                return;
+            }
+
+            var now = DateTime.UtcNow;
+            if (now < this.nextTickUtc)
+            {
+                return;
+            }
+
+            this.nextTickUtc = now.Add(TickInterval);
+
             this.ExchangeExecutor.Tick();
             this.MonitorService.Tick();
         }

@@ -25,19 +25,37 @@ public abstract class IpcGateBase(string internalName, AnomalyLog anomalyLog)
 
     public string InternalName { get; } = internalName;
 
-    /// <summary>プラグインが読み込まれているか。未導入なら該当機能を無効にする。</summary>
+    private bool loadedCache;
+    private DateTime loadedCacheExpiry = DateTime.MinValue;
+
+    /// <summary>
+    /// プラグインが読み込まれているか。未導入なら該当機能を無効にする。
+    ///
+    /// この判定は IPC 呼び出しのたびに走る。導入済みプラグイン一覧の走査は
+    /// 呼ぶたびに行うには重いので、短時間キャッシュする。
+    /// 導入状態が数秒遅れて反映されても実害はない。
+    /// </summary>
     public bool IsLoaded
     {
         get
         {
+            var now = DateTime.UtcNow;
+            if (now <= this.loadedCacheExpiry)
+            {
+                return this.loadedCache;
+            }
+
             try
             {
-                return Svc.PluginInterface.InstalledPlugins.Any(x => x.InternalName == this.InternalName && x.IsLoaded);
+                this.loadedCache = Svc.PluginInterface.InstalledPlugins.Any(x => x.InternalName == this.InternalName && x.IsLoaded);
             }
             catch
             {
-                return false;
+                this.loadedCache = false;
             }
+
+            this.loadedCacheExpiry = now.AddSeconds(5);
+            return this.loadedCache;
         }
     }
 

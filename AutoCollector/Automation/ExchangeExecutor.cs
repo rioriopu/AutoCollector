@@ -6,6 +6,7 @@ using AutoCollector.Diagnostics;
 using AutoCollector.Game;
 using AutoCollector.Ipc;
 using ECommons;
+using Dalamud.Game.ClientState.Conditions;
 using ECommons.Automation;
 using ECommons.Configuration;
 using ECommons.DalamudServices;
@@ -201,6 +202,15 @@ public sealed unsafe class ExchangeExecutor(
     private static readonly TimeSpan OutcomeTimeout = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan DialogTimeout = TimeSpan.FromSeconds(10);
 
+    /// <summary>
+    /// 連続して交換するときに、次を撃つまで待つ時間。
+    ///
+    /// サーバーからの反映は通貨と報酬で届く順序が前後する。
+    /// 間を置かずに次を撃つと、前回の反映が終わる前に次の検証が始まり、
+    /// 成功しているのに「想定外の変化」と誤判定する。
+    /// </summary>
+    private static readonly TimeSpan SettleBetweenExchanges = TimeSpan.FromMilliseconds(1200);
+
     /// <summary>発火前にこれらが開いていたら撃たない。</summary>
     private static readonly string[] BlockingAddons =
     [
@@ -225,9 +235,25 @@ public sealed unsafe class ExchangeExecutor(
     private Vector3 hopStartPosition;
     private Vector3 navigationDestination;
     private int reapproachAttempts;
+    private int destinationUpdates;
     private ReturnContext? returnContext;
     private ExchangeSession? session;
     private DateTime lastWaitLogUtc;
+
+    /// <summary>待機中に観測した Duty のエリア。AutoDuty を再開するときに渡す。</summary>
+    private uint observedDutyTerritoryId;
+    private DateTime autoDutySettleDeadlineUtc = DateTime.MinValue;
+    private bool wasInDuty;
+    private int stopAttempts;
+
+    /// <summary>一時停止が使えないことが分かったか。分かったら Stop へ切り替える。</summary>
+    private bool pauseUnavailable;
+
+    /// <summary>一時停止の直後、実際に動きが止まるまでの猶予。</summary>
+    private DateTime pauseSettleUntilUtc = DateTime.MinValue;
+
+    /// <summary>ループ間処理の中で AutoRetainer が実際に動いたのを観測したか。</summary>
+    private bool retainerWorkSeen;
 
     /// <summary>移動から始める場合の対象。null なら手動でショップを開いた状態からの実行。</summary>
     private ExchangeDefinition? travelTarget;
@@ -235,6 +261,7 @@ public sealed unsafe class ExchangeExecutor(
 
     private ExchangeDefinition? pendingRequest;
     private DateTime outcomeDeadlineUtc;
+    private DateTime nextArmedAllowedUtc;
     private DateTime dialogDeadlineUtc;
     private bool aborted;
 
@@ -284,6 +311,91 @@ public sealed unsafe class ExchangeExecutor(
         return true;
     }
 
+    private static ulong TryGetContentId()
+    {
+        try
+        {
+            return Svc.PlayerState.ContentId;
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    /// <summary>本プラグインが AutoDuty を一時停止させているか。</summary>
+    public bool IsAutoDutyPaused => this.returnContext is { PausedAutoDuty: true };
+
+    /// <summary>
+    /// 直前に記録した再開先。UI から手動で再開するときに使う。
+    /// </summary>
+    public uint LastResumeTerritoryId => this.returnContext?.AutoDutyTerritoryId ?? this.observedDutyTerritoryId;
+
+    /// <summary>手動で AutoDuty を再開する。</summary>
+    public bool TryResumeAutoDutyManually(out string reason)
+    {
+        // 一時停止で止めている場合は、解除するだけで元の周回に戻る。
+        if (this.returnContext is { PausedAutoDuty: true } paused && this.autoDuty.IsLoaded)
+        {
+            if (!this.autoDuty.TryResume())
+            {
+                reason = "AutoDuty の一時停止を解除できませんでした";
+                return false;
+            }
+
+            paused.PausedAutoDuty = false;
+            this.anomalyLog.Info("AutoDuty", "AutoDuty の一時停止を解除しました");
+            reason = string.Empty;
+            return true;
+        }
+
+        var territory = this.LastResumeTerritoryId;
+
+        if (territory == 0)
+        {
+            reason = "再開先のエリアが分かりません";
+            return false;
+        }
+
+        if (!this.autoDuty.IsLoaded)
+        {
+            reason = "AutoDuty が導入されていません";
+            return false;
+        }
+
+        if (!this.autoDuty.TryContentHasPath(territory, out var hasPath) || !hasPath)
+        {
+            reason = $"{NpcLocationService.GetTerritoryName(territory)} に AutoDuty の経路がありません";
+            return false;
+        }
+
+        if (!this.autoDuty.TryRun(territory))
+        {
+            reason = "AutoDuty へ再開を依頼できませんでした";
+            return false;
+        }
+
+        this.anomalyLog.Info("AutoDuty", $"{NpcLocationService.GetTerritoryName(territory)} で AutoDuty を再開しました");
+        reason = string.Empty;
+        return true;
+    }
+
+    /// <summary>エラー状態を解除して、また実行できるようにする。</summary>
+    public void ResetAfterError()
+    {
+        if (this.Step != ExchangeStep.Error)
+        {
+            return;
+        }
+
+        this.Step = ExchangeStep.Idle;
+        this.Failure = ExchangeFailure.None;
+        this.StatusDetail = string.Empty;
+        this.aborted = false;
+
+        this.autoRetainer.Release();
+    }
+
     /// <summary>結果未確定の記録を、ユーザーの確認を経てクリアする。</summary>
     public void ClearInFlight()
     {
@@ -295,6 +407,10 @@ public sealed unsafe class ExchangeExecutor(
         this.anomalyLog.Warn("Exchange", "結果未確認の交換記録をユーザー操作でクリアしました");
         Plugin.C.InFlight = null;
         EzConfig.Save();
+
+        // ここへ来る経路によっては抑制が残っている可能性がある。
+        // 抑制したまま放置すると AutoRetainer が動かなくなるため、必ず解く。
+        this.autoRetainer.Release();
 
         if (this.Step == ExchangeStep.Error)
         {
@@ -475,6 +591,18 @@ public sealed unsafe class ExchangeExecutor(
             return false;
         }
 
+        // InclusionShop（スクリップ交換など）は画面の操作方法が違い、まだ実行に対応していない。
+        // 移動して話しかけたところで交換できないため、始める前に断る。
+        if (definition.UsesInclusionShop)
+        {
+            this.pendingRequest = null;
+            this.Fail(
+                ExchangeFailure.ShopMismatch,
+                "この交換所（アイテム交換画面）はまだ自動実行に対応していません。手動で交換してください");
+            reason = this.StatusDetail;
+            return false;
+        }
+
         var needsTeleport = Svc.ClientState.TerritoryType != definition.TerritoryId;
 
         if (needsTeleport)
@@ -514,6 +642,13 @@ public sealed unsafe class ExchangeExecutor(
         this.session = session;
         this.aethernetTried = false;
         this.reapproachAttempts = 0;
+        this.destinationUpdates = 0;
+        this.nextArmedAllowedUtc = DateTime.MinValue;
+        this.autoDutySettleDeadlineUtc = DateTime.MinValue;
+        this.stopAttempts = 0;
+        this.wasInDuty = false;
+        this.retainerWorkSeen = false;
+        this.pauseSettleUntilUtc = DateTime.MinValue;
         this.ownership.Clear();
         this.ownership.IsClaiming = true;
 
@@ -599,6 +734,25 @@ public sealed unsafe class ExchangeExecutor(
             return;
         }
 
+        // Duty 中に待たされている間に、そのエリアを覚えておく。
+        // ここで記録しておかないと、あとで AutoDuty を再開するときに渡すエリアが分からない。
+        if (Player.IsInDuty)
+        {
+            var current = Svc.ClientState.TerritoryType;
+            if (current != 0 && current != this.observedDutyTerritoryId)
+            {
+                this.observedDutyTerritoryId = current;
+            }
+
+            // 新しい周回が始まった。ループ間処理の待機期限を引き直す。
+            //
+            // ここでリセットしないと、前の周回で使い切った期限が残ったまま次の周回に入り、
+            // 「上限に達した」と判断してループ間処理の直前に割り込んでしまう。
+            // 実際にこれが原因で、交換とリテイナー処理が周回ごとに交互になっていた。
+            this.autoDutySettleDeadlineUtc = DateTime.MinValue;
+            this.wasInDuty = true;
+        }
+
         if (!SafetyGuard.IsSafeToStart(out var reason))
         {
             this.StatusDetail = $"待機中: {reason}";
@@ -612,9 +766,134 @@ public sealed unsafe class ExchangeExecutor(
             return;
         }
 
+        // AutoRetainer を抑制する前に、AutoDuty のループ間処理を終わらせる。
+        //
+        // AutoDuty はダンジョンから戻った直後に、リテイナー・GC 納品・修理などを
+        // 自分のタスク列へ積む。リテイナー処理は AutoRetainer 本体に任せる形なので、
+        // 先に抑制をかけると「ベルにはアクセスするがアイテムを回収しない」状態になる。
+        //
+        // ループ間処理を積んでいる間、AutoDuty は移動状態ではない。
+        // 処理を終えて次のコンテンツへ向かい始めると移動状態になるため、
+        // それを割り込んでよい合図として使う。
+        if (!this.WaitForAutoDutyBetweenLoop())
+        {
+            return;
+        }
+
         this.Step = ExchangeStep.SuppressExternal;
         this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(60);
         this.StatusDetail = "外部プラグインの状態を確認しています";
+    }
+
+    /// <summary>
+    /// AutoDuty のループ間処理が終わるまで待つ。待つ必要がなければ true を返す。
+    /// </summary>
+    private bool WaitForAutoDutyBetweenLoop()
+    {
+        if (!Plugin.C.WaitForAutoDutyBetweenLoopActions || !this.autoDuty.IsLoaded)
+        {
+            return true;
+        }
+
+        // 一時停止で割り込む場合は待つ必要がない。
+        //
+        // AutoDuty のループ間処理は TaskManager に積まれた予約であり、
+        // 一時停止ではそれが保持される。途中で割り込んでも失われず、
+        // 交換が終わって解除すれば続きから実行される。
+        //
+        // そもそも「ループ間処理が終わった合図」として使える状態は無い。
+        // PluginState.Navigating が立つのはコンテンツに入ったあと
+        // （Run-WaitDutyStarted の後の StartNavigation）なので、
+        // それを待つと必ずコンテンツ内になり、交換の機会が来ない。
+        if (Plugin.C.UseAutoDutyPause && !this.pauseUnavailable)
+        {
+            return true;
+        }
+
+        var looping = this.autoDuty.TryIsLooping(out var isLooping) && isLooping;
+        if (!looping)
+        {
+            return true;
+        }
+
+        if (!this.autoDuty.GetConfigBool("EnableBetweenLoopActions", true))
+        {
+            return true;
+        }
+
+        var navigating = this.autoDuty.TryIsNavigating(out var isNavigating) && isNavigating;
+        if (navigating)
+        {
+            // 次のコンテンツへ向かい始めた。ループ間処理は終わっている。
+            // ここが割り込んでよい唯一の窓で、しかも短い。急いで進む。
+            if (this.wasInDuty)
+            {
+                this.wasInDuty = false;
+                this.anomalyLog.Info("AutoDuty", "ループ間の処理が終わり、次のコンテンツへ向かい始めました。ここで交換に入ります");
+            }
+
+            return true;
+        }
+
+        // ループ間処理の実行順は
+        //   コファー → AutoRetainer → 装備 → 修理 → 精製 → 分解 → GC 納品 → …
+        // で、AutoRetainer は早い段階で終わる。
+        //
+        // 一度でも動いて終わったことを確認できたら、その時点で抑制をかけておく。
+        // 移動が始まってから抑制の手続きを始めると、その間に次のコンテンツへ入ってしまい、
+        // 交換の機会を次の周回まで逃す。
+        if (Plugin.C.SuppressAutoRetainer && this.autoRetainer.IsLoaded && !this.autoRetainer.SuppressedByUs)
+        {
+            var busy = this.autoRetainer.IsBusyFailClosed();
+
+            if (busy)
+            {
+                this.retainerWorkSeen = true;
+            }
+            else if (this.retainerWorkSeen)
+            {
+                if (this.autoRetainer.Suppress())
+                {
+                    this.anomalyLog.Info(
+                        "Suppress",
+                        "AutoRetainer の処理が終わったため、先に抑制をかけました（実行中の処理は中断していません）");
+                }
+            }
+        }
+
+        if (this.autoDutySettleDeadlineUtc == DateTime.MinValue)
+        {
+            this.autoDutySettleDeadlineUtc = DateTime.UtcNow.AddSeconds(Math.Max(0, Plugin.C.AutoDutySettleWaitSeconds));
+            this.anomalyLog.Info(
+                "AutoDuty",
+                "AutoDuty がループ間の処理（リテイナー・GC 納品など）を行う可能性があるため、次のコンテンツへ向かい始めるまで待ちます");
+        }
+
+        if (DateTime.UtcNow < this.autoDutySettleDeadlineUtc)
+        {
+            this.StatusDetail = "AutoDuty のループ間処理が終わるのを待っています";
+            return false;
+        }
+
+        // 上限に達した。ここで割り込むとループ間処理を壊すため、
+        // 割り込まずに次の周回の窓を待ち直す。
+        // 壊してでも交換したい場合のために、設定で従来の動作も選べるようにしてある。
+        if (Plugin.C.SkipExchangeWhenBetweenLoopWaitExpires)
+        {
+            this.autoDutySettleDeadlineUtc = DateTime.MinValue;
+            this.StatusDetail = "AutoDuty のループ間処理が長引いています。次の周回の切れ目を待ちます";
+
+            if (DateTime.UtcNow - this.lastWaitLogUtc > TimeSpan.FromSeconds(120))
+            {
+                this.lastWaitLogUtc = DateTime.UtcNow;
+                this.anomalyLog.Info("AutoDuty", "ループ間処理の待機が上限に達しました。割り込まずに次の切れ目を待ちます");
+            }
+
+            return false;
+        }
+
+        this.anomalyLog.Warn("AutoDuty", "ループ間処理の待機が上限に達したため、割り込んで先へ進みます");
+        return true;
     }
 
     /// <summary>
@@ -625,11 +904,41 @@ public sealed unsafe class ExchangeExecutor(
     /// </summary>
     private void TickSuppressExternal()
     {
+        // 待っている間に次のコンテンツへ入ってしまうことがある。
+        // Duty 中に AutoDuty を止めるのは最も避けたい事故なので、必ず戻る。
+        if (this.ReturnToWaitIfUnsafe())
+        {
+            return;
+        }
+
         if (!this.autoRetainer.IsLoaded || !Plugin.C.SuppressAutoRetainer)
         {
             this.Step = ExchangeStep.StopAutoDuty;
             this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(10);
             return;
+        }
+
+        // まもなくベンチャーが完了する場合は、先にそちらを処理させる。
+        // AutoRetainer は一定条件で自動的に始まるため、その直前に抑制をかけると
+        // リテイナー処理を横取りする形になり、周回の流れを壊す。
+        if (Plugin.C.YieldToUpcomingRetainerVenture && !this.autoRetainer.SuppressedByUs)
+        {
+            var contentId = TryGetContentId();
+            if (contentId != 0 &&
+                this.autoRetainer.TryGetClosestVentureSeconds(contentId, out var remaining) &&
+                remaining >= 0 &&
+                remaining <= Plugin.C.RetainerVentureYieldSeconds)
+            {
+                this.StatusDetail = $"リテイナーのベンチャー完了が近いため待機しています（残り {remaining} 秒）";
+
+                if (DateTime.UtcNow - this.lastWaitLogUtc > TimeSpan.FromSeconds(60))
+                {
+                    this.lastWaitLogUtc = DateTime.UtcNow;
+                    this.anomalyLog.Info("Wait", $"ベンチャー完了が近いため交換を後回しにします（残り {remaining} 秒）");
+                }
+
+                return;
+            }
         }
 
         // 1 段目: 処理中なら待つ。時間で打ち切らない。
@@ -667,8 +976,11 @@ public sealed unsafe class ExchangeExecutor(
         }
 
         this.Step = ExchangeStep.StopAutoDuty;
-        this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(10);
-        this.StatusDetail = "AutoDuty を停止しています";
+        this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(20);
+        this.StatusDetail = this.UsePause ? "AutoDuty を一時停止しています" : "AutoDuty を停止しています";
+
+        // 停止方式では割り込める時間が短いので、同じ呼び出しのうちに停止まで進める。
+        this.TickStopAutoDuty();
     }
 
     /// <summary>AutoDuty を止める。止める前の状態を記録して、後で戻せるようにする。</summary>
@@ -678,6 +990,13 @@ public sealed unsafe class ExchangeExecutor(
         if (target is null)
         {
             this.Step = ExchangeStep.Idle;
+            return;
+        }
+
+        // まだ止めていないなら、安全条件を確認し直す。
+        // 止めたあとは途中で戻ると中途半端になるため確認しない。
+        if (this.stopAttempts == 0 && !this.IsAutoDutyPaused && this.ReturnToWaitIfUnsafe())
+        {
             return;
         }
 
@@ -694,12 +1013,27 @@ public sealed unsafe class ExchangeExecutor(
             var wasRunning = this.autoDuty.IsRunningFailClosed();
             this.autoDuty.TryIsLooping(out var looping);
 
+            // 観測できた Duty のエリアを優先する。無ければ現在地を使う。
+            var resumeTerritory = this.observedDutyTerritoryId != 0
+                ? this.observedDutyTerritoryId
+                : Svc.ClientState.TerritoryType;
+
             this.returnContext = new ReturnContext
             {
                 WasAutoDutyRunning = wasRunning,
-                AutoDutyTerritoryId = Svc.ClientState.TerritoryType,
+                AutoDutyTerritoryId = resumeTerritory,
                 WasLooping = looping,
             };
+
+            if (wasRunning)
+            {
+                var hasPathForResume = this.autoDuty.TryContentHasPath(resumeTerritory, out var canResume) && canResume;
+                this.anomalyLog.Info(
+                    "AutoDuty",
+                    hasPathForResume
+                        ? $"再開先として {NpcLocationService.GetTerritoryName(resumeTerritory)} を記録しました"
+                        : $"再開先の候補 {NpcLocationService.GetTerritoryName(resumeTerritory)} に AutoDuty の経路がありません。交換後の再開はできない見込みです");
+            }
 
             if (!wasRunning)
             {
@@ -707,7 +1041,45 @@ public sealed unsafe class ExchangeExecutor(
                 return;
             }
 
-            this.anomalyLog.Info("AutoDuty", "AutoDuty を停止します");
+            this.anomalyLog.Info(
+                "AutoDuty",
+                this.UsePause
+                    ? "AutoDuty を一時停止します（ループ間処理の予約は保持されます）"
+                    : "AutoDuty を停止します");
+        }
+
+        // 一時停止で割り込む。
+        // Stop と違って AutoDuty のタスク列が残るため、
+        // ループ間処理（リテイナー・GC 納品）は再開後に続きから実行される。
+        if (this.UsePause)
+        {
+            var context = this.returnContext;
+
+            if (context is not null && !context.PausedAutoDuty)
+            {
+                if (!this.autoDuty.TryPause())
+                {
+                    // 一時停止に対応していない版かもしれない。停止方式へ落とす。
+                    this.pauseUnavailable = true;
+                    this.anomalyLog.Warn("AutoDuty", "一時停止を受け付けてもらえませんでした。停止に切り替えます");
+                    return;
+                }
+
+                context.PausedAutoDuty = true;
+
+                // 一時停止は vnavmesh の経路も止めるが、実際に足が止まるのは次のフレーム以降になる。
+                // 動いたままテレポートを送ると受け付けてもらえないため、少しだけ待つ。
+                this.pauseSettleUntilUtc = DateTime.UtcNow.AddMilliseconds(700);
+                return;
+            }
+
+            if (DateTime.UtcNow < this.pauseSettleUntilUtc)
+            {
+                return;
+            }
+
+            this.BeginTravel(target);
+            return;
         }
 
         if (this.autoDuty.TryIsStopped(out var stopped) && stopped)
@@ -716,17 +1088,47 @@ public sealed unsafe class ExchangeExecutor(
             return;
         }
 
-        if (!EzThrottler.Throttle("AutoCollector.StopAutoDuty", 1000))
+        // 窓は短い。最初の 1 回は間を置かずに送る。
+        // ここで 1 秒待つと、その間に AutoDuty が次のコンテンツへ入ってしまい、
+        // 交換の機会を逃して次の周回まで持ち越しになる。
+        if (this.stopAttempts > 0 && !EzThrottler.Throttle("AutoCollector.StopAutoDuty", 1000))
         {
             return;
         }
 
+        this.stopAttempts++;
         this.autoDuty.TryStop();
 
         if (DateTime.UtcNow > this.stepDeadlineUtc)
         {
             this.Fail(ExchangeFailure.AutoDutyStopFailed, "AutoDuty を停止できませんでした");
         }
+    }
+
+    /// <summary>停止ではなく一時停止で割り込むか。</summary>
+    private bool UsePause => Plugin.C.UseAutoDutyPause && !this.pauseUnavailable && this.autoDuty.IsLoaded;
+
+    /// <summary>
+    /// 安全に進められない状態になっていたら、安全待機へ戻す。
+    /// 戻したときは true を返す。
+    /// </summary>
+    private bool ReturnToWaitIfUnsafe()
+    {
+        if (SafetyGuard.IsSafeToStart(out var reason))
+        {
+            return false;
+        }
+
+        this.Step = ExchangeStep.WaitingSafeWindow;
+        this.StatusDetail = $"待機中: {reason}";
+        this.lastWaitLogUtc = DateTime.MinValue;
+
+        if (Player.IsInDuty)
+        {
+            this.anomalyLog.Info("Wait", "コンテンツに入ったため、交換を次の切れ目まで見送ります");
+        }
+
+        return true;
     }
 
     /// <summary>移動を開始する。テレポートが必要かどうかはここで判断する。</summary>
@@ -756,6 +1158,35 @@ public sealed unsafe class ExchangeExecutor(
     private void TickResumeAutoDuty()
     {
         var context = this.returnContext;
+
+        // 一時停止で割り込んだ場合は、設定に関わらず必ず解除する。
+        // 止めたままにするのは「元に戻す」ことにならない。
+        if (context is not null && context.PausedAutoDuty && this.autoDuty.IsLoaded)
+        {
+            // 解除する前に、自分が開いたショップを閉じる。
+            this.CloseOwned("ShopExchangeCurrency", useCloseFirst: true);
+
+            // 抑制も先に解く。AutoDuty はこの後ループ間処理の続き
+            //（リテイナー・GC 納品）へ進むため、抑制したままだと空振りする。
+            this.autoRetainer.Release();
+
+            if (!this.autoDuty.TryResume())
+            {
+                if (DateTime.UtcNow > this.stepDeadlineUtc)
+                {
+                    this.anomalyLog.Error("AutoDuty", "一時停止を解除できませんでした。/ad resume を手動で実行してください");
+                    this.Failure = ExchangeFailure.AutoDutyResumeFailed;
+                    this.FinishAfterExchange();
+                }
+
+                return;
+            }
+
+            context.PausedAutoDuty = false;
+            this.anomalyLog.Info("AutoDuty", "AutoDuty の一時停止を解除しました（ループ間処理は続きから実行されます）");
+            this.FinishAfterExchange();
+            return;
+        }
 
         if (context is null || !context.WasAutoDutyRunning || !Plugin.C.ResumeAutoDuty || !this.autoDuty.IsLoaded)
         {
@@ -789,9 +1220,23 @@ public sealed unsafe class ExchangeExecutor(
             return;
         }
 
+        // 抑制を解く前に、自分が開いたショップを閉じる。
+        // 開いたまま解除すると、AutoRetainer が動き出したときに
+        // こちらのウィンドウが残っていて操作が噛み合わなくなる。
+        this.CloseOwned("ShopExchangeCurrency", useCloseFirst: true);
+
+        // AutoDuty を動かす前に抑制を解く。
+        // AutoDuty はループ間処理で AutoRetainer を呼ぶため、抑制したまま再開すると
+        // リテイナー処理が動かないまま次の周回に入る。
+        this.autoRetainer.Release();
+
         if (!this.autoDuty.TryContentHasPath(context.AutoDutyTerritoryId, out var hasPath) || !hasPath)
         {
-            this.anomalyLog.Warn("AutoDuty", "停止前のコンテンツに対応する経路が無いため、再開しません");
+            this.anomalyLog.Error(
+                "AutoDuty",
+                $"{NpcLocationService.GetTerritoryName(context.AutoDutyTerritoryId)} に AutoDuty の経路が無いため再開できません。" +
+                "手動で再開してください（状況タブの「AutoDuty を再開」からも実行できます）");
+            this.Failure = ExchangeFailure.AutoDutyResumeFailed;
             this.FinishAfterExchange();
             return;
         }
@@ -952,6 +1397,28 @@ public sealed unsafe class ExchangeExecutor(
             return;
         }
 
+        // 戦闘中・騎乗動作中・移動中はテレポートが通らない。
+        // ここで弾いておかないと、受け付けてもらえないまま試行回数だけを消費する。
+        if (Svc.Condition[ConditionFlag.InCombat])
+        {
+            this.StatusDetail = "戦闘が終わるのを待っています";
+            return;
+        }
+
+        if (Svc.Condition[ConditionFlag.Mounting] ||
+            Svc.Condition[ConditionFlag.Mounting71] ||
+            Svc.Condition[ConditionFlag.BetweenAreas] ||
+            Svc.Condition[ConditionFlag.BetweenAreas51])
+        {
+            return;
+        }
+
+        // まだ足が止まっていないなら止める。移動中は詠唱が中断される。
+        if (Player.Object is { } player && player.IsCasting)
+        {
+            return;
+        }
+
         if (this.lifestream.TryIsBusy(out var busy) && busy)
         {
             return;
@@ -963,9 +1430,11 @@ public sealed unsafe class ExchangeExecutor(
             return;
         }
 
-        if (this.teleportAttempts >= 3)
+        if (this.teleportAttempts >= 5)
         {
-            this.Fail(ExchangeFailure.TeleportFailed, "テレポートを開始できませんでした");
+            this.Fail(
+                ExchangeFailure.TeleportFailed,
+                "テレポートを開始できませんでした（Lifestream が依頼を受け付けませんでした）");
             return;
         }
 
@@ -1013,9 +1482,37 @@ public sealed unsafe class ExchangeExecutor(
         // NPC が視界に入ったら、配置ファイル由来の座標ではなく実際の位置を目的地にする。
         // 配置ファイルの座標は実機とずれることがあり、そのままでは
         // 到着したつもりでも「話しかけられない距離」になる。
+        //
+        // ただし目的地だけ書き換えても、vnavmesh は元の座標へ向かい続ける。
+        // 大きくずれている場合は移動そのものを出し直す必要がある。
         if (this.interaction.TryFindNpc(target.NpcDataId, out var liveNpc) && liveNpc is not null)
         {
-            this.navigationDestination = liveNpc.Position;
+            var live = liveNpc.Position;
+
+            if (Vector3.Distance(live, this.navigationDestination) > 3f &&
+                this.destinationUpdates < 3 &&
+                EzThrottler.Throttle("AutoCollector.Reissue", 4000))
+            {
+                this.destinationUpdates++;
+                this.navigationDestination = live;
+
+                if (this.navigation.Reissue(live, Plugin.C.NpcApproachRange, out var reissueFailure))
+                {
+                    this.anomalyLog.Info("Navigation", $"{target.NpcName} の実際の位置へ経路を引き直しました");
+                }
+                else
+                {
+                    this.anomalyLog.Warn("Navigation", $"経路を引き直せませんでした: {reissueFailure}");
+                }
+
+                return;
+            }
+
+            // ずれが小さければ到着判定にだけ反映する。
+            if (Vector3.Distance(live, this.navigationDestination) <= 3f)
+            {
+                this.navigationDestination = live;
+            }
         }
 
         var status = this.navigation.Tick(this.navigationDestination, Plugin.C.NpcApproachRange);
@@ -1031,7 +1528,9 @@ public sealed unsafe class ExchangeExecutor(
 
             case MoveStatus.Stuck:
                 this.navigation.Stop();
-                this.Fail(ExchangeFailure.NavigationFailed, "移動が進まなくなりました");
+                this.Fail(
+                    ExchangeFailure.NavigationFailed,
+                    $"{target.NpcName} へ移動できません。建物の中など、経路がつながらない場所にいる可能性があります");
                 return;
 
             case MoveStatus.Failed:
@@ -1231,6 +1730,13 @@ public sealed unsafe class ExchangeExecutor(
     /// </summary>
     private void TickArmed()
     {
+        // 前回の交換の反映が終わるまで待つ。
+        // ここで待たないと、前回分がまだ届いていない所持数で検証してしまう。
+        if (DateTime.UtcNow < this.nextArmedAllowedUtc)
+        {
+            return;
+        }
+
         var definition = this.pendingRequest;
         this.pendingRequest = null;
 
@@ -1379,9 +1885,15 @@ public sealed unsafe class ExchangeExecutor(
         }
 
         // P-16
-        if (!this.currencyService.TryGetEmptyBagSlots(out var freeSlots) || freeSlots < 1)
+        // 単に 1 枠空いていればよいのではない。
+        // AutoRetainer は所持枠が空いていないキャラクタを処理対象から外して保存するため、
+        // 交換で枠を使い切ると、あとでリテイナーが回らなくなる。
+        var keepFree = Math.Max(0, Plugin.C.KeepFreeInventorySlots);
+        if (!this.currencyService.TryGetEmptyBagSlots(out var freeSlots) || freeSlots <= keepFree)
         {
-            this.Fail(ExchangeFailure.NoBagSpace, "所持枠に空きがありません");
+            this.Fail(
+                ExchangeFailure.NoBagSpace,
+                $"所持枠の空きが {freeSlots} です。{keepFree} 枠を残す設定のため交換しません");
             return;
         }
 
@@ -1458,6 +1970,27 @@ public sealed unsafe class ExchangeExecutor(
 
         if (DateTime.UtcNow > this.outcomeDeadlineUtc)
         {
+            // 何も動いていないのか、片方だけ動いたのかで意味が違う。
+            var currencyKnown = this.currencyService.TryGetCount(attempt.CurrencyItemId, out var currencyNow);
+            var rewardKnown = this.currencyService.TryGetCount(attempt.RewardItemId, out var rewardNow, includeEquipped: true, includeArmory: true);
+
+            if (currencyKnown && rewardKnown &&
+                currencyNow == attempt.CurrencyBefore && rewardNow == attempt.RewardBefore)
+            {
+                this.FailUnresolved(
+                    ExchangeFailure.ExchangeNotApplied,
+                    "交換が行われた形跡がありません。所持数が変化していません");
+                return;
+            }
+
+            if (currencyKnown && rewardKnown)
+            {
+                this.FailUnresolved(
+                    ExchangeFailure.ExchangeUnexpectedDelta,
+                    $"想定外の変化です。通貨 {attempt.CurrencyBefore} → {currencyNow} / {attempt.RewardName} {attempt.RewardBefore} → {rewardNow}");
+                return;
+            }
+
             this.FailUnresolved(ExchangeFailure.ExchangeUnresolved, "交換結果を確認できませんでした。実際に交換されたかどうかは不明です");
         }
     }
@@ -1505,6 +2038,7 @@ public sealed unsafe class ExchangeExecutor(
             {
                 this.pendingRequest = this.travelTarget;
                 this.Step = ExchangeStep.Armed;
+                this.nextArmedAllowedUtc = DateTime.UtcNow.Add(SettleBetweenExchanges);
                 this.StatusDetail = $"{this.session?.Completed ?? 0} 回交換しました。続けます";
                 return true;
             }
@@ -1524,15 +2058,9 @@ public sealed unsafe class ExchangeExecutor(
             return false;
         }
 
-        // 片方だけ動いた、量が合わないなど。想定外なので即座に止める。
-        if (rewardOk != currencyOk)
-        {
-            this.FailUnresolved(
-                ExchangeFailure.ExchangeUnexpectedDelta,
-                $"想定外の変化です。通貨 {attempt.CurrencyBefore} → {currencyAfter} / {attempt.RewardName} {attempt.RewardBefore} → {rewardAfter}");
-            return true;
-        }
-
+        // 片方だけ動いている状態は、サーバーからの反映が片方だけ先に届いただけのことがある。
+        // ここで即座にエラーにすると、正常な交換を失敗と誤判定する。
+        // タイムアウトまでは待ち、それでも揃わなければ想定外として扱う。
         return false;
     }
 
@@ -1574,10 +2102,11 @@ public sealed unsafe class ExchangeExecutor(
             return false;
         }
 
-        // 所持枠が無ければ終わり。
-        if (!this.currencyService.TryGetEmptyBagSlots(out var freeSlots) || freeSlots < 1)
+        // 所持枠が無ければ終わり。残す枠の設定も守る。
+        var keepFree = Math.Max(0, Plugin.C.KeepFreeInventorySlots);
+        if (!this.currencyService.TryGetEmptyBagSlots(out var freeSlots) || freeSlots <= keepFree)
         {
-            stopReason = "所持枠に空きがありません";
+            stopReason = $"所持枠の空きが {freeSlots} になりました（{keepFree} 枠を残す設定）";
             return false;
         }
 
@@ -1898,6 +2427,53 @@ public sealed unsafe class ExchangeExecutor(
     /// </summary>
     private void ReleaseHeldControl()
     {
+        // 一時停止で止めていたなら、失敗しても必ず解除する。
+        // AutoDuty から見ると一時停止はユーザーが止めたのと区別がつかず、
+        // こちらの都合で止めたものを放置すると周回が止まったままになる。
+        var handledByPause = this.returnContext is { PausedAutoDuty: true };
+
+        try
+        {
+            if (this.returnContext is { PausedAutoDuty: true } pausedContext && this.autoDuty.IsLoaded)
+            {
+                if (this.autoDuty.TryResume())
+                {
+                    pausedContext.PausedAutoDuty = false;
+                    this.anomalyLog.Info("AutoDuty", "交換に失敗しましたが、AutoDuty の一時停止は解除しました");
+                }
+                else
+                {
+                    this.anomalyLog.Error("AutoDuty", "一時停止を解除できませんでした。/ad resume を手動で実行してください");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Warn("Cleanup", $"AutoDuty の一時停止を解除できませんでした: {ex.Message}");
+        }
+
+        // 自分が止めた AutoDuty は、交換に失敗しても元に戻す。
+        // 止めっぱなしにすると周回が止まったまま棒立ちになる。
+        try
+        {
+            // 一時停止の解除で戻せた場合はここへ来ない。
+            // Run で再開すると周回カウンタが 0 に戻り、ループ間処理の予約も失われる。
+            if (Plugin.C.ResumeAutoDutyOnFailure &&
+                !handledByPause &&
+                this.returnContext is { WasAutoDutyRunning: true } context &&
+                Plugin.C.ResumeAutoDuty &&
+                this.autoDuty.IsLoaded &&
+                this.autoDuty.TryContentHasPath(context.AutoDutyTerritoryId, out var hasPath) && hasPath)
+            {
+                this.anomalyLog.Info("AutoDuty", "交換に失敗しましたが、停止前に動いていた AutoDuty を再開します");
+                this.autoDuty.TryRun(context.AutoDutyTerritoryId);
+            }
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Warn("Cleanup", $"AutoDuty を再開できませんでした: {ex.Message}");
+        }
+
         try
         {
             this.navigation.Stop();
@@ -1918,5 +2494,6 @@ public sealed unsafe class ExchangeExecutor(
 
         this.session = null;
         this.travelTarget = null;
+        this.returnContext = null;
     }
 }

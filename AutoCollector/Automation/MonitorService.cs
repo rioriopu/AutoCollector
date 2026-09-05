@@ -18,7 +18,8 @@ public sealed class MonitorService(
     CurrencyService currencyService,
     TomestoneService tomestoneService,
     ExchangeResolver resolver,
-    ExchangeExecutor executor)
+    ExchangeExecutor executor,
+    ExternalAutomationGate automationGate)
 {
     /// <summary>同じプリセットで連続してこの回数失敗したら、そのプリセットを無効化する。</summary>
     private const int FailureLimit = 2;
@@ -30,6 +31,7 @@ public sealed class MonitorService(
     private readonly TomestoneService tomestoneService = tomestoneService;
     private readonly ExchangeResolver resolver = resolver;
     private readonly ExchangeExecutor executor = executor;
+    private readonly ExternalAutomationGate automationGate = automationGate;
 
     private DateTime nextCheckUtc = DateTime.MinValue;
     private Guid buildingForPreset;
@@ -64,6 +66,15 @@ public sealed class MonitorService(
         }
 
         this.nextCheckUtc = DateTime.UtcNow.Add(CheckInterval);
+
+        // 自動交換は周回の相乗りとして動かす。
+        // プリセットを有効にしただけで動くと、手動で遊んでいる最中に
+        // 勝手にテレポートして交換を始めてしまう。
+        if (Plugin.C.RequireExternalAutomationRunning && !this.automationGate.IsAnyRunning(out _))
+        {
+            this.LastDecision = "AutoDuty や Artisan が動作していないため、自動交換は待機しています";
+            return;
+        }
 
         // 直前の実行結果を反映してから次を選ぶ
         this.TrackFailure();
