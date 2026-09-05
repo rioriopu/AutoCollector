@@ -1,6 +1,9 @@
 using System;
+using System.Reflection;
 using AutoCollector.Diagnostics;
+using ECommons.Automation;
 using ECommons.DalamudServices;
+using ECommons.Reflection;
 
 namespace AutoCollector.Ipc;
 
@@ -90,6 +93,57 @@ public sealed class AutoDutyIpc(AnomalyLog anomalyLog) : IpcGateBase("AutoDuty",
     /// <summary>一時停止から復帰する。</summary>
     public bool TryResume() => this.TryProcessCommand("/ad resume");
 
+    /// <summary>
+    /// いま一時停止しているか。
+    ///
+    /// 一時停止の状態を返す IPC は無いため、AutoDuty のインスタンスから
+    /// States フィールド（PluginState のビット集合）を読む。
+    /// 読み取り専用で、相手の状態は一切変更しない。
+    ///
+    /// 読めなかった場合は false を返す。呼び出し側は「確認できなかった」として扱うこと。
+    /// </summary>
+    public bool TryIsPaused(out bool paused)
+    {
+        paused = false;
+
+        if (!this.IsLoaded)
+        {
+            return false;
+        }
+
+        try
+        {
+            if (!DalamudReflector.TryGetDalamudPlugin(this.InternalName, out var instance, suppressErrors: true))
+            {
+                return false;
+            }
+
+            var field = instance.GetType().GetField(
+                "States",
+                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+
+            if (field?.GetValue(instance) is not { } value)
+            {
+                return false;
+            }
+
+            // PluginState.Paused = 4
+            paused = (Convert.ToInt32(value) & 4) != 0;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            this.AnomalyLog.Warn("Ipc", $"[AutoDuty] 一時停止の状態を読めませんでした: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// コマンドを送る。
+    ///
+    /// まず Dalamud のコマンド処理へ直接渡す。受け付けられなかった場合に限り、
+    /// ゲームのチャット経路からも送る。どちらか一方でしか届かない環境に備えている。
+    /// </summary>
     private bool TryProcessCommand(string command)
     {
         if (!this.IsLoaded)
@@ -104,12 +158,21 @@ public sealed class AutoDutyIpc(AnomalyLog anomalyLog) : IpcGateBase("AutoDuty",
                 return true;
             }
 
-            this.AnomalyLog.Warn("Ipc", $"[AutoDuty] コマンド {command} が受け付けられませんでした");
-            return false;
+            this.AnomalyLog.Warn("Ipc", $"[AutoDuty] コマンド {command} が登録されていません。チャット経由で送ります");
         }
         catch (Exception ex)
         {
             this.AnomalyLog.Warn("Ipc", $"[AutoDuty] コマンド {command} に失敗しました: {ex.Message}");
+        }
+
+        try
+        {
+            Chat.ExecuteCommand(command);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            this.AnomalyLog.Error("Ipc", $"[AutoDuty] コマンド {command} をチャット経由でも送れませんでした: {ex.Message}");
             return false;
         }
     }

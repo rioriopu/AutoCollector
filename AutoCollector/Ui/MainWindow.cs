@@ -959,7 +959,11 @@ public sealed class MainWindow(Plugin plugin)
         DrawRow("AutoDuty", this.plugin.AutoDuty.IsLoaded, () =>
         {
             // 交換後に再開できなかった場合の受け皿。棒立ちのまま気付かないのを避ける。
-            var paused = this.plugin.ExchangeExecutor.IsAutoDutyPaused;
+            // AutoDuty 側の状態を読めるならそちらを信じる。
+            // 送ったつもりで止まっていない場合を見逃さないため。
+            var paused = this.plugin.AutoDuty.TryIsPaused(out var reported)
+                ? reported
+                : this.plugin.ExchangeExecutor.IsAutoDutyPaused;
 
             if (paused ||
                 (this.plugin.ExchangeExecutor.LastResumeTerritoryId != 0 &&
@@ -990,7 +994,11 @@ public sealed class MainWindow(Plugin plugin)
 
             if (paused)
             {
-                ImGui.TextColored(ImGuiColors.DalamudOrange, "一時停止中（本プラグインが停止させています）");
+                ImGui.TextColored(
+                    ImGuiColors.DalamudOrange,
+                    this.plugin.ExchangeExecutor.IsAutoDutyPaused
+                        ? "一時停止中（本プラグインが停止させています）"
+                        : "一時停止中");
                 return;
             }
 
@@ -1110,26 +1118,28 @@ public sealed class MainWindow(Plugin plugin)
 
             if (ImGui.Button("一時停止##adpause"))
             {
-                var ok = this.plugin.AutoDuty.TryPause();
-                this.plugin.AnomalyLog.Info(
-                    "AutoDuty",
-                    ok ? "手動で一時停止を送りました" : "一時停止コマンドが受け付けられませんでした");
+                this.plugin.AutoDuty.TryPause();
             }
 
             ImGui.SameLine();
 
             if (ImGui.Button("解除##adresume"))
             {
-                var ok = this.plugin.AutoDuty.TryResume();
-                this.plugin.AnomalyLog.Info(
-                    "AutoDuty",
-                    ok ? "手動で解除を送りました" : "解除コマンドが受け付けられませんでした");
+                this.plugin.AutoDuty.TryResume();
             }
 
             ImGui.SameLine();
-            ImGui.TextColored(
-                ImGuiColors.DalamudGrey,
-                "周回中に押して、止まる・再開することを確認してください");
+
+            if (this.plugin.AutoDuty.TryIsPaused(out var reportedPaused))
+            {
+                ImGui.TextColored(
+                    reportedPaused ? ImGuiColors.DalamudOrange : ImGuiColors.HealerGreen,
+                    reportedPaused ? "AutoDuty の状態: 一時停止中" : "AutoDuty の状態: 停止していません");
+            }
+            else
+            {
+                ImGui.TextColored(ImGuiColors.DalamudRed, "AutoDuty の一時停止状態を読み取れません");
+            }
         }
 
         var report = this.plugin.SelfCheck.Latest;
