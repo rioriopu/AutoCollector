@@ -24,11 +24,16 @@ public enum ResolverBuildStage
 /// ENpcBase は約 6 万行 × 32 要素あるため、一括で走査するとフレーム落ちする。
 /// Framework.Update から TickBuild を呼び、1 フレームあたりの処理行数を制限する。
 /// </summary>
-public sealed class ExchangeResolver(AnomalyLog anomalyLog, TomestoneService tomestoneService, NpcLocationService npcLocationService)
+public sealed class ExchangeResolver(
+    AnomalyLog anomalyLog,
+    TomestoneService tomestoneService,
+    NpcLocationService npcLocationService,
+    SpecialCurrencyMap specialCurrencyMap)
 {
     private readonly AnomalyLog anomalyLog = anomalyLog;
     private readonly TomestoneService tomestoneService = tomestoneService;
     private readonly NpcLocationService npcLocationService = npcLocationService;
+    private readonly SpecialCurrencyMap specialCurrencyMap = specialCurrencyMap;
 
     /// <summary>構築中の一時データ: ShopId → そのショップ内の該当エントリ。</summary>
     private readonly Dictionary<uint, List<ShopEntryRecord>> shopEntries = [];
@@ -38,6 +43,9 @@ public sealed class ExchangeResolver(AnomalyLog anomalyLog, TomestoneService tom
 
     /// <summary>ShopId → SpecialShop.Name。会話メニューの選択肢と照合するために保持する。</summary>
     private readonly Dictionary<uint, string> shopNames = [];
+
+    /// <summary>ShopId → InclusionShop の経路。画面のカテゴリ選択に使う。</summary>
+    private readonly Dictionary<uint, InclusionPath> inclusionPaths = [];
 
     private List<ExchangeDefinition> results = [];
     private IReadOnlyList<ExchangeDefinition>? liveResults;
@@ -77,6 +85,7 @@ public sealed class ExchangeResolver(AnomalyLog anomalyLog, TomestoneService tom
         this.shopEntries.Clear();
         this.shopToNpcs.Clear();
         this.shopNames.Clear();
+        this.inclusionPaths.Clear();
         this.results = [];
         this.liveResults = null;
         this.targetCurrencyItemId = currencyItemId;
@@ -241,8 +250,10 @@ public sealed class ExchangeResolver(AnomalyLog anomalyLog, TomestoneService tom
                 return this.tomestoneService.TryResolveItemId(costRowId, out itemId);
 
             case SpecialShopCostType.SpecialCurrencyBucket:
-                // Phase 4 で special_currency_map.json を使って解決する。MVP では扱わない。
-                return false;
+                // シート内に対応表が無いため、外部データで解決する。
+                // ここでの解決は候補を一覧に出すためのもので、
+                // 実際の交換時は画面が持つ本物の通貨 ItemId と照合してから実行する。
+                return this.specialCurrencyMap.TryResolve(costRowId, out itemId);
 
             default:
                 return false;
@@ -365,6 +376,72 @@ public sealed class ExchangeResolver(AnomalyLog anomalyLog, TomestoneService tom
                 return;
             }
 
+            case EventHandlerType.InclusionShop:
+            {
+                // スクリップ交換はこの経路にしか無い。
+                // NPC → PreHandler → InclusionShop → Category → Series → SpecialShop と辿る。
+                var inclusion = Svc.Data.GetExcelSheet<InclusionShop>()?.GetRowOrDefault(handler);
+                if (inclusion is null)
+                {
+                    return;
+                }
+
+                var shopName = inclusion.Value.ShopName.ExtractText();
+                var categorySheet = Svc.Data.GetExcelSheet<InclusionShopCategory>();
+                var seriesSheet = Svc.Data.GetSubrowExcelSheet<InclusionShopSeries>();
+                if (categorySheet is null || seriesSheet is null)
+                {
+                    return;
+                }
+
+                foreach (var categoryRef in inclusion.Value.Category)
+                {
+                    if (categoryRef.RowId == 0)
+                    {
+                        continue;
+                    }
+
+                    var category = categorySheet.GetRowOrDefault(categoryRef.RowId);
+                    if (category is null)
+                    {
+                        continue;
+                    }
+
+                    var categoryName = category.Value.Name.ExtractText();
+                    var seriesId = category.Value.InclusionShopSeries.RowId;
+                    if (seriesId == 0 || !seriesSheet.TryGetSubrowCount(seriesId, out var seriesCount))
+                    {
+                        continue;
+                    }
+
+                    for (ushort i = 0; i < seriesCount; i++)
+                    {
+                        var entry = seriesSheet.GetSubrowOrDefault(seriesId, i);
+                        if (entry is null)
+                        {
+                            continue;
+                        }
+
+                        var specialShopId = entry.Value.SpecialShop.RowId;
+                        if (specialShopId == 0 || !this.shopEntries.ContainsKey(specialShopId))
+                        {
+                            continue;
+                        }
+
+                        // どのカテゴリの中にあるかを、後で画面を操作するときのために覚えておく。
+                        this.inclusionPaths[specialShopId] = new InclusionPath(
+                            handler,
+                            string.IsNullOrEmpty(shopName) ? menuHint : shopName,
+                            categoryRef.RowId,
+                            categoryName);
+
+                        this.RecordNpc(specialShopId, npcId, HandlerPath.InclusionShop, categoryName);
+                    }
+                }
+
+                return;
+            }
+
             case EventHandlerType.CustomTalk:
             {
                 // CustomTalk は構造が一定でないため best-effort で辿る。
@@ -467,6 +544,7 @@ public sealed class ExchangeResolver(AnomalyLog anomalyLog, TomestoneService tom
                         SingleReward = entry.SingleReward,
                         SingleCost = entry.SingleCost,
                         ShopName = this.shopNames.GetValueOrDefault(shopId, string.Empty),
+                        Inclusion = this.inclusionPaths.GetValueOrDefault(shopId),
                     });
                     continue;
                 }
@@ -488,6 +566,7 @@ public sealed class ExchangeResolver(AnomalyLog anomalyLog, TomestoneService tom
                         SingleReward = entry.SingleReward,
                         SingleCost = entry.SingleCost,
                         ShopName = this.shopNames.GetValueOrDefault(shopId, string.Empty),
+                        Inclusion = this.inclusionPaths.GetValueOrDefault(shopId),
                         NpcDataId = npc.NpcId,
                         NpcName = NpcLocationService.GetName(npc.NpcId),
                         TerritoryId = hasLocation ? location.TerritoryId : 0,

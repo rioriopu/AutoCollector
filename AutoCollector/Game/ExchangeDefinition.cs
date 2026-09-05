@@ -16,6 +16,9 @@ public enum HandlerPath
 
     /// <summary>CustomTalk を経由する。構造が一定でないため best-effort。</summary>
     CustomTalk,
+
+    /// <summary>InclusionShop を経由する。スクリップ交換はこの経路。</summary>
+    InclusionShop,
 }
 
 /// <summary>
@@ -80,9 +83,21 @@ public sealed record ExchangeDefinition
     /// <summary>TopicSelect.Name / CustomTalk.MainOption 由来のヒント。ショップ名で決まらないときの候補。</summary>
     public string? MenuHint { get; init; }
 
+    /// <summary>InclusionShop 経由の場合の経路情報。null なら通常の SpecialShop。</summary>
+    public InclusionPath? Inclusion { get; init; }
+
+    /// <summary>スクリップ交換のように InclusionShop の画面で扱うものか。</summary>
+    public bool UsesInclusionShop => this.Inclusion is not null;
+
     /// <summary>NPC の座標が解決できているか。false のものは自動実行の対象にしない。</summary>
     public bool HasLocation => this.NpcDataId != 0 && this.TerritoryId != 0;
 }
+
+/// <summary>
+/// InclusionShop 経由でショップに辿り着くまでの経路。
+/// 画面ではカテゴリを選んでから品目を選ぶ形になるため、カテゴリ名を保持する。
+/// </summary>
+public sealed record InclusionPath(uint InclusionShopId, string? ShopName, uint CategoryId, string CategoryName);
 
 /// <summary>報酬アイテム単位でまとめた候補（同じアイテムを複数の NPC が扱うことがある）。</summary>
 public sealed record ExchangeCandidateGroup(uint RewardItemId, string RewardName, System.Collections.Generic.IReadOnlyList<ExchangeDefinition> Definitions);

@@ -224,6 +224,7 @@ public sealed unsafe class ExchangeExecutor(
     private bool aethernetTried;
     private Vector3 hopStartPosition;
     private Vector3 navigationDestination;
+    private int reapproachAttempts;
     private ReturnContext? returnContext;
     private ExchangeSession? session;
     private DateTime lastWaitLogUtc;
@@ -512,6 +513,7 @@ public sealed unsafe class ExchangeExecutor(
         this.travelTarget = definition;
         this.session = session;
         this.aethernetTried = false;
+        this.reapproachAttempts = 0;
         this.ownership.Clear();
         this.ownership.IsClaiming = true;
 
@@ -798,9 +800,13 @@ public sealed unsafe class ExchangeExecutor(
         this.autoDuty.TryRun(context.AutoDutyTerritoryId);
     }
 
-    /// <summary>交換後の後始末。抑制を解除して終了する。</summary>
+    /// <summary>交換後の後始末。開いたショップを閉じ、抑制を解除して終了する。</summary>
     private void FinishAfterExchange()
     {
+        // 自分が開いたショップは自分で閉じる。開けっ放しにすると
+        // 次の交換の事前条件（ブロックするアドオンが無いこと）にも引っかかる。
+        this.CloseOwned("ShopExchangeCurrency", useCloseFirst: true);
+
         this.autoRetainer.Release();
         this.returnContext = null;
         this.session = null;
@@ -1004,6 +1010,14 @@ public sealed unsafe class ExchangeExecutor(
             return;
         }
 
+        // NPC が視界に入ったら、配置ファイル由来の座標ではなく実際の位置を目的地にする。
+        // 配置ファイルの座標は実機とずれることがあり、そのままでは
+        // 到着したつもりでも「話しかけられない距離」になる。
+        if (this.interaction.TryFindNpc(target.NpcDataId, out var liveNpc) && liveNpc is not null)
+        {
+            this.navigationDestination = liveNpc.Position;
+        }
+
         var status = this.navigation.Tick(this.navigationDestination, Plugin.C.NpcApproachRange);
 
         switch (status)
@@ -1050,6 +1064,14 @@ public sealed unsafe class ExchangeExecutor(
             return;
         }
 
+        // 会話ウィンドウが出ていたら進める。
+        // これを進めないと、話しかけてもショップまで辿り着かない。
+        if (this.interaction.TryAdvanceTalk())
+        {
+            this.StatusDetail = "会話を進めています";
+            return;
+        }
+
         // 会話メニューが出たらそちらを処理する。
         if (this.menu.IsMenuOpen())
         {
@@ -1059,15 +1081,50 @@ public sealed unsafe class ExchangeExecutor(
             return;
         }
 
-        if (this.interaction.TryFindNpc(target.NpcDataId, out var npc) && npc is not null)
+        if (!this.interaction.TryFindNpc(target.NpcDataId, out var npc) || npc is null)
         {
-            this.interaction.StepInteract(npc);
-        }
-        else if (DateTime.UtcNow > this.stepDeadlineUtc)
-        {
-            this.Fail(ExchangeFailure.NpcNotFound, $"{target.NpcName} が見つかりません");
+            if (DateTime.UtcNow > this.stepDeadlineUtc)
+            {
+                this.Fail(ExchangeFailure.NpcNotFound, $"{target.NpcName} が見つかりません");
+            }
+
             return;
         }
+
+        // 遠すぎると、話しかけても「話しかけられない距離です」と出るだけで進まない。
+        // その場合は諦めずに、NPC の実際の位置へ近づき直す。
+        if (!InteractionService.IsWithinInteractRange(npc))
+        {
+            if (this.reapproachAttempts >= 3)
+            {
+                this.Fail(ExchangeFailure.InteractFailed, $"{target.NpcName} に近づけませんでした");
+                return;
+            }
+
+            if (!EzThrottler.Throttle("AutoCollector.Reapproach", 3000))
+            {
+                return;
+            }
+
+            this.reapproachAttempts++;
+            this.anomalyLog.Info("Interact", $"{target.NpcName} から離れているため、近づき直します（{this.reapproachAttempts} 回目）");
+
+            this.navigationDestination = npc.Position;
+            if (this.navigation.BeginMove(npc.Position, 2.5f, out var moveFailure))
+            {
+                this.Step = ExchangeStep.Navigate;
+                this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(60);
+                this.StatusDetail = $"{target.NpcName} へ近づき直しています";
+            }
+            else
+            {
+                this.anomalyLog.Warn("Interact", $"近づき直せませんでした: {moveFailure}");
+            }
+
+            return;
+        }
+
+        this.interaction.StepInteract(npc);
 
         if (DateTime.UtcNow > this.stepDeadlineUtc)
         {
@@ -1088,6 +1145,13 @@ public sealed unsafe class ExchangeExecutor(
         {
             this.pendingRequest = target;
             this.Step = ExchangeStep.Armed;
+            return;
+        }
+
+        // 選択後に会話が挟まることがある。
+        if (this.interaction.TryAdvanceTalk())
+        {
+            this.StatusDetail = "会話を進めています";
             return;
         }
 
@@ -1250,7 +1314,7 @@ public sealed unsafe class ExchangeExecutor(
         }
 
         // P-8
-        var identification = this.shopService.IdentifyShop(entries, this.resolver.LiveResults);
+        var identification = this.shopService.IdentifyShop(entries, this.resolver.LiveResults, definition.ShopId);
         if (!identification.IsConfident || identification.ShopId != definition.ShopId)
         {
             this.Fail(ExchangeFailure.ShopMismatch, identification.Detail);
@@ -1792,13 +1856,20 @@ public sealed unsafe class ExchangeExecutor(
         }
     }
 
-    /// <summary>撃つ前の失敗。inFlight は立っていないので普通に Error へ落とす。</summary>
+    /// <summary>
+    /// 撃つ前の失敗。inFlight は立っていないので普通に Error へ落とす。
+    ///
+    /// 失敗しても握った制御は必ず手放す。
+    /// ここで解放しないと、AutoRetainer を抑制したまま止まり続けることになる。
+    /// </summary>
     private void Fail(ExchangeFailure failure, string detail)
     {
         this.Step = ExchangeStep.Error;
         this.Failure = failure;
         this.StatusDetail = detail;
         this.anomalyLog.Warn("Exchange", $"{failure}: {detail}");
+
+        this.ReleaseHeldControl();
     }
 
     /// <summary>
@@ -1817,5 +1888,35 @@ public sealed unsafe class ExchangeExecutor(
             attempt.Outcome = $"{failure}: {detail}";
             EzConfig.Save();
         }
+
+        this.ReleaseHeldControl();
+    }
+
+    /// <summary>
+    /// 握った制御を手放す。移動を止め、外部プラグインの抑制を解く。
+    /// 失敗しても必ず通す必要があるため、個々の失敗で止めない。
+    /// </summary>
+    private void ReleaseHeldControl()
+    {
+        try
+        {
+            this.navigation.Stop();
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Warn("Cleanup", $"移動を停止できませんでした: {ex.Message}");
+        }
+
+        try
+        {
+            this.autoRetainer.Release();
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Error("Cleanup", $"AutoRetainer の抑制を解除できませんでした: {ex.Message}");
+        }
+
+        this.session = null;
+        this.travelTarget = null;
     }
 }
