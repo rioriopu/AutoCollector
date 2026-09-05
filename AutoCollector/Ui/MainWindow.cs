@@ -23,6 +23,7 @@ public sealed class MainWindow(Plugin plugin)
     private bool onlyWithLocation = true;
     private string rewardFilter = string.Empty;
     private int exchangeChoice;
+    private readonly PresetTab presetTab = new(plugin);
 
     public void Draw()
     {
@@ -33,6 +34,7 @@ public sealed class MainWindow(Plugin plugin)
         }
 
         this.DrawStatusTab();
+        this.presetTab.Draw();
         this.DrawExchangeTab();
         this.DrawShopTab();
         this.DrawDiagnosticsTab();

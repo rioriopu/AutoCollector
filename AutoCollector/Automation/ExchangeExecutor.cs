@@ -140,6 +140,35 @@ public sealed class PurchaseAttempt
 }
 
 /// <summary>
+/// 1 回の来店でどこまで交換するかの設定。
+///
+/// 一度ショップを開いたら、条件を満たす限り続けて交換する。
+/// 交換のたびに移動し直すのは無駄が大きい。
+/// </summary>
+public sealed class ExchangeSession
+{
+    /// <summary>暴走への歯止め。この回数を超えたら理由に関わらず打ち切る。</summary>
+    public const int HardLimit = 200;
+
+    public required ExchangeMode Mode { get; init; }
+
+    /// <summary>UntilCurrencyReserve のときに残す通貨量。</summary>
+    public int CurrencyReserve { get; init; }
+
+    /// <summary>FixedQuantity のときの残り回数。</summary>
+    public int RemainingCount { get; set; }
+
+    /// <summary>UntilTargetQuantity のときの目標所持数。</summary>
+    public int TargetQuantity { get; init; }
+
+    /// <summary>これまでに交換した回数。</summary>
+    public int Completed { get; set; }
+
+    /// <summary>このセッションを開始したプリセット。監視からの実行時のみ設定される。</summary>
+    public Guid PresetId { get; init; }
+}
+
+/// <summary>
 /// 交換の実行。
 ///
 /// 設計原則: 通貨の消費は取り消せない。判断材料が 1 つでも欠けたら撃たない。
@@ -196,6 +225,7 @@ public sealed unsafe class ExchangeExecutor(
     private Vector3 hopStartPosition;
     private Vector3 navigationDestination;
     private ReturnContext? returnContext;
+    private ExchangeSession? session;
     private DateTime lastWaitLogUtc;
 
     /// <summary>移動から始める場合の対象。null なら手動でショップを開いた状態からの実行。</summary>
@@ -215,6 +245,12 @@ public sealed unsafe class ExchangeExecutor(
 
     /// <summary>結果が未確定の発火。null でない間は新しい交換を受け付けない。</summary>
     public PurchaseAttempt? InFlight => Plugin.C.InFlight;
+
+    /// <summary>いま進行中のセッションで交換した回数。</summary>
+    public int SessionCompleted => this.session?.Completed ?? 0;
+
+    /// <summary>いま進行中のプリセット。監視からの実行でなければ空。</summary>
+    public Guid ActivePresetId => this.session?.PresetId ?? Guid.Empty;
 
     public bool CanRequest => this.pendingRequest is null && this.InFlight is null && !this.aborted;
 
@@ -277,6 +313,7 @@ public sealed unsafe class ExchangeExecutor(
         this.aborted = true;
         this.pendingRequest = null;
         this.travelTarget = null;
+        this.session = null;
 
         this.Cleanup();
 
@@ -419,6 +456,10 @@ public sealed unsafe class ExchangeExecutor(
     /// テレポートは行わないため、同じエリアにいる必要がある。
     /// </summary>
     public bool RequestWithTravel(ExchangeDefinition definition, out string reason)
+        => this.RequestWithTravel(definition, new ExchangeSession { Mode = ExchangeMode.FixedQuantity, RemainingCount = 1 }, out reason);
+
+    /// <summary>交換の回数や終了条件を指定して実行する。</summary>
+    public bool RequestWithTravel(ExchangeDefinition definition, ExchangeSession session, out string reason)
     {
         if (!this.Request(definition, out reason))
         {
@@ -469,6 +510,7 @@ public sealed unsafe class ExchangeExecutor(
         // 移動から始めるので、Armed ではなく Navigate から入る。
         this.pendingRequest = null;
         this.travelTarget = definition;
+        this.session = session;
         this.aethernetTried = false;
         this.ownership.Clear();
         this.ownership.IsClaiming = true;
@@ -761,6 +803,7 @@ public sealed unsafe class ExchangeExecutor(
     {
         this.autoRetainer.Release();
         this.returnContext = null;
+        this.session = null;
         this.travelTarget = null;
         this.ownership.Clear();
         this.Step = ExchangeStep.Done;
@@ -1383,7 +1426,28 @@ public sealed unsafe class ExchangeExecutor(
             this.Failure = ExchangeFailure.None;
             this.StatusDetail = attempt.Outcome;
 
-            // 交換が終わったので、止めていたものを元に戻す。
+            if (this.session is { } current)
+            {
+                current.Completed++;
+                if (current.RemainingCount > 0)
+                {
+                    current.RemainingCount--;
+                }
+            }
+
+            // まだ交換を続ける条件を満たしているなら、同じショップでもう一度行う。
+            // ここへ戻れるのは結果が確定した後だけで、未確定のまま再送することはない。
+            if (this.ShouldContinueSession(currencyAfter, rewardAfter, out var stopReason))
+            {
+                this.pendingRequest = this.travelTarget;
+                this.Step = ExchangeStep.Armed;
+                this.StatusDetail = $"{this.session?.Completed ?? 0} 回交換しました。続けます";
+                return true;
+            }
+
+            this.anomalyLog.Info("Exchange", $"交換を終了します（{this.session?.Completed ?? 0} 回）: {stopReason}");
+
+            // 止めていたものを元に戻す。
             this.Step = ExchangeStep.ResumeAutoDuty;
             this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(20);
             return true;
@@ -1406,6 +1470,89 @@ public sealed unsafe class ExchangeExecutor(
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// もう一度交換すべきかを判断する。
+    ///
+    /// 判断材料が足りない場合は「続けない」に倒す。
+    /// 買いすぎは取り返しがつかないため、迷ったら止める。
+    /// </summary>
+    private bool ShouldContinueSession(int currencyAfter, int rewardAfter, out string stopReason)
+    {
+        stopReason = string.Empty;
+
+        var current = this.session;
+        var definition = this.travelTarget;
+
+        if (current is null || definition is null)
+        {
+            stopReason = "セッションが設定されていません";
+            return false;
+        }
+
+        if (current.Completed >= ExchangeSession.HardLimit)
+        {
+            stopReason = $"上限の {ExchangeSession.HardLimit} 回に達しました";
+            return false;
+        }
+
+        if (this.aborted)
+        {
+            stopReason = "停止が要求されました";
+            return false;
+        }
+
+        // 次の 1 回分の通貨が無ければ終わり。
+        if (currencyAfter < definition.CurrencyCost)
+        {
+            stopReason = "通貨が足りません";
+            return false;
+        }
+
+        // 所持枠が無ければ終わり。
+        if (!this.currencyService.TryGetEmptyBagSlots(out var freeSlots) || freeSlots < 1)
+        {
+            stopReason = "所持枠に空きがありません";
+            return false;
+        }
+
+        switch (current.Mode)
+        {
+            case ExchangeMode.FixedQuantity:
+                if (current.RemainingCount <= 0)
+                {
+                    stopReason = "指定回数を交換しました";
+                    return false;
+                }
+
+                return true;
+
+            case ExchangeMode.UntilCurrencyReserve:
+                if (currencyAfter - definition.CurrencyCost < current.CurrencyReserve)
+                {
+                    stopReason = $"残す通貨量 {current.CurrencyReserve} に達しました";
+                    return false;
+                }
+
+                return true;
+
+            case ExchangeMode.UntilTargetQuantity:
+                if (rewardAfter >= current.TargetQuantity)
+                {
+                    stopReason = $"目標の {current.TargetQuantity} 個に達しました";
+                    return false;
+                }
+
+                return true;
+
+            case ExchangeMode.MaxExchange:
+                return true;
+
+            default:
+                stopReason = "交換モードが不明です";
+                return false;
+        }
     }
 
     /// <summary>

@@ -41,6 +41,9 @@ public sealed class ExchangeResolver(AnomalyLog anomalyLog, TomestoneService tom
 
     private List<ExchangeDefinition> results = [];
     private IReadOnlyList<ExchangeDefinition>? liveResults;
+
+    /// <summary>通貨ごとの構築済み結果。監視で通貨を切り替えるたびに作り直さないために持つ。</summary>
+    private readonly Dictionary<uint, List<ExchangeDefinition>> cacheByCurrency = [];
     private uint targetCurrencyItemId;
     private uint enpcCursor;
 
@@ -53,8 +56,24 @@ public sealed class ExchangeResolver(AnomalyLog anomalyLog, TomestoneService tom
     public IReadOnlyList<ExchangeDefinition> Results => this.results;
 
     /// <summary>指定通貨で購入できる交換定義の索引構築を開始する。</summary>
-    public void BeginBuild(uint currencyItemId)
+    public void BeginBuild(uint currencyItemId) => this.BeginBuild(currencyItemId, false);
+
+    /// <summary>
+    /// 索引を構築する。すでに同じ通貨で構築済みならキャッシュを使う。
+    /// forceRebuild を指定すると作り直す。
+    /// </summary>
+    public void BeginBuild(uint currencyItemId, bool forceRebuild)
     {
+        if (!forceRebuild && currencyItemId != 0 && this.cacheByCurrency.TryGetValue(currencyItemId, out var cached))
+        {
+            this.targetCurrencyItemId = currencyItemId;
+            this.results = cached;
+            this.liveResults = null;
+            this.BuildProgress = 1f;
+            this.Stage = ResolverBuildStage.Completed;
+            return;
+        }
+
         this.shopEntries.Clear();
         this.shopToNpcs.Clear();
         this.shopNames.Clear();
@@ -482,6 +501,7 @@ public sealed class ExchangeResolver(AnomalyLog anomalyLog, TomestoneService tom
 
         this.results = definitions;
         this.liveResults = null;
+        this.cacheByCurrency[this.targetCurrencyItemId] = definitions;
         this.BuildProgress = 1f;
         this.Stage = ResolverBuildStage.Completed;
 
@@ -498,6 +518,9 @@ public sealed class ExchangeResolver(AnomalyLog anomalyLog, TomestoneService tom
     /// 値段の比較や交換の実行には、必ずこちらを使うこと。Results を直接使うと、
     /// 同じアイテムを別の値段で持つ死んだショップの定義を掴む。
     /// </summary>
+    /// <summary>その通貨の索引が構築済みか。</summary>
+    public bool IsBuiltFor(uint currencyItemId) => this.cacheByCurrency.ContainsKey(currencyItemId);
+
     public IReadOnlyList<ExchangeDefinition> LiveResults
         => this.liveResults ??= [.. this.results.Where(x => x.HasLocation)];
 
