@@ -57,6 +57,8 @@ public sealed class Plugin : IDalamudPlugin
 
     internal AutoRetainerIpc AutoRetainer { get; private set; } = null!;
 
+    internal MonitorService MonitorService { get; private set; } = null!;
+
     public Plugin(IDalamudPluginInterface pluginInterface)
     {
         P = this;
@@ -99,6 +101,12 @@ public sealed class Plugin : IDalamudPlugin
             this.Lifestream,
             this.AutoDuty,
             this.AutoRetainer);
+        this.MonitorService = new MonitorService(
+            this.AnomalyLog,
+            this.CurrencyService,
+            this.TomestoneService,
+            this.ExchangeResolver,
+            this.ExchangeExecutor);
 
         Svc.Framework.Update += this.OnFrameworkUpdate;
 
@@ -182,6 +190,7 @@ public sealed class Plugin : IDalamudPlugin
 
             this.ExchangeResolver.TickBuild();
             this.ExchangeExecutor.Tick();
+            this.MonitorService.Tick();
         }
         catch (Exception ex)
         {
