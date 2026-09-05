@@ -21,6 +21,15 @@ public enum ExchangeStep
 {
     Idle,
 
+    /// <summary>安全に始められる状態になるのを待っている。</summary>
+    WaitingSafeWindow,
+
+    /// <summary>外部プラグインの新規開始を抑制している。</summary>
+    SuppressExternal,
+
+    /// <summary>AutoDuty を停止している。</summary>
+    StopAutoDuty,
+
     /// <summary>目的のエリアへテレポートしている。</summary>
     Teleport,
 
@@ -47,6 +56,9 @@ public enum ExchangeStep
 
     /// <summary>数量ダイアログが出てしまったので閉じている。</summary>
     CancelDialog,
+
+    /// <summary>AutoDuty を再開している。</summary>
+    ResumeAutoDuty,
 
     Done,
     Error,
@@ -90,6 +102,9 @@ public enum ExchangeFailure
     TeleportUnavailable,
     TeleportFailed,
     AetheryteNotAttuned,
+    AutoDutyStopFailed,
+    AutoDutyResumeFailed,
+    AutoRetainerIpcBroken,
 }
 
 /// <summary>
@@ -144,7 +159,9 @@ public sealed unsafe class ExchangeExecutor(
     MenuService menu,
     AddonOwnershipTracker ownership,
     AetheryteService aetheryte,
-    LifestreamIpc lifestream)
+    LifestreamIpc lifestream,
+    AutoDutyIpc autoDuty,
+    AutoRetainerIpc autoRetainer)
 {
     /// <summary>交換コマンド。0 が購入であることの根拠は実測のみ。他の用途に流用しない。</summary>
     private const int ExchangeCommand = 0;
@@ -171,11 +188,15 @@ public sealed unsafe class ExchangeExecutor(
     private readonly AddonOwnershipTracker ownership = ownership;
     private readonly AetheryteService aetheryte = aetheryte;
     private readonly LifestreamIpc lifestream = lifestream;
+    private readonly AutoDutyIpc autoDuty = autoDuty;
+    private readonly AutoRetainerIpc autoRetainer = autoRetainer;
 
     private int teleportAttempts;
     private bool aethernetTried;
     private Vector3 hopStartPosition;
     private Vector3 navigationDestination;
+    private ReturnContext? returnContext;
+    private DateTime lastWaitLogUtc;
 
     /// <summary>移動から始める場合の対象。null なら手動でショップを開いた状態からの実行。</summary>
     private ExchangeDefinition? travelTarget;
@@ -331,6 +352,17 @@ public sealed unsafe class ExchangeExecutor(
             // 解除できなくても続行する
         }
 
+        // 7. 外部抑制の解除。自分が立てた場合だけ外す。
+        try
+        {
+            this.autoRetainer.Release();
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Error("Cleanup", $"AutoRetainer の抑制を解除できませんでした: {ex.Message}");
+        }
+
+        this.returnContext = null;
         this.ownership.Clear();
     }
 
@@ -441,22 +473,11 @@ public sealed unsafe class ExchangeExecutor(
         this.ownership.Clear();
         this.ownership.IsClaiming = true;
 
-        if (needsTeleport)
-        {
-            this.teleportAttempts = 0;
-            this.Step = ExchangeStep.Teleport;
-            this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(90);
-            this.StatusDetail = $"{NpcLocationService.GetTerritoryName(definition.TerritoryId)} へテレポートしています";
-            return true;
-        }
-
-        if (!this.BeginTravelToNpc(definition, out var navFailure))
-        {
-            this.Fail(ExchangeFailure.NavigationFailed, navFailure);
-            reason = this.StatusDetail;
-            return false;
-        }
-
+        // 移動を始める前に、安全な状態になるまで待ち、外部プラグインを抑制し、AutoDuty を止める。
+        // Duty の途中で抜けさせないため、ここで待つことが最優先になる。
+        this.Step = ExchangeStep.WaitingSafeWindow;
+        this.StatusDetail = "安全に開始できる状態を待っています";
+        this.lastWaitLogUtc = DateTime.MinValue;
         return true;
     }
 
@@ -465,6 +486,22 @@ public sealed unsafe class ExchangeExecutor(
     {
         switch (this.Step)
         {
+            case ExchangeStep.WaitingSafeWindow:
+                this.TickWaitingSafeWindow();
+                break;
+
+            case ExchangeStep.SuppressExternal:
+                this.TickSuppressExternal();
+                break;
+
+            case ExchangeStep.StopAutoDuty:
+                this.TickStopAutoDuty();
+                break;
+
+            case ExchangeStep.ResumeAutoDuty:
+                this.TickResumeAutoDuty();
+                break;
+
             case ExchangeStep.Teleport:
                 this.TickTeleport();
                 break;
@@ -500,6 +537,237 @@ public sealed unsafe class ExchangeExecutor(
             case ExchangeStep.CancelDialog:
                 this.TickCancelDialog();
                 break;
+        }
+    }
+
+    /// <summary>
+    /// 安全に開始できる状態を待つ。
+    ///
+    /// ここには時間制限を設けない。コンテンツ中や戦闘中に時間切れで打ち切っても意味がなく、
+    /// 待つこと自体が正しい振る舞いだからである。
+    /// 何を待っているかは定期的にログへ残す。
+    /// </summary>
+    private void TickWaitingSafeWindow()
+    {
+        if (this.travelTarget is null)
+        {
+            this.Step = ExchangeStep.Idle;
+            return;
+        }
+
+        if (!SafetyGuard.IsSafeToStart(out var reason))
+        {
+            this.StatusDetail = $"待機中: {reason}";
+
+            if (DateTime.UtcNow - this.lastWaitLogUtc > TimeSpan.FromSeconds(60))
+            {
+                this.lastWaitLogUtc = DateTime.UtcNow;
+                this.anomalyLog.Info("Wait", $"開始を待っています: {reason}");
+            }
+
+            return;
+        }
+
+        this.Step = ExchangeStep.SuppressExternal;
+        this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(60);
+        this.StatusDetail = "外部プラグインの状態を確認しています";
+    }
+
+    /// <summary>
+    /// AutoRetainer と競合しないようにする。
+    ///
+    /// 抑制を立ててからもう一度 IsBusy を確認する二段構えにする。
+    /// 「暇である」ことを確認した直後に処理が始まる隙間を塞ぐため。
+    /// </summary>
+    private void TickSuppressExternal()
+    {
+        if (!this.autoRetainer.IsLoaded || !Plugin.C.SuppressAutoRetainer)
+        {
+            this.Step = ExchangeStep.StopAutoDuty;
+            this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(10);
+            return;
+        }
+
+        // 1 段目: 処理中なら待つ。時間で打ち切らない。
+        if (this.autoRetainer.IsBusyFailClosed())
+        {
+            this.StatusDetail = "AutoRetainer の処理が終わるのを待っています";
+
+            if (DateTime.UtcNow - this.lastWaitLogUtc > TimeSpan.FromSeconds(60))
+            {
+                this.lastWaitLogUtc = DateTime.UtcNow;
+                this.anomalyLog.Info("Wait", "AutoRetainer の処理が終わるのを待っています");
+            }
+
+            return;
+        }
+
+        // 2 段目: 先に抑制を立ててから、もう一度確認する。
+        if (!this.autoRetainer.SuppressedByUs)
+        {
+            if (!this.autoRetainer.Suppress())
+            {
+                this.Fail(ExchangeFailure.AutoRetainerIpcBroken, "AutoRetainer の抑制を設定できませんでした");
+                return;
+            }
+
+            this.anomalyLog.Info("Suppress", "AutoRetainer の新規処理を抑制しました（実行中の処理は中断していません）");
+            return;
+        }
+
+        if (this.autoRetainer.IsBusyFailClosed())
+        {
+            // 抑制を立てる直前に始まっていた場合。終わるまで待つ。
+            this.StatusDetail = "AutoRetainer の処理が終わるのを待っています";
+            return;
+        }
+
+        this.Step = ExchangeStep.StopAutoDuty;
+        this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(10);
+        this.StatusDetail = "AutoDuty を停止しています";
+    }
+
+    /// <summary>AutoDuty を止める。止める前の状態を記録して、後で戻せるようにする。</summary>
+    private void TickStopAutoDuty()
+    {
+        var target = this.travelTarget;
+        if (target is null)
+        {
+            this.Step = ExchangeStep.Idle;
+            return;
+        }
+
+        if (!this.autoDuty.IsLoaded)
+        {
+            this.returnContext = null;
+            this.BeginTravel(target);
+            return;
+        }
+
+        // 初回だけ、停止前の状態を記録する。
+        if (this.returnContext is null)
+        {
+            var wasRunning = this.autoDuty.IsRunningFailClosed();
+            this.autoDuty.TryIsLooping(out var looping);
+
+            this.returnContext = new ReturnContext
+            {
+                WasAutoDutyRunning = wasRunning,
+                AutoDutyTerritoryId = Svc.ClientState.TerritoryType,
+                WasLooping = looping,
+            };
+
+            if (!wasRunning)
+            {
+                this.BeginTravel(target);
+                return;
+            }
+
+            this.anomalyLog.Info("AutoDuty", "AutoDuty を停止します");
+        }
+
+        if (this.autoDuty.TryIsStopped(out var stopped) && stopped)
+        {
+            this.BeginTravel(target);
+            return;
+        }
+
+        if (!EzThrottler.Throttle("AutoCollector.StopAutoDuty", 1000))
+        {
+            return;
+        }
+
+        this.autoDuty.TryStop();
+
+        if (DateTime.UtcNow > this.stepDeadlineUtc)
+        {
+            this.Fail(ExchangeFailure.AutoDutyStopFailed, "AutoDuty を停止できませんでした");
+        }
+    }
+
+    /// <summary>移動を開始する。テレポートが必要かどうかはここで判断する。</summary>
+    private void BeginTravel(ExchangeDefinition definition)
+    {
+        if (Svc.ClientState.TerritoryType != definition.TerritoryId)
+        {
+            this.teleportAttempts = 0;
+            this.Step = ExchangeStep.Teleport;
+            this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(90);
+            this.StatusDetail = $"{NpcLocationService.GetTerritoryName(definition.TerritoryId)} へテレポートしています";
+            return;
+        }
+
+        if (!this.BeginTravelToNpc(definition, out var navFailure))
+        {
+            this.Fail(ExchangeFailure.NavigationFailed, navFailure);
+        }
+    }
+
+    /// <summary>
+    /// AutoDuty を再開する。
+    ///
+    /// 停止前に動いていた場合だけ再開する。ユーザー自身が止めていたものを勝手に開始しない。
+    /// 周回カウンタは AutoDuty 側から復元する手段がないため 0 から数え直しになる。
+    /// </summary>
+    private void TickResumeAutoDuty()
+    {
+        var context = this.returnContext;
+
+        if (context is null || !context.WasAutoDutyRunning || !Plugin.C.ResumeAutoDuty || !this.autoDuty.IsLoaded)
+        {
+            this.FinishAfterExchange();
+            return;
+        }
+
+        if (this.autoDuty.TryIsNavigating(out var navigating) && navigating)
+        {
+            this.FinishAfterExchange();
+            return;
+        }
+
+        if (this.autoDuty.TryIsLooping(out var looping) && looping)
+        {
+            this.FinishAfterExchange();
+            return;
+        }
+
+        if (DateTime.UtcNow > this.stepDeadlineUtc)
+        {
+            // 再開できなくても交換自体は成功している。自動で繰り返さず、ユーザーに知らせて終える。
+            this.anomalyLog.Error("AutoDuty", "AutoDuty を再開できませんでした。手動で再開してください");
+            this.Failure = ExchangeFailure.AutoDutyResumeFailed;
+            this.FinishAfterExchange();
+            return;
+        }
+
+        if (!EzThrottler.Throttle("AutoCollector.ResumeAutoDuty", 2000))
+        {
+            return;
+        }
+
+        if (!this.autoDuty.TryContentHasPath(context.AutoDutyTerritoryId, out var hasPath) || !hasPath)
+        {
+            this.anomalyLog.Warn("AutoDuty", "停止前のコンテンツに対応する経路が無いため、再開しません");
+            this.FinishAfterExchange();
+            return;
+        }
+
+        this.anomalyLog.Info("AutoDuty", "AutoDuty を再開します（周回カウンタは 0 から数え直しになります）");
+        this.autoDuty.TryRun(context.AutoDutyTerritoryId);
+    }
+
+    /// <summary>交換後の後始末。抑制を解除して終了する。</summary>
+    private void FinishAfterExchange()
+    {
+        this.autoRetainer.Release();
+        this.returnContext = null;
+        this.travelTarget = null;
+        this.ownership.Clear();
+        this.Step = ExchangeStep.Done;
+
+        if (this.Failure == ExchangeFailure.None)
+        {
+            this.StatusDetail = "完了しました";
         }
     }
 
@@ -1112,11 +1380,12 @@ public sealed unsafe class ExchangeExecutor(
             Plugin.C.InFlight = null;
             EzConfig.Save();
 
-            this.Step = ExchangeStep.Done;
             this.Failure = ExchangeFailure.None;
             this.StatusDetail = attempt.Outcome;
-            this.travelTarget = null;
-            this.ownership.Clear();
+
+            // 交換が終わったので、止めていたものを元に戻す。
+            this.Step = ExchangeStep.ResumeAutoDuty;
+            this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(20);
             return true;
         }
 
