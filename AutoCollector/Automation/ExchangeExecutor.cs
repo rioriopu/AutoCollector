@@ -252,6 +252,9 @@ public sealed unsafe class ExchangeExecutor(
     /// <summary>一時停止の直後、実際に動きが止まるまでの猶予。</summary>
     private DateTime pauseSettleUntilUtc = DateTime.MinValue;
 
+    /// <summary>一時停止が効いたかを確かめた回数。</summary>
+    private int pauseVerifyAttempts;
+
     /// <summary>ループ間処理の中で AutoRetainer が実際に動いたのを観測したか。</summary>
     private bool retainerWorkSeen;
 
@@ -843,12 +846,13 @@ public sealed unsafe class ExchangeExecutor(
         }
 
         context.PausedAutoDuty = true;
+        this.pauseVerifyAttempts = 0;
 
         // 一時停止は vnavmesh の経路も止めるが、実際に足が止まるのは次のフレーム以降になる。
         // 動いたままテレポートを送ると受け付けてもらえないため、少しだけ待つ。
         this.pauseSettleUntilUtc = DateTime.UtcNow.AddMilliseconds(700);
 
-        this.anomalyLog.Info("AutoDuty", "AutoDuty を一時停止しました（ループ間処理の予約は保持されます）");
+        this.anomalyLog.Info("AutoDuty", "AutoDuty へ一時停止を送りました（ループ間処理の予約は保持されます）");
     }
 
     /// <summary>
@@ -1090,6 +1094,34 @@ public sealed unsafe class ExchangeExecutor(
 
             if (DateTime.UtcNow < this.pauseSettleUntilUtc)
             {
+                return;
+            }
+
+            // 送っただけで先へ進まない。AutoDuty 側の状態を読んで、実際に止まったことを確かめる。
+            // 止まっていないまま移動を始めると、AutoDuty と操作を取り合うことになる。
+            if (this.returnContext is { PausedAutoDuty: true } &&
+                this.autoDuty.TryIsPaused(out var reallyPaused) &&
+                !reallyPaused)
+            {
+                this.pauseVerifyAttempts++;
+
+                if (this.pauseVerifyAttempts > 3)
+                {
+                    // 何度送っても止まらない。停止方式へ落とす。
+                    this.pauseUnavailable = true;
+                    this.returnContext = null;
+                    this.anomalyLog.Warn(
+                        "AutoDuty",
+                        "一時停止を送りましたが AutoDuty が止まりません。停止に切り替えます");
+                    return;
+                }
+
+                // まだ止まっていないので送り直す。
+                // すでに一時停止しているときに送ると AutoDuty 側の PreviousStage が壊れるが、
+                // ここは止まっていないことを確認した上での再送なので問題ない。
+                this.autoDuty.TryPause();
+                this.pauseSettleUntilUtc = DateTime.UtcNow.AddMilliseconds(700);
+                this.anomalyLog.Warn("AutoDuty", $"一時停止が効いていないため送り直します（{this.pauseVerifyAttempts} 回目）");
                 return;
             }
 
