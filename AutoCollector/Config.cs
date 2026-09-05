@@ -97,31 +97,22 @@ public sealed class Config
     public bool ResumeAutoDutyOnFailure { get; set; } = true;
 
     /// <summary>
-    /// AutoDuty がループ間の処理（宿屋へ戻る・修理・納品など）をしている間は停止を待つか。
-    /// 途中で止めるとその処理が中断され、設定した動作が行われないまま次へ進む。
-    /// </summary>
-    public bool WaitForAutoDutyBetweenLoopActions { get; set; } = true;
-
-    /// <summary>ループ間処理を待つ上限秒数。これを超えたら停止に進む。</summary>
-    public int AutoDutySettleWaitSeconds { get; set; } = 120;
-
-    /// <summary>
-    /// ループ間処理の待機が上限に達したとき、割り込まずに次の切れ目を待つか。
-    /// 既定は待つ。割り込むとリテイナー処理や GC 納品が失われるため。
-    /// </summary>
-    public bool SkipExchangeWhenBetweenLoopWaitExpires { get; set; } = true;
-
-    /// <summary>
-    /// AutoDuty を止めるときに Stop ではなく一時停止を使う。
+    /// AutoDuty が全周回を終えて停止するまで交換を待つ。
     ///
-    /// Stop は AutoDuty のタスク列を破棄するため、ダンジョン後に積まれた
-    /// ループ間処理（リテイナー・GC 納品・修理など）が失われる。
-    /// 一時停止なら予約が残り、交換のあと続きから実行される。
+    /// AutoDuty のループ間処理（リテイナー・GC 納品）は TaskManager に積まれた
+    /// 予約であり、途中で割り込む手段が無い。一時停止しても、こちらが交換のために
+    /// エリアを移動した時点で AutoDuty の TerritoryChanged が走り、
+    /// TaskManager.Abort() で予約ごと破棄されてしまう
+    /// （AutoDuty.cs の TerritoryChanged は Stage.Stopped のときしか抜けない）。
     ///
-    /// この方式では割り込む時刻を選ぶ必要がないため、
-    /// 「次のコンテンツへ向かい始める瞬間」を狙う待機も不要になる。
+    /// 一方 Stage.Stopped は AutoDuty が唯一「完全に静止した」と保証する状態で、
+    /// 以降 TerritoryChanged にも反応しない。
+    /// そこで、周回の途中に割り込むのをやめ、1 サイクルの終わりを合流点にする。
+    ///
+    /// 交換の頻度は AutoDuty 側の周回数で決まる。こまめに交換したい場合は
+    /// AutoDuty の周回数を小さく（2〜3 周）設定する。
     /// </summary>
-    public bool UseAutoDutyPause { get; set; } = true;
+    public bool WaitForAutoDutyCycleEnd { get; set; } = true;
 
     /// <summary>
     /// 外部の自動化プラグイン（AutoDuty / Artisan）が動作しているときだけ自動交換する。

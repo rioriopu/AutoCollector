@@ -959,11 +959,8 @@ public sealed class MainWindow(Plugin plugin)
         DrawRow("AutoDuty", this.plugin.AutoDuty.IsLoaded, () =>
         {
             // 交換後に再開できなかった場合の受け皿。棒立ちのまま気付かないのを避ける。
-            // AutoDuty 側の状態を読めるならそちらを信じる。
-            // 送ったつもりで止まっていない場合を見逃さないため。
-            var paused = this.plugin.AutoDuty.TryIsPaused(out var reported)
-                ? reported
-                : this.plugin.ExchangeExecutor.IsAutoDutyPaused;
+            // 一時停止は本プラグインからは使わないが、ユーザーが手動で止めている場合に備えて表示する。
+            var paused = this.plugin.AutoDuty.TryIsPaused(out var reported) && reported;
 
             if (paused ||
                 (this.plugin.ExchangeExecutor.LastResumeTerritoryId != 0 &&
@@ -994,11 +991,7 @@ public sealed class MainWindow(Plugin plugin)
 
             if (paused)
             {
-                ImGui.TextColored(
-                    ImGuiColors.DalamudOrange,
-                    this.plugin.ExchangeExecutor.IsAutoDutyPaused
-                        ? "一時停止中（本プラグインが停止させています）"
-                        : "一時停止中");
+                ImGui.TextColored(ImGuiColors.DalamudOrange, "一時停止中");
                 return;
             }
 
@@ -1242,33 +1235,28 @@ public sealed class MainWindow(Plugin plugin)
 
         ImGui.TextColored(ImGuiColors.DalamudGrey, "  周回カウンタは 0 から再カウントされます（AutoDuty 側から復元する手段がないため）");
 
-        var waitBetween = Plugin.C.WaitForAutoDutyBetweenLoopActions;
-        if (ImGui.Checkbox("AutoDuty のループ間処理が終わるまで停止を待つ", ref waitBetween))
+        var waitCycle = Plugin.C.WaitForAutoDutyCycleEnd;
+        if (ImGui.Checkbox("AutoDuty が全周回を終えてから交換する", ref waitCycle))
         {
-            Plugin.C.WaitForAutoDutyBetweenLoopActions = waitBetween;
+            Plugin.C.WaitForAutoDutyCycleEnd = waitCycle;
             changed = true;
         }
 
-        ImGui.TextColored(ImGuiColors.DalamudGrey, "  リテイナー・GC 納品・修理などが終わり、次のコンテンツへ向かい始めてから割り込みます");
+        ImGui.TextColored(
+            ImGuiColors.DalamudGrey,
+            "  周回の途中には割り込めません。AutoDuty のループ間処理（リテイナー・GC 納品）は");
+        ImGui.TextColored(
+            ImGuiColors.DalamudGrey,
+            "  こちらがエリアを移動した時点で AutoDuty 自身に破棄されるためです");
+        ImGui.TextColored(
+            ImGuiColors.DalamudOrange,
+            "  こまめに交換したい場合は、AutoDuty 側の周回数を 2〜3 周に設定してください");
 
-        if (waitBetween)
+        if (!waitCycle)
         {
-            var settleSeconds = Plugin.C.AutoDutySettleWaitSeconds;
-            ImGui.SetNextItemWidth(160f);
-            if (ImGui.InputInt("  待つ上限（秒）", ref settleSeconds))
-            {
-                Plugin.C.AutoDutySettleWaitSeconds = Math.Clamp(settleSeconds, 0, 900);
-                changed = true;
-            }
-
-            var skipOnExpire = Plugin.C.SkipExchangeWhenBetweenLoopWaitExpires;
-            if (ImGui.Checkbox("  上限に達しても割り込まず、次の切れ目を待つ", ref skipOnExpire))
-            {
-                Plugin.C.SkipExchangeWhenBetweenLoopWaitExpires = skipOnExpire;
-                changed = true;
-            }
-
-            ImGui.TextColored(ImGuiColors.DalamudGrey, "    オフにすると割り込みますが、リテイナー処理や GC 納品が失われます");
+            ImGui.TextColored(
+                ImGuiColors.DalamudRed,
+                "  オフにすると周回の途中で停止します。リテイナー処理や GC 納品が失われます");
         }
 
         var resumeOnFailure = Plugin.C.ResumeAutoDutyOnFailure;
@@ -1321,19 +1309,6 @@ public sealed class MainWindow(Plugin plugin)
                 ImGui.TextColored(ImGuiColors.DalamudGrey, "いま: なし");
             }
         }
-
-        ImGui.Spacing();
-
-        var usePause = Plugin.C.UseAutoDutyPause;
-        if (ImGui.Checkbox("AutoDuty は停止ではなく一時停止で割り込む", ref usePause))
-        {
-            Plugin.C.UseAutoDutyPause = usePause;
-            changed = true;
-        }
-
-        ImGui.TextColored(
-            ImGuiColors.DalamudGrey,
-            "  停止はループ間処理（リテイナー・GC 納品）の予約ごと破棄されます。一時停止なら交換後に続きから実行されます");
 
         ImGui.Spacing();
 
