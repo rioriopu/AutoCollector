@@ -124,12 +124,5 @@ public sealed class ReturnContext
 
     /// <summary>AutoDuty が周回中だったか。</summary>
     public bool WasLooping { get; init; }
-
-    /// <summary>
-    /// Stop ではなく一時停止で止めたか。
-    ///
-    /// 一時停止で止めた場合は Run による再開ではなく、一時停止の解除で戻す。
-    /// 周回カウンタもループ間処理の予約もそのまま残るため、こちらの方が副作用が少ない。
-    /// </summary>
-    public bool PausedAutoDuty { get; set; }
 }
+
