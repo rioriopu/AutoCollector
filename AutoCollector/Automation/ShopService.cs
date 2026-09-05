@@ -202,6 +202,23 @@ public sealed class ShopService(AnomalyLog anomalyLog, ShopAddonLayout layout)
     /// そこで (ItemId, コスト) の組がすべて含まれるショップを探す。
     /// </summary>
     public ShopIdentification IdentifyShop(IReadOnlyList<ShopEntry> entries, IReadOnlyList<ExchangeDefinition> definitions)
+        => this.IdentifyShop(entries, definitions, null);
+
+    /// <summary>
+    /// 期待するショップを手がかりに特定する。
+    ///
+    /// 同じ品揃え・同じ値段のショップが複数存在することがある
+    /// （スクリップ交換では同一内容のショップが複数のカテゴリにぶら下がる）。
+    /// その場合、内容だけではどれか決められないが、
+    /// **候補全部が同じ品揃えと値段である以上、どれであっても照合結果は変わらない**。
+    ///
+    /// そこで「自分が向かったショップが候補に含まれているか」を最後の手がかりにする。
+    /// 含まれていなければ従来どおり特定できないものとして扱う。
+    /// </summary>
+    public ShopIdentification IdentifyShop(
+        IReadOnlyList<ShopEntry> entries,
+        IReadOnlyList<ExchangeDefinition> definitions,
+        uint? expectedShopId)
     {
         if (entries.Count == 0)
         {
@@ -222,7 +239,7 @@ public sealed class ShopService(AnomalyLog anomalyLog, ShopAddonLayout layout)
 
         uint? best = null;
         var bestScore = -1;
-        var perfectMatches = 0;
+        var perfect = new List<uint>();
 
         foreach (var (shopId, set) in byShop)
         {
@@ -237,7 +254,7 @@ public sealed class ShopService(AnomalyLog anomalyLog, ShopAddonLayout layout)
 
             if (score == entries.Count)
             {
-                perfectMatches++;
+                perfect.Add(shopId);
             }
 
             if (score > bestScore)
@@ -261,15 +278,25 @@ public sealed class ShopService(AnomalyLog anomalyLog, ShopAddonLayout layout)
                 $"最も近いのは Shop {best} ですが、画面 {entries.Count} 件中 {bestScore} 件しか一致しません");
         }
 
-        if (perfectMatches > 1)
+        if (perfect.Count > 1)
         {
-            // 特定できていない以上、ShopId を返してはならない。
-            // 非 null で返すと IsConfident が true になり、実行ゲートを素通りする。
+            // 自分が向かったショップが候補に含まれているなら、それを採用してよい。
+            // 候補はすべて同じ品揃え・同じ値段なので、どれであっても照合結果は変わらない。
+            if (expectedShopId is { } expected && perfect.Contains(expected))
+            {
+                return new ShopIdentification(
+                    expected,
+                    bestScore,
+                    entries.Count,
+                    $"内容が同一のショップが {perfect.Count} 件ありますが、目的の Shop {expected} が含まれるため採用します");
+            }
+
+            // 手がかりが無ければ特定できない。ShopId を返してはならない。
             return new ShopIdentification(
                 null,
                 bestScore,
                 entries.Count,
-                $"内容が完全一致するショップが {perfectMatches} 件あり、どれか特定できません",
+                $"内容が完全一致するショップが {perfect.Count} 件あり、どれか特定できません",
                 Ambiguous: true);
         }
 

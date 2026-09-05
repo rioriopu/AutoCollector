@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.Numerics;
 using AutoCollector.Diagnostics;
 using Dalamud.Game.ClientState.Objects.Enums;
 using Dalamud.Game.ClientState.Objects.Types;
@@ -50,6 +51,46 @@ public sealed unsafe class InteractionService(AnomalyLog anomalyLog)
             this.anomalyLog.Warn("Interact", $"NPC の検索に失敗しました: {ex.Message}");
             return false;
         }
+    }
+
+    /// <summary>
+    /// 話しかけられる距離にいるか。
+    ///
+    /// ゲーム側の対話可能距離はおよそ 6 前後だが、判定式が公開されていないため
+    /// 余裕を持たせた値で「明らかに遠い」ことだけを判定する。
+    /// ここで false なら、話しかけても「話しかけられない距離です」と出るだけで進まない。
+    /// </summary>
+    public static bool IsWithinInteractRange(IGameObject npc)
+        => Player.Available && Vector3.Distance(Player.Position, npc.Position) <= 5.5f;
+
+    /// <summary>
+    /// 会話ウィンドウ（Talk）が出ていたら進める。
+    ///
+    /// NPC によっては、ショップが開く前に会話が挟まる。
+    /// これを進めないとショップまで到達できず、対話し直しても同じところで止まる。
+    /// </summary>
+    public bool TryAdvanceTalk()
+    {
+        if (!GenericHelpers.TryGetAddonMaster<AddonMaster.Talk>(out var talk) || !talk.IsAddonReady)
+        {
+            return false;
+        }
+
+        if (!EzThrottler.Throttle("AutoCollector.Talk", 300))
+        {
+            return true;
+        }
+
+        try
+        {
+            talk.Click();
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Warn("Interact", $"会話を進められませんでした: {ex.Message}");
+        }
+
+        return true;
     }
 
     /// <summary>

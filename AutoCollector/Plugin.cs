@@ -37,6 +37,8 @@ public sealed class Plugin : IDalamudPlugin
 
     internal ExchangeResolver ExchangeResolver { get; private set; } = null!;
 
+    internal SpecialCurrencyMap SpecialCurrencyMap { get; private set; } = null!;
+
     internal ShopService ShopService { get; private set; } = null!;
 
     internal CallbackRecorder CallbackRecorder { get; private set; } = null!;
@@ -78,7 +80,8 @@ public sealed class Plugin : IDalamudPlugin
         this.CurrencyService = new CurrencyService(this.AnomalyLog);
         this.SelfCheck = new SelfCheck(C, this.AnomalyLog, this.TomestoneService, this.CurrencyService);
         this.NpcLocationService = new NpcLocationService(this.AnomalyLog);
-        this.ExchangeResolver = new ExchangeResolver(this.AnomalyLog, this.TomestoneService, this.NpcLocationService);
+        this.SpecialCurrencyMap = new SpecialCurrencyMap(this.AnomalyLog);
+        this.ExchangeResolver = new ExchangeResolver(this.AnomalyLog, this.TomestoneService, this.NpcLocationService, this.SpecialCurrencyMap);
         this.ShopService = new ShopService(this.AnomalyLog, DataFileLoader.LoadShopLayout(this.AnomalyLog));
         this.CallbackRecorder = new CallbackRecorder(this.AnomalyLog);
         this.AddonOwnership = new AddonOwnershipTracker(this.AnomalyLog);
