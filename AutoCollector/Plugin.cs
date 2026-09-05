@@ -53,6 +53,10 @@ public sealed class Plugin : IDalamudPlugin
 
     internal AetheryteService AetheryteService { get; private set; } = null!;
 
+    internal AutoDutyIpc AutoDuty { get; private set; } = null!;
+
+    internal AutoRetainerIpc AutoRetainer { get; private set; } = null!;
+
     public Plugin(IDalamudPluginInterface pluginInterface)
     {
         P = this;
@@ -80,6 +84,8 @@ public sealed class Plugin : IDalamudPlugin
         this.MenuService = new MenuService(this.AnomalyLog);
         this.Lifestream = new LifestreamIpc(this.AnomalyLog);
         this.AetheryteService = new AetheryteService(this.AnomalyLog);
+        this.AutoDuty = new AutoDutyIpc(this.AnomalyLog);
+        this.AutoRetainer = new AutoRetainerIpc(this.AnomalyLog);
         this.ExchangeExecutor = new ExchangeExecutor(
             this.AnomalyLog,
             this.ShopService,
@@ -90,7 +96,9 @@ public sealed class Plugin : IDalamudPlugin
             this.MenuService,
             this.AddonOwnership,
             this.AetheryteService,
-            this.Lifestream);
+            this.Lifestream,
+            this.AutoDuty,
+            this.AutoRetainer);
 
         Svc.Framework.Update += this.OnFrameworkUpdate;
 
@@ -203,6 +211,16 @@ public sealed class Plugin : IDalamudPlugin
         // ハンドラの解除を最優先で行う。ここが漏れると
         // AutomaticReloading 時に古いインスタンスが動き続ける。
         Svc.Framework.Update -= this.OnFrameworkUpdate;
+
+        // 抑制を立てたまま終了すると AutoRetainer が止まったままになる。最優先で解除する。
+        try
+        {
+            this.AutoRetainer?.Release();
+        }
+        catch (Exception ex)
+        {
+            Svc.Log.Error($"[Auto Collector] AutoRetainer の抑制解除に失敗しました: {ex}");
+        }
 
         try
         {

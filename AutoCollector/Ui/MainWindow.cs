@@ -717,6 +717,10 @@ public sealed class MainWindow(Plugin plugin)
 
         ImGui.Spacing();
         ImGui.Separator();
+        this.DrawAutomationStatus();
+
+        ImGui.Spacing();
+        ImGui.Separator();
 
         if (this.plugin.CurrencyService.TryGetEmptyBagSlots(out var freeSlots))
         {
@@ -725,6 +729,143 @@ public sealed class MainWindow(Plugin plugin)
         else
         {
             ImGui.TextColored(ImGuiColors.DalamudRed, "所持枠の空きを取得できませんでした");
+        }
+    }
+
+    /// <summary>
+    /// 連携先の状態と、いま交換が実行できる状態かを表示する。
+    /// 何を待っているのかが分からないまま止まって見えるのを避ける。
+    /// </summary>
+    private void DrawAutomationStatus()
+    {
+        var executor = this.plugin.ExchangeExecutor;
+
+        ImGui.TextUnformatted("自動処理の状態");
+
+        if (executor.Step != ExchangeStep.Idle || !string.IsNullOrEmpty(executor.StatusDetail))
+        {
+            var color = executor.Step switch
+            {
+                ExchangeStep.Done => ImGuiColors.HealerGreen,
+                ExchangeStep.Error => ImGuiColors.DalamudRed,
+                ExchangeStep.Idle => ImGuiColors.DalamudGrey,
+                _ => ImGuiColors.DalamudYellow,
+            };
+            ImGui.TextColored(color, $"  {executor.Step}: {executor.StatusDetail}");
+        }
+
+        if (SafetyGuard.IsSafeToStart(out var safetyReason))
+        {
+            ImGui.TextColored(ImGuiColors.HealerGreen, "  開始できる状態です");
+        }
+        else
+        {
+            ImGui.TextColored(ImGuiColors.DalamudYellow, $"  開始できません: {safetyReason}");
+        }
+
+        ImGui.Spacing();
+
+        using var table = ImRaii.Table("##automation", 3, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp);
+        if (!table)
+        {
+            return;
+        }
+
+        ImGui.TableSetupColumn("プラグイン", ImGuiTableColumnFlags.WidthFixed, 120f);
+        ImGui.TableSetupColumn("導入", ImGuiTableColumnFlags.WidthFixed, 60f);
+        ImGui.TableSetupColumn("状態");
+        ImGui.TableHeadersRow();
+
+        DrawRow("AutoDuty", this.plugin.AutoDuty.IsLoaded, () =>
+        {
+            if (!this.plugin.AutoDuty.TryIsStopped(out var stopped))
+            {
+                ImGui.TextColored(ImGuiColors.DalamudRed, "状態を取得できません");
+                return;
+            }
+
+            if (stopped)
+            {
+                ImGui.TextUnformatted("停止中");
+                return;
+            }
+
+            this.plugin.AutoDuty.TryIsLooping(out var looping);
+            this.plugin.AutoDuty.TryIsNavigating(out var navigating);
+            ImGui.TextColored(ImGuiColors.DalamudYellow, $"動作中（周回={looping} / 移動={navigating}）");
+        });
+
+        DrawRow("AutoRetainer", this.plugin.AutoRetainer.IsLoaded, () =>
+        {
+            var busy = this.plugin.AutoRetainer.IsBusyFailClosed();
+            this.plugin.AutoRetainer.TryGetSuppressed(out var suppressed);
+
+            if (busy)
+            {
+                ImGui.TextColored(ImGuiColors.DalamudYellow, "処理中");
+            }
+            else
+            {
+                ImGui.TextUnformatted("待機中");
+            }
+
+            if (suppressed)
+            {
+                ImGui.SameLine();
+                ImGui.TextColored(
+                    this.plugin.AutoRetainer.SuppressedByUs ? ImGuiColors.HealerGreen : ImGuiColors.DalamudGrey,
+                    this.plugin.AutoRetainer.SuppressedByUs ? "（本プラグインが抑制中）" : "（他が抑制中）");
+            }
+        });
+
+        DrawRow("vnavmesh", this.plugin.Vnavmesh.IsLoaded, () =>
+        {
+            if (!this.plugin.Vnavmesh.TryIsReady(out var ready))
+            {
+                ImGui.TextColored(ImGuiColors.DalamudRed, "状態を取得できません");
+                return;
+            }
+
+            ImGui.TextUnformatted(ready ? "このエリアで利用可能" : "このエリアのメッシュが未準備");
+        });
+
+        DrawRow("Lifestream", this.plugin.Lifestream.IsLoaded, () =>
+        {
+            if (!this.plugin.Lifestream.TryIsBusy(out var busy))
+            {
+                ImGui.TextColored(ImGuiColors.DalamudRed, "状態を取得できません");
+                return;
+            }
+
+            ImGui.TextUnformatted(busy ? "処理中" : "待機中");
+        });
+
+        static void DrawRow(string name, bool loaded, Action drawState)
+        {
+            ImGui.TableNextRow();
+
+            ImGui.TableNextColumn();
+            ImGui.TextUnformatted(name);
+
+            ImGui.TableNextColumn();
+            if (loaded)
+            {
+                ImGui.TextColored(ImGuiColors.HealerGreen, "あり");
+            }
+            else
+            {
+                ImGui.TextColored(ImGuiColors.DalamudGrey, "なし");
+            }
+
+            ImGui.TableNextColumn();
+            if (loaded)
+            {
+                drawState();
+            }
+            else
+            {
+                ImGui.TextColored(ImGuiColors.DalamudGrey, "該当機能は無効です");
+            }
         }
     }
 
