@@ -26,7 +26,8 @@ public sealed unsafe class AddonOwnershipTracker : IDisposable
 {
     private static readonly string[] Tracked =
     [
-        "ShopExchangeCurrency", "ShopExchangeCurrencyDialog", "SelectYesno", "SelectString", "SelectIconString", "Talk",
+        "ShopExchangeCurrency", "ShopExchangeCurrencyDialog", "InclusionShop", "CollectablesShop",
+        "SelectYesno", "SelectString", "SelectIconString", "Talk",
     ];
 
     private static readonly TimeSpan Lifetime = TimeSpan.FromSeconds(60);
@@ -93,9 +94,19 @@ public sealed unsafe class AddonOwnershipTracker : IDisposable
 
         if (DateTime.UtcNow - claimedAt > Lifetime)
         {
-            // 古い記録は、アドレスが別のアドオンに再利用されている可能性がある。
-            this.owned.Remove(address);
-            return false;
+            if (this.IsClaiming)
+            {
+                // 自分の操作がまだ続いていて、同じアドオンが開いたままなら
+                // 記録を延長する。長い交換の途中で所有権を失うと、
+                // 自分で開いたショップを閉じられなくなる。
+                this.owned[address] = DateTime.UtcNow;
+            }
+            else
+            {
+                // 古い記録は、アドレスが別のアドオンに再利用されている可能性がある。
+                this.owned.Remove(address);
+                return false;
+            }
         }
 
         addon = candidate;

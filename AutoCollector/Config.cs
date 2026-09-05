@@ -90,6 +90,58 @@ public sealed class Config
     /// <summary>交換前に AutoDuty が動いていた場合、交換後に再開するか。</summary>
     public bool ResumeAutoDuty { get; set; } = true;
 
+    /// <summary>
+    /// 交換に失敗した場合も AutoDuty を再開するか。
+    /// 止めっぱなしにすると周回が止まったまま放置されるため既定は有効。
+    /// </summary>
+    public bool ResumeAutoDutyOnFailure { get; set; } = true;
+
+    /// <summary>
+    /// AutoDuty がループ間の処理（宿屋へ戻る・修理・納品など）をしている間は停止を待つか。
+    /// 途中で止めるとその処理が中断され、設定した動作が行われないまま次へ進む。
+    /// </summary>
+    public bool WaitForAutoDutyBetweenLoopActions { get; set; } = true;
+
+    /// <summary>ループ間処理を待つ上限秒数。これを超えたら停止に進む。</summary>
+    public int AutoDutySettleWaitSeconds { get; set; } = 120;
+
+    /// <summary>
+    /// ループ間処理の待機が上限に達したとき、割り込まずに次の切れ目を待つか。
+    /// 既定は待つ。割り込むとリテイナー処理や GC 納品が失われるため。
+    /// </summary>
+    public bool SkipExchangeWhenBetweenLoopWaitExpires { get; set; } = true;
+
+    /// <summary>
+    /// AutoDuty を止めるときに Stop ではなく一時停止を使う。
+    ///
+    /// Stop は AutoDuty のタスク列を破棄するため、ダンジョン後に積まれた
+    /// ループ間処理（リテイナー・GC 納品・修理など）が失われる。
+    /// 一時停止なら予約が残り、交換のあと続きから実行される。
+    ///
+    /// この方式では割り込む時刻を選ぶ必要がないため、
+    /// 「次のコンテンツへ向かい始める瞬間」を狙う待機も不要になる。
+    /// </summary>
+    public bool UseAutoDutyPause { get; set; } = true;
+
+    /// <summary>
+    /// 外部の自動化プラグイン（AutoDuty / Artisan）が動作しているときだけ自動交換する。
+    ///
+    /// プリセットを有効にしただけで動くと、手動で遊んでいる最中に
+    /// 勝手にテレポートして交換を始めてしまう。
+    /// 手動の「行って交換」はこの設定に関わらず実行できる。
+    /// </summary>
+    public bool RequireExternalAutomationRunning { get; set; } = true;
+
+    /// <summary>
+    /// AutoRetainer のベンチャーがまもなく完了する場合、交換を後回しにするか。
+    /// AutoRetainer は一定条件で自動的に処理を始めるため、
+    /// 直前に抑制をかけるとリテイナー処理を横取りする形になる。
+    /// </summary>
+    public bool YieldToUpcomingRetainerVenture { get; set; } = true;
+
+    /// <summary>この秒数以内にベンチャーが完了する場合は待つ。</summary>
+    public int RetainerVentureYieldSeconds { get; set; } = 180;
+
     /// <summary>AutoRetainer が導入されている場合、交換中に SetSuppressed で抑制するか。</summary>
     public bool SuppressAutoRetainer { get; set; } = true;
 
@@ -98,6 +150,15 @@ public sealed class Config
     /// 既定は false（設計決定 D-1「実行中タスクを中断しない」）。
     /// </summary>
     public bool AbortAutoRetainerTasksOnStop { get; set; }
+
+    /// <summary>
+    /// 交換後に残しておく所持枠の数。
+    ///
+    /// AutoRetainer は所持枠が空いていないキャラクタを処理対象から外し、
+    /// その設定を保存する（MultiMode.cs の Data.Enabled = false）。
+    /// 交換で枠を埋め切ると、リテイナーが回らなくなったように見える。
+    /// </summary>
+    public int KeepFreeInventorySlots { get; set; } = 5;
 
     /// <summary>NPC へ近づく際の許容距離。</summary>
     public float NpcApproachRange { get; set; } = 3.0f;

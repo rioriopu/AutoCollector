@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
 using Dalamud.Game.ClientState.Objects.Enums;
@@ -25,6 +26,13 @@ public sealed record TeleportTarget(uint AetheryteId, byte SubIndex, uint Territ
 public sealed class AetheryteService(AnomalyLog anomalyLog)
 {
     private readonly AnomalyLog anomalyLog = anomalyLog;
+
+    /// <summary>
+    /// テレポート可能なエリアの集合。
+    /// UI が行ごとに毎フレーム問い合わせるため、都度エーテライト一覧を走査すると重い。
+    /// </summary>
+    private HashSet<uint>? reachableCache;
+    private DateTime reachableCacheExpiry = DateTime.MinValue;
 
     /// <summary>
     /// 指定エリアへのテレポート先を探す。
@@ -68,7 +76,35 @@ public sealed class AetheryteService(AnomalyLog anomalyLog)
     }
 
     /// <summary>そのエリアへテレポートできるか（アクセス済みか）。</summary>
-    public bool CanReach(uint territoryId) => this.TryFindTarget(territoryId, out _);
+    public bool CanReach(uint territoryId)
+    {
+        if (territoryId == 0)
+        {
+            return false;
+        }
+
+        var now = DateTime.UtcNow;
+        if (this.reachableCache is null || now > this.reachableCacheExpiry)
+        {
+            var set = new HashSet<uint>();
+            try
+            {
+                foreach (var entry in Svc.AetheryteList)
+                {
+                    set.Add(entry.TerritoryId);
+                }
+            }
+            catch (Exception ex)
+            {
+                this.anomalyLog.Warn("Aetheryte", $"エーテライト一覧を取得できませんでした: {ex.Message}");
+            }
+
+            this.reachableCache = set;
+            this.reachableCacheExpiry = now.AddSeconds(5);
+        }
+
+        return this.reachableCache.Contains(territoryId);
+    }
 
     /// <summary>
     /// いまいるエリアで、目的地に一番近いエーテライト網の転送先を探す。

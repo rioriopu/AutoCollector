@@ -35,6 +35,20 @@ public sealed class NpcLocationService(AnomalyLog anomalyLog)
 {
     private const byte EventNpcLevelType = 8;
 
+    /// <summary>
+    /// 読む配置ファイル。
+    ///
+    /// planner.lgb も読むべきという指摘があったが、実測したところ
+    /// 30 エリアで 170 秒（全 589 エリア換算で約 56 分）かかった。
+    /// planevent.lgb は同じ 30 エリアで 82 ms なので 2000 倍以上遅い。
+    /// しかも planner.lgb は 30 件中 13 件しか存在せず、オブジェクト数も 1/9 しかない。
+    /// 存在しないファイルの探索コストが極端に高いためと考えられる。
+    ///
+    /// 起動が実用に耐えなくなるため読まない。
+    /// planevent に無い NPC は、そのエリアにいるときに実際のオブジェクトから解決する。
+    /// </summary>
+    private static readonly string[] LayerFileNames = ["planevent.lgb"];
+
     private readonly AnomalyLog anomalyLog = anomalyLog;
     private readonly Dictionary<uint, List<NpcLocation>> index = [];
 
@@ -157,25 +171,48 @@ public sealed class NpcLocationService(AnomalyLog anomalyLog)
                 continue;
             }
 
-            var path = $"bg/{bg[..separator]}/planevent.lgb";
-
-            LgbFile? lgb;
-            try
+            // 配置ファイルは 1 つとは限らない。planevent に無い NPC が planner にいることがある。
+            // 片方しか読まないと、その NPC が無言で候補から落ちる。
+            foreach (var fileName in LayerFileNames)
             {
-                lgb = Svc.Data.GetFile<LgbFile>(path);
-            }
-            catch
-            {
-                // 配置ファイルが無いエリアは珍しくない。索引に足せないだけなので無視する。
-                continue;
-            }
+                LgbFile? lgb;
+                try
+                {
+                    lgb = Svc.Data.GetFile<LgbFile>($"bg/{bg[..separator]}/{fileName}");
+                }
+                catch
+                {
+                    // 配置ファイルが無いエリアは珍しくない。索引に足せないだけなので無視する。
+                    continue;
+                }
 
-            if (lgb is null)
-            {
-                continue;
-            }
+                if (lgb is null)
+                {
+                    continue;
+                }
 
-            foreach (var layer in lgb.Layers)
+                this.CollectFromLayers(lgb, territoryId);
+            }
+        }
+
+        this.BuildProgress = 0.2f + (0.8f * this.bgCursor / Math.Max(1, this.pendingBgPaths.Count));
+
+        if (this.bgCursor < this.pendingBgPaths.Count)
+        {
+            return false;
+        }
+
+        this.IsReady = true;
+        this.BuildProgress = 1f;
+        this.pendingBgPaths = null;
+        this.bgToTerritory = null;
+        this.anomalyLog.Info("NpcLocation", $"NPC 配置の索引を構築しました（{this.index.Count} 体）");
+        return true;
+    }
+
+    private void CollectFromLayers(LgbFile lgb, uint territoryId)
+    {
+        foreach (var layer in lgb.Layers)
             {
                 foreach (var instance in layer.InstanceObjects)
                 {
@@ -203,21 +240,6 @@ public sealed class NpcLocationService(AnomalyLog anomalyLog)
                     this.Add(baseId, new NpcLocation(territoryId, position, NpcLocationSource.LayerFile));
                 }
             }
-        }
-
-        this.BuildProgress = 0.2f + (0.8f * this.bgCursor / Math.Max(1, this.pendingBgPaths.Count));
-
-        if (this.bgCursor < this.pendingBgPaths.Count)
-        {
-            return false;
-        }
-
-        this.IsReady = true;
-        this.BuildProgress = 1f;
-        this.pendingBgPaths = null;
-        this.bgToTerritory = null;
-        this.anomalyLog.Info("NpcLocation", $"NPC 配置の索引を構築しました（{this.index.Count} 体）");
-        return true;
     }
 
     private void Add(uint npcDataId, NpcLocation location)

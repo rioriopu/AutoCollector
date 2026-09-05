@@ -113,9 +113,23 @@ public sealed class ReturnContext
     /// <summary>交換を始める前に AutoDuty が動いていたか。</summary>
     public bool WasAutoDutyRunning { get; init; }
 
-    /// <summary>そのときのエリア。再開時に同じコンテンツへ戻すために使う。</summary>
+    /// <summary>
+    /// 再開時に AutoDuty へ渡すエリア。
+    ///
+    /// AutoDuty を止めるのは必ず Duty の外なので、停止した瞬間の現在地は街になる。
+    /// AutoDuty.Run はコンテンツのエリアを要求するため、街を渡しても再開できない。
+    /// そこで、交換を待っている間に観測した「Duty 中のエリア」を使う。
+    /// </summary>
     public uint AutoDutyTerritoryId { get; init; }
 
     /// <summary>AutoDuty が周回中だったか。</summary>
     public bool WasLooping { get; init; }
+
+    /// <summary>
+    /// Stop ではなく一時停止で止めたか。
+    ///
+    /// 一時停止で止めた場合は Run による再開ではなく、一時停止の解除で戻す。
+    /// 周回カウンタもループ間処理の予約もそのまま残るため、こちらの方が副作用が少ない。
+    /// </summary>
+    public bool PausedAutoDuty { get; set; }
 }

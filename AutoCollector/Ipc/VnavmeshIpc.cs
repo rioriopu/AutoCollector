@@ -43,6 +43,19 @@ public sealed class VnavmeshIpc(AnomalyLog anomalyLog) : IpcGateBase("vnavmesh",
             out accepted);
 
     /// <summary>
+    /// 指定座標に最も近いナビメッシュ上の点を返す。
+    ///
+    /// PointOnFloor は「真下の床」を探すため、建物の中にいる NPC に対して
+    /// 別の階層や屋外の地面を拾うことがある。
+    /// こちらはメッシュ上の最近傍を返すので、屋内でもその場の床に乗る。
+    /// </summary>
+    public bool TryNearestPoint(Vector3 position, float halfExtentXZ, float halfExtentY, out Vector3? nearest)
+        => this.TryInvoke(
+            "Query.Mesh.NearestPoint",
+            () => this.Func<Vector3, float, float, Vector3?>("vnavmesh.Query.Mesh.NearestPoint").InvokeFunc(position, halfExtentXZ, halfExtentY),
+            out nearest);
+
+    /// <summary>
     /// 指定座標の真下にある床の座標を返す。
     ///
     /// 配置ファイル由来の NPC 座標はナビメッシュ上に乗っていないことがあり、

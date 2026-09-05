@@ -44,11 +44,21 @@ public sealed class ExchangeResolver(
     /// <summary>ShopId → SpecialShop.Name。会話メニューの選択肢と照合するために保持する。</summary>
     private readonly Dictionary<uint, string> shopNames = [];
 
-    /// <summary>ShopId → InclusionShop の経路。画面のカテゴリ選択に使う。</summary>
-    private readonly Dictionary<uint, InclusionPath> inclusionPaths = [];
+    /// <summary>
+    /// (ShopId, NpcId) → InclusionShop の経路。
+    ///
+    /// 同じ SpecialShop が複数の InclusionShop・複数のカテゴリにぶら下がるため、
+    /// ShopId だけをキーにすると後から見つかった NPC のカテゴリで上書きされ、
+    /// 別の NPC に対して誤ったカテゴリを使うことになる。
+    /// </summary>
+    private readonly Dictionary<(uint ShopId, uint NpcId), InclusionPath> inclusionPaths = [];
 
     private List<ExchangeDefinition> results = [];
     private IReadOnlyList<ExchangeDefinition>? liveResults;
+
+    /// <summary>GroupByReward の結果。UI から毎フレーム呼ばれるため、作り直さない。</summary>
+    private List<ExchangeCandidateGroup>? groupedAll;
+    private List<ExchangeCandidateGroup>? groupedWithLocation;
 
     /// <summary>通貨ごとの構築済み結果。監視で通貨を切り替えるたびに作り直さないために持つ。</summary>
     private readonly Dictionary<uint, List<ExchangeDefinition>> cacheByCurrency = [];
@@ -74,9 +84,17 @@ public sealed class ExchangeResolver(
     {
         if (!forceRebuild && currencyItemId != 0 && this.cacheByCurrency.TryGetValue(currencyItemId, out var cached))
         {
+            if (this.targetCurrencyItemId == currencyItemId && this.Stage == ResolverBuildStage.Completed)
+            {
+                // すでにこの通貨で構築済み。作り直すとキャッシュが無駄になる。
+                return;
+            }
+
             this.targetCurrencyItemId = currencyItemId;
             this.results = cached;
             this.liveResults = null;
+            this.groupedAll = null;
+            this.groupedWithLocation = null;
             this.BuildProgress = 1f;
             this.Stage = ResolverBuildStage.Completed;
             return;
@@ -88,6 +106,8 @@ public sealed class ExchangeResolver(
         this.inclusionPaths.Clear();
         this.results = [];
         this.liveResults = null;
+        this.groupedAll = null;
+        this.groupedWithLocation = null;
         this.targetCurrencyItemId = currencyItemId;
         this.enpcCursor = 0;
         this.BuildProgress = 0f;
@@ -429,7 +449,8 @@ public sealed class ExchangeResolver(
                         }
 
                         // どのカテゴリの中にあるかを、後で画面を操作するときのために覚えておく。
-                        this.inclusionPaths[specialShopId] = new InclusionPath(
+                        // NPC ごとにカテゴリが違うため、NPC も含めたキーで持つ。
+                        this.inclusionPaths[(specialShopId, npcId)] = new InclusionPath(
                             handler,
                             string.IsNullOrEmpty(shopName) ? menuHint : shopName,
                             categoryRef.RowId,
@@ -502,11 +523,18 @@ public sealed class ExchangeResolver(
         }
 
         // 同一 NPC が複数経路で同じショップに到達することがある。
-        // より単純な経路（Direct < PreHandler < TopicSelect < CustomTalk）を優先して残す。
+        // より単純な経路を優先して残すが、InclusionShop 経由は画面の操作方法が違うため
+        // 「単純さ」で捨ててはいけない。到達手段として別物なので、こちらを優先する。
         var existing = list.FindIndex(x => x.NpcId == npcId);
         if (existing >= 0)
         {
-            if (path < list[existing].Path)
+            var current = list[existing];
+
+            var replace = path == HandlerPath.InclusionShop
+                ? current.Path != HandlerPath.InclusionShop
+                : current.Path != HandlerPath.InclusionShop && path < current.Path;
+
+            if (replace)
             {
                 list[existing] = new NpcHandlerRecord(npcId, path, menuHint);
             }
@@ -544,7 +572,6 @@ public sealed class ExchangeResolver(
                         SingleReward = entry.SingleReward,
                         SingleCost = entry.SingleCost,
                         ShopName = this.shopNames.GetValueOrDefault(shopId, string.Empty),
-                        Inclusion = this.inclusionPaths.GetValueOrDefault(shopId),
                     });
                     continue;
                 }
@@ -566,7 +593,7 @@ public sealed class ExchangeResolver(
                         SingleReward = entry.SingleReward,
                         SingleCost = entry.SingleCost,
                         ShopName = this.shopNames.GetValueOrDefault(shopId, string.Empty),
-                        Inclusion = this.inclusionPaths.GetValueOrDefault(shopId),
+                        Inclusion = this.inclusionPaths.GetValueOrDefault((shopId, npc.NpcId)),
                         NpcDataId = npc.NpcId,
                         NpcName = NpcLocationService.GetName(npc.NpcId),
                         TerritoryId = hasLocation ? location.TerritoryId : 0,
@@ -580,6 +607,8 @@ public sealed class ExchangeResolver(
 
         this.results = definitions;
         this.liveResults = null;
+        this.groupedAll = null;
+        this.groupedWithLocation = null;
         this.cacheByCurrency[this.targetCurrencyItemId] = definitions;
         this.BuildProgress = 1f;
         this.Stage = ResolverBuildStage.Completed;
@@ -604,7 +633,24 @@ public sealed class ExchangeResolver(
         => this.liveResults ??= [.. this.results.Where(x => x.HasLocation)];
 
     /// <summary>報酬アイテムごとにまとめた候補一覧を返す。UI 表示用。</summary>
+    /// <summary>
+    /// 報酬アイテムごとにまとめた候補一覧を返す。
+    ///
+    /// UI から毎フレーム呼ばれる。定義が数千件になることがあり、
+    /// 呼ばれるたびに集計し直すと描画だけでフレーム時間を使い切る。
+    /// 索引を作り直したときにだけ計算する。
+    /// </summary>
     public List<ExchangeCandidateGroup> GroupByReward(bool onlyWithLocation)
+    {
+        if (onlyWithLocation)
+        {
+            return this.groupedWithLocation ??= this.BuildGroups(true);
+        }
+
+        return this.groupedAll ??= this.BuildGroups(false);
+    }
+
+    private List<ExchangeCandidateGroup> BuildGroups(bool onlyWithLocation)
     {
         var itemSheet = Svc.Data.GetExcelSheet<Item>();
 

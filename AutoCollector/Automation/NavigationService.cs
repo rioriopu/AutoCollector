@@ -34,7 +34,12 @@ public enum MoveStatus
 /// </summary>
 public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmesh)
 {
-    /// <summary>到着したと認める前に、条件を満たし続ける必要のあるフレーム数。</summary>
+    /// <summary>
+    /// 到着したと認める前に、条件を満たし続ける必要のある判定回数。
+    /// vnavmesh は再試行のたびに走行フラグを false と true で往復させるため、
+    /// 1 回 false を見ただけで完了と判定してはいけない。
+    /// 呼び出し間隔が 100 ミリ秒なので、3 回で約 0.3 秒の安定を要求することになる。
+    /// </summary>
     private const int RequiredStableFrames = 3;
 
     private static readonly TimeSpan StuckWindow = TimeSpan.FromSeconds(15);
@@ -59,19 +64,39 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
     {
         snapped = position;
 
+        // まずメッシュ上の最近傍を探す。建物の中でもその場の床に乗る。
+        // 探索範囲を狭くしているのは、遠くの別の場所を拾わないため。
+        if (this.vnavmesh.TryNearestPoint(position, 2f, 2f, out var nearest) &&
+            nearest is not null &&
+            Vector3.Distance(nearest.Value, position) <= 3f)
+        {
+            snapped = nearest.Value;
+            return true;
+        }
+
+        // 見つからなければ真下の床を探す。ただし別の階層を拾いやすいので許容幅を狭くする。
         if (!this.vnavmesh.TryPointOnFloor(position, out var result) || result is null)
         {
             return false;
         }
 
-        // 大きく離れた場所を返された場合は採用しない。別の階層の床を拾うことがある。
-        if (Vector3.Distance(result.Value, position) > 10f)
+        if (Vector3.Distance(result.Value, position) > 3f)
         {
             return false;
         }
 
         snapped = result.Value;
         return true;
+    }
+
+    /// <summary>
+    /// 目的地を変えて移動をやり直す。
+    /// 目的地だけ書き換えて移動を出し直さないと、経路と到着判定がずれる。
+    /// </summary>
+    public bool Reissue(Vector3 destination, float range, out string failureReason)
+    {
+        this.vnavmesh.TryStop();
+        return this.BeginMove(destination, range, out failureReason);
     }
 
     /// <summary>移動を開始する。1 回だけ発行し、以降は状態を監視するだけにする。</summary>

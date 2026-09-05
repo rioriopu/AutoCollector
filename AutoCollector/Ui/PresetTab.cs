@@ -302,6 +302,8 @@ public sealed class PresetTab(Plugin plugin)
             return;
         }
 
+        // 構築済みの索引をこの通貨へ切り替える。
+        // BeginBuild は同じ通貨なら何もしないため、毎フレーム呼んでも作り直しは起きない。
         this.plugin.ExchangeResolver.BeginBuild(currencyItemId);
 
         ImGui.SetNextItemWidth(280f);
@@ -320,14 +322,31 @@ public sealed class PresetTab(Plugin plugin)
 
         foreach (var group in filtered.Take(200))
         {
-            var definition = group.Definitions[0];
-            var selected = preset.RewardItemId == group.RewardItemId;
+            var selectedItem = preset.RewardItemId == group.RewardItemId;
 
-            if (ImGui.Selectable($"{group.RewardName}（{definition.CurrencyCost:N0}） — {definition.NpcName}", selected))
+            // 同じアイテムを複数の NPC が扱うことがある。
+            // 1 つ目だけを出すと、行きたい交換所を選べない。
+            using var node = ImRaii.TreeNode(
+                $"{group.RewardName}（{group.Definitions[0].CurrencyCost:N0}）##reward{group.RewardItemId}",
+                selectedItem ? ImGuiTreeNodeFlags.DefaultOpen : ImGuiTreeNodeFlags.None);
+
+            if (!node)
             {
-                preset.RewardItemId = group.RewardItemId;
-                preset.PreferredNpcDataId = definition.NpcDataId;
-                changed = true;
+                continue;
+            }
+
+            foreach (var definition in group.Definitions)
+            {
+                var selected = selectedItem && preset.PreferredNpcDataId == definition.NpcDataId;
+                var area = NpcLocationService.GetTerritoryName(definition.TerritoryId);
+                var note = definition.UsesInclusionShop ? "（アイテム交換画面・自動実行は未対応）" : string.Empty;
+
+                if (ImGui.Selectable($"  {definition.NpcName} — {area}{note}##npc{group.RewardItemId}_{definition.NpcDataId}_{definition.ShopId}", selected))
+                {
+                    preset.RewardItemId = group.RewardItemId;
+                    preset.PreferredNpcDataId = definition.NpcDataId;
+                    changed = true;
+                }
             }
         }
 

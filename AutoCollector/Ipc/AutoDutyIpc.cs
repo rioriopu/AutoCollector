@@ -1,4 +1,6 @@
+using System;
 using AutoCollector.Diagnostics;
+using ECommons.DalamudServices;
 
 namespace AutoCollector.Ipc;
 
@@ -20,6 +22,24 @@ public sealed class AutoDutyIpc(AnomalyLog anomalyLog) : IpcGateBase("AutoDuty",
 
     public bool TryIsLooping(out bool looping)
         => this.TryInvoke("IsLooping", () => this.Func<bool>("AutoDuty.IsLooping").InvokeFunc(), out looping);
+
+    /// <summary>
+    /// AutoDuty の設定値を読む。フィールド名をそのまま渡す。
+    /// 見つからない場合は空文字が返る。
+    /// </summary>
+    public bool TryGetConfig(string key, out string value)
+        => this.TryInvoke("GetConfig", () => this.Func<string, string>("AutoDuty.GetConfig").InvokeFunc(key), out value);
+
+    /// <summary>設定を真偽値として読む。読めない場合は既定値を返す。</summary>
+    public bool GetConfigBool(string key, bool fallback)
+    {
+        if (!this.TryGetConfig(key, out var raw) || string.IsNullOrEmpty(raw))
+        {
+            return fallback;
+        }
+
+        return bool.TryParse(raw, out var parsed) ? parsed : fallback;
+    }
 
     public bool TryContentHasPath(uint territoryType, out bool hasPath)
         => this.TryInvoke("ContentHasPath", () => this.Func<uint, bool>("AutoDuty.ContentHasPath").InvokeFunc(territoryType), out hasPath);
@@ -52,6 +72,47 @@ public sealed class AutoDutyIpc(AnomalyLog anomalyLog) : IpcGateBase("AutoDuty",
     /// </summary>
     public bool TryStop()
         => this.TryAction("Stop", () => this.Func<object>("AutoDuty.Stop").InvokeAction());
+
+    /// <summary>
+    /// 一時停止する。
+    ///
+    /// Stop は Stage.Stopped 経由で TaskManager.Abort を呼ぶため、
+    /// ダンジョン後に積まれたループ間処理（リテイナー・GC 納品・修理など）の
+    /// 予約ごと消えてしまう。
+    ///
+    /// 一時停止は TaskManager をステップモードにするだけで予約はそのまま残るため、
+    /// 交換のために割り込むときはこちらを使う。再開すれば続きから実行される。
+    ///
+    /// IPC には無いのでコマンドとして送る。
+    /// </summary>
+    public bool TryPause() => this.TryProcessCommand("/ad pause");
+
+    /// <summary>一時停止から復帰する。</summary>
+    public bool TryResume() => this.TryProcessCommand("/ad resume");
+
+    private bool TryProcessCommand(string command)
+    {
+        if (!this.IsLoaded)
+        {
+            return false;
+        }
+
+        try
+        {
+            if (Svc.Commands.ProcessCommand(command))
+            {
+                return true;
+            }
+
+            this.AnomalyLog.Warn("Ipc", $"[AutoDuty] コマンド {command} が受け付けられませんでした");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            this.AnomalyLog.Warn("Ipc", $"[AutoDuty] コマンド {command} に失敗しました: {ex.Message}");
+            return false;
+        }
+    }
 
     /// <summary>
     /// 周回を再開する。

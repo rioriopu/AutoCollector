@@ -44,6 +44,30 @@ public sealed class AutoRetainerIpc(AnomalyLog anomalyLog) : IpcGateBase("AutoRe
     public bool TryGetMultiModeStatus(out bool enabled)
         => this.TryInvoke("PluginState.GetMultiModeStatus", () => this.Func<bool>("AutoRetainer.PluginState.GetMultiModeStatus").InvokeFunc(), out enabled);
 
+    /// <summary>
+    /// もっとも早く完了するベンチャーまでの残り秒数。
+    /// 取得できない場合は false。負の値は「すでに完了している」を意味しうる。
+    /// </summary>
+    public bool TryGetClosestVentureSeconds(ulong contentId, out long seconds)
+    {
+        seconds = 0;
+        if (!this.TryInvoke(
+                "PluginState.GetClosestRetainerVentureSecondsRemaining",
+                () => this.Func<ulong, long?>("AutoRetainer.PluginState.GetClosestRetainerVentureSecondsRemaining").InvokeFunc(contentId),
+                out long? value))
+        {
+            return false;
+        }
+
+        if (value is null)
+        {
+            return false;
+        }
+
+        seconds = value.Value;
+        return true;
+    }
+
     public bool TryGetSuppressed(out bool suppressed)
         => this.TryInvoke("GetSuppressed", () => this.Func<bool>("AutoRetainer.GetSuppressed").InvokeFunc(), out suppressed);
 

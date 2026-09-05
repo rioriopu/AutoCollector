@@ -23,6 +23,13 @@ public sealed class MainWindow(Plugin plugin)
     private bool onlyWithLocation = true;
     private string rewardFilter = string.Empty;
     private int exchangeChoice;
+
+    /// <summary>画面の読み取り結果を保持する。毎フレーム読み直すと描画だけで重くなる。</summary>
+    private DateTime nextShopReadUtc = DateTime.MinValue;
+    private IReadOnlyList<ShopEntry> cachedEntries = [];
+    private ShopHeader cachedHeader = new(0, 0, 0, string.Empty, 0);
+    private string cachedShopFailure = string.Empty;
+    private List<(string Label, AtkValueProbe Probe)> cachedDiagnostics = [];
     private readonly PresetTab presetTab = new(plugin);
 
     public void Draw()
@@ -69,14 +76,41 @@ public sealed class MainWindow(Plugin plugin)
 
         ImGui.Separator();
 
+        // InclusionShop（スクリップ交換など）は別アドオン。開いていればそちらを表示する。
+        if (this.plugin.InclusionShopService.IsOpen())
+        {
+            this.DrawInclusionShop();
+            ImGui.Spacing();
+            ImGui.Separator();
+            this.DrawCallbackRecorder();
+            return;
+        }
+
         if (!shop.IsShopOpen())
         {
             ImGui.TextColored(ImGuiColors.DalamudYellow, "交換ショップが開いていません。");
             return;
         }
 
-        // 配置が合っているかを、値と型の両方で目視確認できるようにする
-        var diagnostics = shop.DiagnoseLayout();
+        // 画面の読み取りは重い。表示のためだけに毎フレーム読み直さない。
+        if (DateTime.UtcNow >= this.nextShopReadUtc)
+        {
+            this.nextShopReadUtc = DateTime.UtcNow.AddMilliseconds(250);
+            this.cachedDiagnostics = shop.DiagnoseLayout();
+            if (!shop.TryReadEntries(out var readEntries, out var readHeader, out var readFailure))
+            {
+                this.cachedEntries = [];
+                this.cachedShopFailure = readFailure;
+            }
+            else
+            {
+                this.cachedEntries = readEntries;
+                this.cachedHeader = readHeader;
+                this.cachedShopFailure = string.Empty;
+            }
+        }
+
+        var diagnostics = this.cachedDiagnostics;
         if (diagnostics.Count > 0)
         {
             using var node = ImRaii.TreeNode("AtkValue 配置の診断");
@@ -122,11 +156,14 @@ public sealed class MainWindow(Plugin plugin)
             }
         }
 
-        if (!shop.TryReadEntries(out var entries, out var header, out var failure))
+        if (!string.IsNullOrEmpty(this.cachedShopFailure))
         {
-            ImGui.TextColored(ImGuiColors.DalamudRed, failure);
+            ImGui.TextColored(ImGuiColors.DalamudRed, this.cachedShopFailure);
             return;
         }
+
+        var entries = this.cachedEntries;
+        var header = this.cachedHeader;
 
         ImGui.TextUnformatted($"申告エントリ数: {header.DeclaredEntryCount} / 実際に読めた件数: {entries.Count}");
         if (header.UnreadableEntries > 0)
@@ -277,6 +314,88 @@ public sealed class MainWindow(Plugin plugin)
         ImGui.Spacing();
         ImGui.Separator();
         this.DrawCallbackRecorder();
+    }
+
+    /// <summary>
+    /// InclusionShop（スクリップ交換など）の内容を表示する。
+    /// 2 段のドロップダウン（系統・種別）で絞ってから交換する構造のため、
+    /// いまどこが選ばれているかも合わせて出す。
+    /// </summary>
+    private unsafe void DrawInclusionShop()
+    {
+        var service = this.plugin.InclusionShopService;
+
+        ImGui.TextColored(ImGuiColors.HealerGreen, "InclusionShop（アイテム交換）が開いています。");
+
+        if (service.TryGetSelection(out var selection) && selection is not null)
+        {
+            ImGui.TextUnformatted(
+                $"InclusionShop {selection.InclusionShopId} / 系統 {selection.SelectedCategoryIndex + 1}・{selection.CategoryCount} " +
+                $"(行 {selection.SelectedCategoryRowId} / シリーズ {selection.SelectedSeriesId})");
+            ImGui.TextUnformatted($"種別 タブ {selection.SelectedSubCategoryTab} / 表示 {selection.VisibleSubCategoryCount}");
+        }
+        else
+        {
+            ImGui.TextColored(ImGuiColors.DalamudYellow, "選択状態を読めませんでした。");
+        }
+
+        if (!service.TryGetAddon(out var addon))
+        {
+            return;
+        }
+
+        if (!service.TryReadEntries(addon, out var entries, out var currency, out var failure))
+        {
+            ImGui.TextColored(ImGuiColors.DalamudRed, failure);
+            return;
+        }
+
+        ImGui.TextUnformatted($"画面上の通貨: {currency:N0} / エントリ {entries.Count} 件");
+
+        if (entries.Count == 0)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudYellow, "種別が選ばれていないため、品目が表示されていません。");
+            return;
+        }
+
+        using var table = ImRaii.Table("##inclusionentries", 6, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp | ImGuiTableFlags.ScrollY, new System.Numerics.Vector2(0, 320));
+        if (!table)
+        {
+            return;
+        }
+
+        ImGui.TableSetupColumn("枠", ImGuiTableColumnFlags.WidthFixed, 40f);
+        ImGui.TableSetupColumn("ItemId", ImGuiTableColumnFlags.WidthFixed, 70f);
+        ImGui.TableSetupColumn("アイテム");
+        ImGui.TableSetupColumn("コスト", ImGuiTableColumnFlags.WidthFixed, 80f);
+        ImGui.TableSetupColumn("通貨値", ImGuiTableColumnFlags.WidthFixed, 70f);
+        ImGui.TableSetupColumn("index", ImGuiTableColumnFlags.WidthFixed, 55f);
+        ImGui.TableSetupScrollFreeze(0, 1);
+        ImGui.TableHeadersRow();
+
+        foreach (var entry in entries)
+        {
+            ImGui.TableNextRow();
+
+            ImGui.TableNextColumn();
+            ImGui.TextUnformatted(entry.Slot.ToString());
+
+            ImGui.TableNextColumn();
+            ImGui.TextUnformatted(entry.ItemId.ToString());
+
+            ImGui.TableNextColumn();
+            ImGui.TextUnformatted(entry.ItemName);
+
+            ImGui.TableNextColumn();
+            ImGui.TextUnformatted(entry.CostAmount.ToString("N0"));
+
+            ImGui.TableNextColumn();
+            // 8 未満なら特殊通貨のインデックス。ItemId ではない点が分かるように出す。
+            ImGui.TextUnformatted(entry.CostItemId < 8 ? $"idx {entry.CostItemId}" : entry.CostItemId.ToString());
+
+            ImGui.TableNextColumn();
+            ImGui.TextUnformatted(entry.Index.ToString());
+        }
     }
 
     /// <summary>
@@ -719,6 +838,10 @@ public sealed class MainWindow(Plugin plugin)
 
         ImGui.Spacing();
         ImGui.Separator();
+        this.DrawInFlightBanner();
+
+        ImGui.Spacing();
+        ImGui.Separator();
         this.DrawAutomationStatus();
 
         ImGui.Spacing();
@@ -731,6 +854,61 @@ public sealed class MainWindow(Plugin plugin)
         else
         {
             ImGui.TextColored(ImGuiColors.DalamudRed, "所持枠の空きを取得できませんでした");
+        }
+    }
+
+    /// <summary>
+    /// 結果が未確認の交換が残っている場合に、常に見える場所へ出す。
+    ///
+    /// これが残っている間は新しい交換を受け付けないため、
+    /// クリア手段がショップを開かないと出てこない場所にあると復旧できなくなる。
+    /// </summary>
+    private void DrawInFlightBanner()
+    {
+        var executor = this.plugin.ExchangeExecutor;
+        var pending = executor.InFlight;
+
+        if (pending is null)
+        {
+            if (executor.Step == ExchangeStep.Error)
+            {
+                ImGui.TextColored(ImGuiColors.DalamudRed, $"停止中: {executor.Failure} — {executor.StatusDetail}");
+                if (ImGui.Button("状態をリセット##resetstate"))
+                {
+                    executor.ResetAfterError();
+                }
+            }
+
+            return;
+        }
+
+        ImGui.TextColored(ImGuiColors.DalamudRed, "前回の交換の結果が未確認です。新しい交換は行いません。");
+        ImGui.TextUnformatted($"  {pending.RewardName} × {pending.RewardQuantity} / コスト {pending.CurrencyCost}");
+        ImGui.TextUnformatted($"  発火時: 通貨 {pending.CurrencyBefore:N0} / 報酬 {pending.RewardBefore:N0}");
+
+        if (!string.IsNullOrEmpty(pending.Outcome))
+        {
+            ImGui.TextWrapped($"  結果: {pending.Outcome}");
+        }
+
+        // いまの所持数を並べて出す。ユーザーが実際に交換されたか判断できるようにする。
+        if (this.plugin.CurrencyService.TryGetCount(pending.CurrencyItemId, out var currencyNow) &&
+            this.plugin.CurrencyService.TryGetCount(pending.RewardItemId, out var rewardNow, includeEquipped: true, includeArmory: true))
+        {
+            ImGui.TextUnformatted($"  現在   : 通貨 {currencyNow:N0} / 報酬 {rewardNow:N0}");
+
+            var currencyDelta = currencyNow - pending.CurrencyBefore;
+            var rewardDelta = rewardNow - pending.RewardBefore;
+            ImGui.TextColored(
+                ImGuiColors.DalamudGrey,
+                $"  差分   : 通貨 {currencyDelta:+#;-#;0} / 報酬 {rewardDelta:+#;-#;0}");
+        }
+
+        ImGui.TextColored(ImGuiColors.DalamudGrey, "  ゲーム内で所持数を確認してからクリアしてください。");
+
+        if (ImGui.Button("確認したのでクリアする##clearinflightbanner"))
+        {
+            executor.ClearInFlight();
         }
     }
 
@@ -780,6 +958,24 @@ public sealed class MainWindow(Plugin plugin)
 
         DrawRow("AutoDuty", this.plugin.AutoDuty.IsLoaded, () =>
         {
+            // 交換後に再開できなかった場合の受け皿。棒立ちのまま気付かないのを避ける。
+            var paused = this.plugin.ExchangeExecutor.IsAutoDutyPaused;
+
+            if (paused ||
+                (this.plugin.ExchangeExecutor.LastResumeTerritoryId != 0 &&
+                 this.plugin.AutoDuty.TryIsStopped(out var idle) && idle))
+            {
+                if (ImGui.SmallButton($"再開##resumead"))
+                {
+                    if (!this.plugin.ExchangeExecutor.TryResumeAutoDutyManually(out var resumeReason))
+                    {
+                        this.plugin.AnomalyLog.Warn("AutoDuty", resumeReason);
+                    }
+                }
+
+                ImGui.SameLine();
+            }
+
             if (!this.plugin.AutoDuty.TryIsStopped(out var stopped))
             {
                 ImGui.TextColored(ImGuiColors.DalamudRed, "状態を取得できません");
@@ -789,6 +985,12 @@ public sealed class MainWindow(Plugin plugin)
             if (stopped)
             {
                 ImGui.TextUnformatted("停止中");
+                return;
+            }
+
+            if (paused)
+            {
+                ImGui.TextColored(ImGuiColors.DalamudOrange, "一時停止中（本プラグインが停止させています）");
                 return;
             }
 
@@ -818,6 +1020,20 @@ public sealed class MainWindow(Plugin plugin)
                     this.plugin.AutoRetainer.SuppressedByUs ? ImGuiColors.HealerGreen : ImGuiColors.DalamudGrey,
                     this.plugin.AutoRetainer.SuppressedByUs ? "（本プラグインが抑制中）" : "（他が抑制中）");
             }
+        });
+
+        DrawRow("Artisan", this.plugin.Artisan.IsLoaded, () =>
+        {
+            var endurance = this.plugin.Artisan.TryGetEnduranceStatus(out var e) && e;
+            var list = this.plugin.Artisan.TryIsListRunning(out var l) && l;
+
+            if (endurance || list)
+            {
+                ImGui.TextColored(ImGuiColors.DalamudYellow, endurance ? "耐久モード実行中" : "製作リスト実行中");
+                return;
+            }
+
+            ImGui.TextUnformatted("待機中");
         });
 
         DrawRow("vnavmesh", this.plugin.Vnavmesh.IsLoaded, () =>
@@ -985,6 +1201,101 @@ public sealed class MainWindow(Plugin plugin)
 
         ImGui.TextColored(ImGuiColors.DalamudGrey, "  周回カウンタは 0 から再カウントされます（AutoDuty 側から復元する手段がないため）");
 
+        var waitBetween = Plugin.C.WaitForAutoDutyBetweenLoopActions;
+        if (ImGui.Checkbox("AutoDuty のループ間処理が終わるまで停止を待つ", ref waitBetween))
+        {
+            Plugin.C.WaitForAutoDutyBetweenLoopActions = waitBetween;
+            changed = true;
+        }
+
+        ImGui.TextColored(ImGuiColors.DalamudGrey, "  リテイナー・GC 納品・修理などが終わり、次のコンテンツへ向かい始めてから割り込みます");
+
+        if (waitBetween)
+        {
+            var settleSeconds = Plugin.C.AutoDutySettleWaitSeconds;
+            ImGui.SetNextItemWidth(160f);
+            if (ImGui.InputInt("  待つ上限（秒）", ref settleSeconds))
+            {
+                Plugin.C.AutoDutySettleWaitSeconds = Math.Clamp(settleSeconds, 0, 900);
+                changed = true;
+            }
+
+            var skipOnExpire = Plugin.C.SkipExchangeWhenBetweenLoopWaitExpires;
+            if (ImGui.Checkbox("  上限に達しても割り込まず、次の切れ目を待つ", ref skipOnExpire))
+            {
+                Plugin.C.SkipExchangeWhenBetweenLoopWaitExpires = skipOnExpire;
+                changed = true;
+            }
+
+            ImGui.TextColored(ImGuiColors.DalamudGrey, "    オフにすると割り込みますが、リテイナー処理や GC 納品が失われます");
+        }
+
+        var resumeOnFailure = Plugin.C.ResumeAutoDutyOnFailure;
+        if (ImGui.Checkbox("交換に失敗した場合も AutoDuty を再開する", ref resumeOnFailure))
+        {
+            Plugin.C.ResumeAutoDutyOnFailure = resumeOnFailure;
+            changed = true;
+        }
+
+        ImGui.TextColored(ImGuiColors.DalamudGrey, "  オフにすると、失敗時は停止したままになります");
+
+        var yieldVenture = Plugin.C.YieldToUpcomingRetainerVenture;
+        if (ImGui.Checkbox("リテイナーのベンチャー完了が近いときは交換を後回しにする", ref yieldVenture))
+        {
+            Plugin.C.YieldToUpcomingRetainerVenture = yieldVenture;
+            changed = true;
+        }
+
+        if (yieldVenture)
+        {
+            var yieldSeconds = Plugin.C.RetainerVentureYieldSeconds;
+            ImGui.SetNextItemWidth(160f);
+            if (ImGui.InputInt("  何秒以内なら待つか", ref yieldSeconds))
+            {
+                Plugin.C.RetainerVentureYieldSeconds = Math.Clamp(yieldSeconds, 0, 3600);
+                changed = true;
+            }
+        }
+
+        var requireExternal = Plugin.C.RequireExternalAutomationRunning;
+        if (ImGui.Checkbox("AutoDuty や Artisan が動作しているときだけ自動交換する", ref requireExternal))
+        {
+            Plugin.C.RequireExternalAutomationRunning = requireExternal;
+            changed = true;
+        }
+
+        ImGui.TextColored(
+            ImGuiColors.DalamudGrey,
+            "  オフにすると、プリセットを有効にしただけで交換を始めます（手動操作中でも動きます）");
+
+        if (requireExternal)
+        {
+            ImGui.SameLine();
+            if (this.plugin.AutomationGate.IsAnyRunning(out var runningNow))
+            {
+                ImGui.TextColored(ImGuiColors.HealerGreen, $"いま: {runningNow}");
+            }
+            else
+            {
+                ImGui.TextColored(ImGuiColors.DalamudGrey, "いま: なし");
+            }
+        }
+
+        ImGui.Spacing();
+
+        var usePause = Plugin.C.UseAutoDutyPause;
+        if (ImGui.Checkbox("AutoDuty は停止ではなく一時停止で割り込む", ref usePause))
+        {
+            Plugin.C.UseAutoDutyPause = usePause;
+            changed = true;
+        }
+
+        ImGui.TextColored(
+            ImGuiColors.DalamudGrey,
+            "  停止はループ間処理（リテイナー・GC 納品）の予約ごと破棄されます。一時停止なら交換後に続きから実行されます");
+
+        ImGui.Spacing();
+
         var suppress = Plugin.C.SuppressAutoRetainer;
         if (ImGui.Checkbox("交換中は AutoRetainer の新規処理を抑制する", ref suppress))
         {
@@ -1002,6 +1313,18 @@ public sealed class MainWindow(Plugin plugin)
         }
 
         ImGui.TextColored(ImGuiColors.DalamudYellow, "  推奨しません。リテイナー処理が中途半端な状態で止まる可能性があります");
+
+        ImGui.Spacing();
+
+        var keepFree = Plugin.C.KeepFreeInventorySlots;
+        ImGui.SetNextItemWidth(160f);
+        if (ImGui.InputInt("交換後に残す所持枠", ref keepFree))
+        {
+            Plugin.C.KeepFreeInventorySlots = Math.Clamp(keepFree, 0, 50);
+            changed = true;
+        }
+
+        ImGui.TextColored(ImGuiColors.DalamudGrey, "  AutoRetainer は所持枠が空いていないキャラクタを処理対象から外して保存します");
 
         ImGui.Spacing();
 
