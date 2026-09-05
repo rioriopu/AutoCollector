@@ -780,9 +780,75 @@ public sealed unsafe class ExchangeExecutor(
             return;
         }
 
+        // 一時停止で割り込む場合は、外部プラグインの調整より先に AutoDuty を止める。
+        //
+        // 順序が逆だと、AutoRetainer の処理が終わるのを待っている間に
+        // AutoDuty が次のコンテンツへ入ってしまい、安全待機へ戻される。
+        // これを周回のたびに繰り返すため、全周回が終わるまで交換にたどり着けなかった。
+        //
+        // 一時停止は AutoDuty のタスク列を保持するので、ここで止めても
+        // ループ間処理（リテイナー・GC 納品）は失われず、再開後に続きから実行される。
+        if (this.UsePause)
+        {
+            this.PauseAutoDutyForExchange();
+        }
+
         this.Step = ExchangeStep.SuppressExternal;
         this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(60);
         this.StatusDetail = "外部プラグインの状態を確認しています";
+    }
+
+    /// <summary>
+    /// 交換のために AutoDuty を一時停止する。停止前の状態もここで記録する。
+    ///
+    /// 何度呼ばれても一度しか止めない。二重に一時停止を送ると
+    /// AutoDuty 側の PreviousStage が Paused になり、解除しても戻らなくなる。
+    /// </summary>
+    private void PauseAutoDutyForExchange()
+    {
+        if (this.returnContext is not null || !this.autoDuty.IsLoaded)
+        {
+            return;
+        }
+
+        var wasRunning = this.autoDuty.IsRunningFailClosed();
+        this.autoDuty.TryIsLooping(out var looping);
+
+        // 一時停止なら再開に使わないが、手動再開の受け皿として残しておく。
+        var resumeTerritory = this.observedDutyTerritoryId != 0
+            ? this.observedDutyTerritoryId
+            : Svc.ClientState.TerritoryType;
+
+        var context = new ReturnContext
+        {
+            WasAutoDutyRunning = wasRunning,
+            AutoDutyTerritoryId = resumeTerritory,
+            WasLooping = looping,
+        };
+
+        this.returnContext = context;
+
+        if (!wasRunning)
+        {
+            return;
+        }
+
+        if (!this.autoDuty.TryPause())
+        {
+            // 一時停止に対応していない版かもしれない。停止方式へ落とす。
+            this.pauseUnavailable = true;
+            this.returnContext = null;
+            this.anomalyLog.Warn("AutoDuty", "一時停止を受け付けてもらえませんでした。停止に切り替えます");
+            return;
+        }
+
+        context.PausedAutoDuty = true;
+
+        // 一時停止は vnavmesh の経路も止めるが、実際に足が止まるのは次のフレーム以降になる。
+        // 動いたままテレポートを送ると受け付けてもらえないため、少しだけ待つ。
+        this.pauseSettleUntilUtc = DateTime.UtcNow.AddMilliseconds(700);
+
+        this.anomalyLog.Info("AutoDuty", "AutoDuty を一時停止しました（ループ間処理の予約は保持されます）");
     }
 
     /// <summary>
@@ -1007,6 +1073,30 @@ public sealed unsafe class ExchangeExecutor(
             return;
         }
 
+        // 一時停止で割り込む。
+        // Stop と違って AutoDuty のタスク列が残るため、
+        // ループ間処理（リテイナー・GC 納品）は再開後に続きから実行される。
+        //
+        // 通常は安全待機の時点で止めてある。取りこぼしていたらここで止める。
+        if (this.UsePause)
+        {
+            this.PauseAutoDutyForExchange();
+
+            if (!this.UsePause)
+            {
+                // 一時停止が使えないと分かった。次の呼び出しで停止方式へ進む。
+                return;
+            }
+
+            if (DateTime.UtcNow < this.pauseSettleUntilUtc)
+            {
+                return;
+            }
+
+            this.BeginTravel(target);
+            return;
+        }
+
         // 初回だけ、停止前の状態を記録する。
         if (this.returnContext is null)
         {
@@ -1041,45 +1131,7 @@ public sealed unsafe class ExchangeExecutor(
                 return;
             }
 
-            this.anomalyLog.Info(
-                "AutoDuty",
-                this.UsePause
-                    ? "AutoDuty を一時停止します（ループ間処理の予約は保持されます）"
-                    : "AutoDuty を停止します");
-        }
-
-        // 一時停止で割り込む。
-        // Stop と違って AutoDuty のタスク列が残るため、
-        // ループ間処理（リテイナー・GC 納品）は再開後に続きから実行される。
-        if (this.UsePause)
-        {
-            var context = this.returnContext;
-
-            if (context is not null && !context.PausedAutoDuty)
-            {
-                if (!this.autoDuty.TryPause())
-                {
-                    // 一時停止に対応していない版かもしれない。停止方式へ落とす。
-                    this.pauseUnavailable = true;
-                    this.anomalyLog.Warn("AutoDuty", "一時停止を受け付けてもらえませんでした。停止に切り替えます");
-                    return;
-                }
-
-                context.PausedAutoDuty = true;
-
-                // 一時停止は vnavmesh の経路も止めるが、実際に足が止まるのは次のフレーム以降になる。
-                // 動いたままテレポートを送ると受け付けてもらえないため、少しだけ待つ。
-                this.pauseSettleUntilUtc = DateTime.UtcNow.AddMilliseconds(700);
-                return;
-            }
-
-            if (DateTime.UtcNow < this.pauseSettleUntilUtc)
-            {
-                return;
-            }
-
-            this.BeginTravel(target);
-            return;
+            this.anomalyLog.Info("AutoDuty", "AutoDuty を停止します");
         }
 
         if (this.autoDuty.TryIsStopped(out var stopped) && stopped)
@@ -1251,6 +1303,21 @@ public sealed unsafe class ExchangeExecutor(
         // 自分が開いたショップは自分で閉じる。開けっ放しにすると
         // 次の交換の事前条件（ブロックするアドオンが無いこと）にも引っかかる。
         this.CloseOwned("ShopExchangeCurrency", useCloseFirst: true);
+
+        // 念のための取りこぼし対策。ここへ来る経路のどれを通っても、
+        // 一時停止させたままで終わらないようにする。
+        if (this.returnContext is { PausedAutoDuty: true } paused && this.autoDuty.IsLoaded)
+        {
+            if (this.autoDuty.TryResume())
+            {
+                paused.PausedAutoDuty = false;
+                this.anomalyLog.Info("AutoDuty", "AutoDuty の一時停止を解除しました");
+            }
+            else
+            {
+                this.anomalyLog.Error("AutoDuty", "一時停止を解除できませんでした。/ad resume を手動で実行してください");
+            }
+        }
 
         this.autoRetainer.Release();
         this.returnContext = null;
