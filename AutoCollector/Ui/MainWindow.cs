@@ -1101,6 +1101,37 @@ public sealed class MainWindow(Plugin plugin)
             EzConfig.Save();
         }
 
+        // 一時停止で割り込む方式は AutoDuty のコマンドに依存する。
+        // 実際に効くかどうかをここで確かめられるようにしておく。
+        if (this.plugin.AutoDuty.IsLoaded)
+        {
+            ImGui.Spacing();
+            ImGui.TextUnformatted("AutoDuty の一時停止（動作確認用）");
+
+            if (ImGui.Button("一時停止##adpause"))
+            {
+                var ok = this.plugin.AutoDuty.TryPause();
+                this.plugin.AnomalyLog.Info(
+                    "AutoDuty",
+                    ok ? "手動で一時停止を送りました" : "一時停止コマンドが受け付けられませんでした");
+            }
+
+            ImGui.SameLine();
+
+            if (ImGui.Button("解除##adresume"))
+            {
+                var ok = this.plugin.AutoDuty.TryResume();
+                this.plugin.AnomalyLog.Info(
+                    "AutoDuty",
+                    ok ? "手動で解除を送りました" : "解除コマンドが受け付けられませんでした");
+            }
+
+            ImGui.SameLine();
+            ImGui.TextColored(
+                ImGuiColors.DalamudGrey,
+                "周回中に押して、止まる・再開することを確認してください");
+        }
+
         var report = this.plugin.SelfCheck.Latest;
         if (report is null)
         {

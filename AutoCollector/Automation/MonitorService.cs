@@ -26,6 +26,14 @@ public sealed class MonitorService(
 
     private static readonly TimeSpan CheckInterval = TimeSpan.FromSeconds(5);
 
+    /// <summary>
+    /// 外部の自動化が動いているときの確認間隔。
+    ///
+    /// 閾値に達したのが周回の切れ目だった場合、予約が遅れるとその周回を取り逃がす。
+    /// 判定自体は所持数を数えるだけなので、この頻度でも負荷にならない。
+    /// </summary>
+    private static readonly TimeSpan ActiveCheckInterval = TimeSpan.FromSeconds(1);
+
     private readonly AnomalyLog anomalyLog = anomalyLog;
     private readonly CurrencyService currencyService = currencyService;
     private readonly TomestoneService tomestoneService = tomestoneService;
@@ -65,12 +73,13 @@ public sealed class MonitorService(
             return;
         }
 
-        this.nextCheckUtc = DateTime.UtcNow.Add(CheckInterval);
+        var automationRunning = this.automationGate.IsAnyRunning(out _);
+        this.nextCheckUtc = DateTime.UtcNow.Add(automationRunning ? ActiveCheckInterval : CheckInterval);
 
         // 自動交換は周回の相乗りとして動かす。
         // プリセットを有効にしただけで動くと、手動で遊んでいる最中に
         // 勝手にテレポートして交換を始めてしまう。
-        if (Plugin.C.RequireExternalAutomationRunning && !this.automationGate.IsAnyRunning(out _))
+        if (Plugin.C.RequireExternalAutomationRunning && !automationRunning)
         {
             this.LastDecision = "AutoDuty や Artisan が動作していないため、自動交換は待機しています";
             return;
