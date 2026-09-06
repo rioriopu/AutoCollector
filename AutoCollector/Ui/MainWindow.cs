@@ -956,6 +956,8 @@ public sealed class MainWindow(Plugin plugin)
         ImGui.TableSetupColumn("状態");
         ImGui.TableHeadersRow();
 
+        this.DrawAutoDutyKeeperStatus();
+
         this.DrawAutoDutySetupCheck();
 
         DrawRow("AutoDuty", this.plugin.AutoDuty.IsLoaded, () =>
@@ -1087,6 +1089,38 @@ public sealed class MainWindow(Plugin plugin)
             {
                 ImGui.TextColored(ImGuiColors.DalamudGrey, "該当機能は無効です");
             }
+        }
+    }
+
+    /// <summary>周回の維持状況。止まったまま気付かない状態を避ける。</summary>
+    private void DrawAutoDutyKeeperStatus()
+    {
+        var keeper = this.plugin.AutoDutyKeeper;
+
+        if (!Plugin.C.KeepAutoDutyLooping || !this.plugin.AutoDuty.IsLoaded)
+        {
+            return;
+        }
+
+        if (keeper.GaveUp)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudOrange, "AutoDuty の周回維持をやめています（手動停止と判断）");
+            ImGui.SameLine();
+            if (ImGui.SmallButton("維持を再開##keeper"))
+            {
+                keeper.Resume();
+            }
+
+            return;
+        }
+
+        if (keeper.RestartCount > 0 || !string.IsNullOrEmpty(keeper.Status))
+        {
+            var label = keeper.RestartCount > 0
+                ? $"周回の維持: 再開 {keeper.RestartCount} 回"
+                : "周回の維持: 有効";
+
+            ImGui.TextColored(ImGuiColors.DalamudGrey, string.IsNullOrEmpty(keeper.Status) ? label : $"{label} / {keeper.Status}");
         }
     }
 
@@ -1317,6 +1351,44 @@ public sealed class MainWindow(Plugin plugin)
         }
 
         ImGui.TextColored(ImGuiColors.DalamudGrey, "  周回カウンタは 0 から再カウントされます（AutoDuty 側から復元する手段がないため）");
+
+        var keepLooping = Plugin.C.KeepAutoDutyLooping;
+        if (ImGui.Checkbox("AutoDuty が周回を終えたら再開させる", ref keepLooping))
+        {
+            Plugin.C.KeepAutoDutyLooping = keepLooping;
+            changed = true;
+        }
+
+        ImGui.TextColored(
+            ImGuiColors.DalamudGrey,
+            "  周回数を 1 にしていると、交換が起きなかった周回で AutoDuty が止まったままになります");
+        ImGui.TextColored(
+            ImGuiColors.DalamudGrey,
+            "  周回数の設定は書き換えません。再開時に渡すのは 0 です");
+
+        if (keepLooping)
+        {
+            var restartDelay = Plugin.C.AutoDutyRestartDelaySeconds;
+            ImGui.SetNextItemWidth(160f);
+            if (ImGui.InputInt("  再開までの待ち（秒）", ref restartDelay))
+            {
+                Plugin.C.AutoDutyRestartDelaySeconds = Math.Clamp(restartDelay, 0, 120);
+                changed = true;
+            }
+
+            if (Plugin.C.LastDutyTerritoryId != 0)
+            {
+                ImGui.TextColored(
+                    ImGuiColors.DalamudGrey,
+                    $"  再開先: {NpcLocationService.GetTerritoryName(Plugin.C.LastDutyTerritoryId)}");
+            }
+            else
+            {
+                ImGui.TextColored(ImGuiColors.DalamudYellow, "  周回中のエリアをまだ記録していません");
+            }
+        }
+
+        ImGui.Spacing();
 
         var waitCycle = Plugin.C.WaitForAutoDutyCycleEnd;
         if (ImGui.Checkbox("AutoDuty が全周回を終えてから交換する", ref waitCycle))
