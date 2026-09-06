@@ -7,7 +7,7 @@
     上書きすると SDK 更新に追従できなくなるため、ここでは書かない。
   -->
   <PropertyGroup>
-    <Version>0.1.0.1</Version>
+    <Version>0.1.1.0</Version>
     <RootNamespace>AutoCollector</RootNamespace>
     <AssemblyName>AutoCollector</AssemblyName>
     <Description>通貨が閾値に到達したら自動処理を停止し、交換所へ移動して交換し、復帰する</Description>
