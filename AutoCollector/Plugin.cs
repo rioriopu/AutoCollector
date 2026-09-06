@@ -46,6 +46,8 @@ public sealed class Plugin : IDalamudPlugin
 
     internal CallbackRecorder CallbackRecorder { get; private set; } = null!;
 
+    internal CollectablesShopReader CollectablesShopReader { get; private set; } = null!;
+
     internal ExchangeExecutor ExchangeExecutor { get; private set; } = null!;
 
     internal AddonOwnershipTracker AddonOwnership { get; private set; } = null!;
@@ -122,6 +124,7 @@ public sealed class Plugin : IDalamudPlugin
         this.ShopService = new ShopService(this.AnomalyLog, DataFileLoader.LoadShopLayout(this.AnomalyLog));
         this.InclusionShopService = new InclusionShopService(this.AnomalyLog, this.SpecialCurrencyMap);
         this.CallbackRecorder = new CallbackRecorder(this.AnomalyLog);
+        this.CollectablesShopReader = new CollectablesShopReader();
         this.AddonOwnership = new AddonOwnershipTracker(this.AnomalyLog);
         this.Vnavmesh = new VnavmeshIpc(this.AnomalyLog);
         this.MenuService = new MenuService(this.AnomalyLog);

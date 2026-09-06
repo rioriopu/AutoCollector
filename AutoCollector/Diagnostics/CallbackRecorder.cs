@@ -122,9 +122,11 @@ public sealed unsafe class CallbackRecorder : IDisposable
 
     private void Record(string addonName, uint valueCount, AtkValue* values, bool updateState)
     {
-        var decoded = new List<string>((int)Math.Min(valueCount, 32u));
+        // 上限は 64。収集品納品のように値が多いアドオンで、途中で切れると判断材料にならない。
+        const uint Max = 64u;
+        var decoded = new List<string>((int)Math.Min(valueCount, Max));
 
-        for (var i = 0u; i < valueCount && i < 32u; i++)
+        for (var i = 0u; i < valueCount && i < Max; i++)
         {
             decoded.Add(Describe(values[i]));
         }
@@ -147,9 +149,31 @@ public sealed unsafe class CallbackRecorder : IDisposable
             AtkValueType.UInt => $"{value.UInt}u",
             AtkValueType.Bool => value.Byte != 0 ? "true" : "false",
             AtkValueType.Float => value.Float.ToString("0.###"),
+            AtkValueType.String or AtkValueType.ManagedString or AtkValueType.String8 => ReadString(value),
             0 => "(なし)",
             _ => $"[{value.Type}]",
         };
+    }
+
+    /// <summary>
+    /// 文字列の値を読む。どの行が何を指しているかは、文字列が読めないと判断できない。
+    /// </summary>
+    private static unsafe string ReadString(AtkValue value)
+    {
+        try
+        {
+            if (value.String.Value is null)
+            {
+                return "\"\"";
+            }
+
+            var text = value.String.ToString();
+            return string.IsNullOrEmpty(text) ? "\"\"" : $"\"{text}\"";
+        }
+        catch
+        {
+            return "[String]";
+        }
     }
 
     public void Dispose()

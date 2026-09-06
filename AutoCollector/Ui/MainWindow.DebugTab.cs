@@ -1,7 +1,10 @@
+using System;
+using AutoCollector.Diagnostics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Colors;
 using Dalamud.Interface.Utility.Raii;
 using ECommons.Configuration;
+using ECommons.DalamudServices;
 
 namespace AutoCollector.Ui;
 
@@ -130,6 +133,56 @@ public sealed partial class MainWindow
                 ImGuiColors.DalamudGrey,
                 "  本プラグインは一時停止を使いません。AutoDuty 側の挙動を確認するためのボタンです");
         }
+
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.Spacing();
+
+        // 収集品納品は、画面の構成も納品の発火手段も確認できていない。
+        // 推測で撃たないために、まず実機で中身を読み出す。
+        ImGui.TextUnformatted("収集品納品画面の調査（読み取りのみ）");
+        ImGui.TextColored(
+            ImGuiColors.DalamudGrey,
+            "窓口に手動で話しかけ、何も押さずに実行してください。ゲームの状態は変更しません。");
+
+        var reader = this.plugin.CollectablesShopReader;
+        var open = reader.IsOpen();
+
+        using (ImRaii.Disabled(!open))
+        {
+            if (ImGui.Button("ダンプをファイルへ保存##dumpcollect"))
+            {
+                try
+                {
+                    var dir = string.IsNullOrWhiteSpace(Plugin.C.LogDirectory)
+                        ? Svc.PluginInterface.ConfigDirectory.FullName
+                        : Plugin.C.LogDirectory;
+
+                    var path = reader.Save(dir);
+                    this.plugin.AnomalyLog.Info("Collect", $"納品画面のダンプを保存しました: {path}");
+                    ImGui.SetClipboardText(path);
+                }
+                catch (Exception ex)
+                {
+                    this.plugin.AnomalyLog.Error("Collect", $"ダンプを保存できませんでした: {ex.Message}");
+                }
+            }
+        }
+
+        ImGui.SameLine();
+
+        using (ImRaii.Disabled(!open))
+        {
+            if (ImGui.Button("ダンプをコピー##copycollect"))
+            {
+                ImGui.SetClipboardText(reader.Dump());
+            }
+        }
+
+        ImGui.SameLine();
+        ImGui.TextColored(
+            open ? ImGuiColors.HealerGreen : ImGuiColors.DalamudGrey,
+            open ? "納品画面が開いています" : "納品画面が開いていません");
 
         if (changed)
         {
