@@ -80,7 +80,7 @@ Debug ビルドは `C:\DevPlugins\AutoCollector\` へ出力されます。Dalamu
 | コマンド | 動作 |
 |---|---|
 | `/autocollector` | ウィンドウの開閉 |
-| `/ac` | 同上（他プラグインと衝突する場合は設定で無効化できます） |
+| `/acc` | 同上（他プラグインと衝突する場合は設定で無効化できます） |
 | `/autocollector stop` | 緊急停止 |
 | `/autocollector check` | セルフチェックの実行 |
 
