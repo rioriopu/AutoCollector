@@ -50,11 +50,6 @@ public sealed class MonitorService(
 
     public void Tick()
     {
-        if (!Plugin.C.MonitoringEnabled)
-        {
-            return;
-        }
-
         // 交換が進行中なら何もしない。結果が確定するまで次を始めない。
         if (this.executor.Step != ExchangeStep.Idle && this.executor.Step != ExchangeStep.Done)
         {

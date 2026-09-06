@@ -288,7 +288,7 @@ public sealed unsafe class ExchangeExecutor(
             var previous = this.step;
             this.step = value;
 
-            if (Plugin.C.DetailedLogEnabled)
+            if (Plugin.C.DetailedLogActive)
             {
                 this.anomalyLog.Trace("Step", $"{previous} → {value} / {this.DescribeContext()}");
             }
@@ -696,7 +696,7 @@ public sealed unsafe class ExchangeExecutor(
     {
         // 手順が進まないまま止まっている場合、遷移ログだけでは何も残らない。
         // 待っている間の外部状態を定期的に残して、あとから追えるようにする。
-        if (Plugin.C.DetailedLogEnabled &&
+        if (Plugin.C.DetailedLogActive &&
             this.Step is not (ExchangeStep.Idle or ExchangeStep.Done) &&
             DateTime.UtcNow >= this.nextContextLogUtc)
         {

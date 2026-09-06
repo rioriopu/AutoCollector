@@ -42,10 +42,17 @@ public sealed partial class MainWindow(Plugin plugin)
 
         this.DrawStatusTab();
         this.presetTab.Draw();
-        this.DrawExchangeTab();
-        this.DrawShopTab();
+
+        // 開発・調査用のタブはデバッグモードのときだけ出す。
+        if (Plugin.C.DebugMode)
+        {
+            this.DrawExchangeTab();
+            this.DrawShopTab();
+        }
+
         this.DrawDiagnosticsTab();
         this.DrawSettingsTab();
+        this.DrawDebugTab();
         this.DrawDonationTab();
     }
 
@@ -1220,39 +1227,6 @@ public sealed partial class MainWindow(Plugin plugin)
             EzConfig.Save();
         }
 
-        // 一時停止で割り込む方式は AutoDuty のコマンドに依存する。
-        // 実際に効くかどうかをここで確かめられるようにしておく。
-        if (this.plugin.AutoDuty.IsLoaded)
-        {
-            ImGui.Spacing();
-            ImGui.TextUnformatted("AutoDuty の一時停止（動作確認用）");
-
-            if (ImGui.Button("一時停止##adpause"))
-            {
-                this.plugin.AutoDuty.TryPause();
-            }
-
-            ImGui.SameLine();
-
-            if (ImGui.Button("解除##adresume"))
-            {
-                this.plugin.AutoDuty.TryResume();
-            }
-
-            ImGui.SameLine();
-
-            if (this.plugin.AutoDuty.TryIsPaused(out var reportedPaused))
-            {
-                ImGui.TextColored(
-                    reportedPaused ? ImGuiColors.DalamudOrange : ImGuiColors.HealerGreen,
-                    reportedPaused ? "AutoDuty の状態: 一時停止中" : "AutoDuty の状態: 停止していません");
-            }
-            else
-            {
-                ImGui.TextColored(ImGuiColors.DalamudRed, "AutoDuty の一時停止状態を読み取れません");
-            }
-        }
-
         var report = this.plugin.SelfCheck.Latest;
         if (report is null)
         {
@@ -1394,61 +1368,19 @@ public sealed partial class MainWindow(Plugin plugin)
 
         ImGui.TextColored(ImGuiColors.DalamudGrey, "  オフにすると、失敗時は停止したままになります");
 
-        ImGui.TextUnformatted("詳細ログ");
-
-        var detailedLog = Plugin.C.DetailedLogEnabled;
-        if (ImGui.Checkbox("状態遷移をファイルへ記録する", ref detailedLog))
+        var debugMode = Plugin.C.DebugMode;
+        if (ImGui.Checkbox("デバッグモードを有効にする", ref debugMode))
         {
-            Plugin.C.DetailedLogEnabled = detailedLog;
+            Plugin.C.DebugMode = debugMode;
             changed = true;
+
+            // 詳細ログはデバッグモードと連動させる。切ったのに書き続けないようにする。
             this.plugin.StartFileLog();
-        }
-
-        var logDir = Plugin.C.LogDirectory;
-        ImGui.SetNextItemWidth(420f);
-        if (ImGui.InputText("保存先", ref logDir, 260))
-        {
-            Plugin.C.LogDirectory = logDir;
-            changed = true;
-        }
-
-        if (ImGui.IsItemDeactivatedAfterEdit())
-        {
-            this.plugin.StartFileLog();
-        }
-
-        ImGui.SameLine();
-        if (ImGui.SmallButton("開き直す##restartlog"))
-        {
-            this.plugin.StartFileLog();
-        }
-
-        var writer = this.plugin.FileLog;
-        if (!detailedLog)
-        {
-            ImGui.TextColored(ImGuiColors.DalamudGrey, "  記録していません");
-        }
-        else if (writer is null)
-        {
-            ImGui.TextColored(ImGuiColors.DalamudRed, "  記録を開始できていません");
-        }
-        else if (writer.Failed)
-        {
-            ImGui.TextColored(ImGuiColors.DalamudRed, $"  書き込めないため記録を諦めました: {writer.LastError}");
-        }
-        else
-        {
-            ImGui.TextColored(ImGuiColors.HealerGreen, $"  記録中: {writer.FilePath}");
-
-            if (writer.DroppedLines > 0)
-            {
-                ImGui.TextColored(ImGuiColors.DalamudYellow, $"  書き込みが追いつかず {writer.DroppedLines} 行を捨てました");
-            }
         }
 
         ImGui.TextColored(
             ImGuiColors.DalamudGrey,
-            "  ネットワーク共有を指定できます。書き込みは背景で行うため、共有が落ちてもゲームは止まりません");
+            "  交換候補・ショップ照合・デバッグの各タブと、詳細ログの設定が表示されます");
 
         ImGui.Separator();
         ImGui.Spacing();
@@ -1506,13 +1438,6 @@ public sealed partial class MainWindow(Plugin plugin)
         if (ImGui.SliderFloat("NPC への接近距離", ref range, 1.0f, 6.0f, "%.1f"))
         {
             Plugin.C.NpcApproachRange = range;
-            changed = true;
-        }
-
-        var shortCommand = Plugin.C.RegisterShortCommand;
-        if (ImGui.Checkbox("短縮コマンド /acc を登録する（次回起動時に反映）", ref shortCommand))
-        {
-            Plugin.C.RegisterShortCommand = shortCommand;
             changed = true;
         }
 
