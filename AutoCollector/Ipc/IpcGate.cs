@@ -136,7 +136,7 @@ public abstract class IpcGateBase(string internalName, AnomalyLog anomalyLog)
     }
 
     /// <summary>同じ内容を毎フレーム記録しないよう間引く。</summary>
-    private void LogThrottled(string message)
+    protected void LogThrottled(string message)
     {
         var now = DateTime.UtcNow;
         if (now - this.lastErrorLogUtc < TimeSpan.FromSeconds(10))

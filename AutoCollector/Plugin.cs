@@ -75,7 +75,9 @@ public sealed class Plugin : IDalamudPlugin
     public Plugin(IDalamudPluginInterface pluginInterface)
     {
         P = this;
-        ECommonsMain.Init(pluginInterface, this);
+        // DalamudReflector は AutoDuty の内部状態を読むために必要。
+        // 初期化していないと呼び出しのたびに例外になる。
+        ECommonsMain.Init(pluginInterface, this, Module.DalamudReflector);
 
         // 初期化本体は次フレームへ回す。コンストラクタ内でゲーム状態を触ると
         // 他プラグインのロード順によっては未初期化のものを参照してしまう。
