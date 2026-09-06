@@ -2,7 +2,8 @@
 # PIL が無い環境なので、zlib と struct だけで PNG を書き出す。
 # アンチエイリアスは 3x3 のスーパーサンプリングで得る。
 #
-# 図案: 自動処理を表す環状の矢印の中に、アラガントームストーン風の石板を置く。
+# 図案: 自動処理を表す環状の矢印の中に、通貨（トームストーン風の石板）と
+#       交換で得るアイテム（薬瓶）を並べる。「通貨を自動でアイテムに換える」を表す。
 
 import math
 import struct
@@ -44,10 +45,31 @@ CORNER = 96 * S
 RING_R = 176 * S
 RING_T = 30 * S
 
-TAB_W = 150 * S                 # 石板の幅
-TAB_H = 200 * S                 # 石板の高さ
-TAB_BEVEL = 40 * S              # 四隅の面取り
-FRAME_T = 15 * S                # 金枠の太さ
+# 石板（通貨）。環の内側に収まるよう左へ寄せる。
+TAB_CX = CX - 78 * S
+TAB_CY = CY + 4 * S
+TAB_W = 112 * S
+TAB_H = 152 * S
+TAB_BEVEL = 30 * S
+FRAME_T = 12 * S
+
+# 薬瓶（交換で得るアイテム）。右へ寄せる。
+POT_CX = CX + 78 * S
+BULB_CY = CY + 30 * S
+BULB_R = 50 * S
+NECK_HALF = 17 * S
+NECK_TOP = CY - 52 * S
+CORK_TOP = CY - 74 * S
+CORK_HALF = 24 * S
+LIQUID_Y = CY - 4 * S           # ここより下が中身
+
+GLASS = (196, 226, 236)
+GLASS_DARK = (140, 176, 192)
+# 中身は環（緑）と同化しないよう暖色にする。
+LIQUID_HI = (255, 146, 120)
+LIQUID_LO = (198, 56, 62)
+CORK = (150, 104, 62)
+CORK_DARK = (108, 70, 38)
 
 GAP_START = math.radians(52)
 GAP_END = math.radians(128)
@@ -65,10 +87,10 @@ def rounded_rect_alpha(x, y):
     return 1.0
 
 
-def octagon(x, y, w, h, bevel):
+def octagon(x, y, w, h, bevel, cx=None, cy=None):
     """面取りした矩形（八角形）の内側なら True。"""
-    dx = abs(x - CX)
-    dy = abs(y - CY)
+    dx = abs(x - (TAB_CX if cx is None else cx))
+    dy = abs(y - (TAB_CY if cy is None else cy))
     if dx > w / 2 or dy > h / 2:
         return False
     # 四隅を 45 度で落とす
@@ -116,9 +138,9 @@ def in_ring(x, y):
 # ---- 石板に刻む紋様 ----
 # 上に菱形、下に長さの違う横棒 2 本。石板に刻まれた印を表す。
 # 円と縦線の組み合わせは性別記号に見えてしまうため使わない。
-DIAMOND_C = (CX, CY - 48 * S)
-DIAMOND_R = 30 * S             # 中心から頂点までの距離
-BAR_H = 12 * S
+DIAMOND_C = (TAB_CX, TAB_CY - 36 * S)
+DIAMOND_R = 22 * S             # 中心から頂点までの距離
+BAR_H = 10 * S
 
 
 def glyph_distance(x, y):
@@ -127,13 +149,53 @@ def glyph_distance(x, y):
     best = (abs(x - DIAMOND_C[0]) + abs(y - DIAMOND_C[1]) - DIAMOND_R) * 0.7071
 
     # 横棒 2 本
-    for by, half in ((CY + 18 * S, 40 * S), (CY + 56 * S, 25 * S)):
-        dx = max(0.0, abs(x - CX) - half)
+    for by, half in ((TAB_CY + 14 * S, 30 * S), (TAB_CY + 42 * S, 19 * S)):
+        dx = max(0.0, abs(x - TAB_CX) - half)
         dy = abs(y - by) - BAR_H / 2
         d = math.hypot(dx, max(0.0, dy)) if dx > 0 or dy > 0 else max(dx, dy)
         best = min(best, d)
 
     return best
+
+
+def potion_part(x, y):
+    """薬瓶の色を返す。瓶の外なら None。"""
+    dx = x - POT_CX
+
+    # コルク
+    if CORK_TOP <= y <= NECK_TOP + 6 * S and abs(dx) <= CORK_HALF:
+        return mix(CORK, CORK_DARK, (dx / CORK_HALF) * 0.5 + 0.5)
+
+    # 首
+    if NECK_TOP <= y <= BULB_CY and abs(dx) <= NECK_HALF:
+        inside_bulb = dx * dx + (y - BULB_CY) ** 2 <= BULB_R * BULB_R
+        if not inside_bulb:
+            base = GLASS if y < LIQUID_Y else mix(LIQUID_HI, LIQUID_LO, 0.4)
+            return mix(base, GLASS_DARK, (dx / NECK_HALF) * 0.5 + 0.5) if y < LIQUID_Y else base
+
+    # 胴
+    d2 = dx * dx + (y - BULB_CY) ** 2
+    if d2 <= BULB_R * BULB_R:
+        if y >= LIQUID_Y:
+            # 中身。下へ行くほど濃くする。
+            t = (y - LIQUID_Y) / (BULB_CY + BULB_R - LIQUID_Y)
+            col = mix(LIQUID_HI, LIQUID_LO, t)
+        else:
+            col = GLASS
+
+        # 左上の照り返し
+        hx, hy = POT_CX - 20 * S, BULB_CY - 22 * S
+        if (x - hx) ** 2 + (y - hy) ** 2 <= (13 * S) ** 2:
+            col = mix(col, (255, 255, 255), 0.55)
+
+        # 縁を少し暗くして丸みを出す
+        edge = math.sqrt(d2) / BULB_R
+        if edge > 0.82:
+            col = mix(col, GLASS_DARK, (edge - 0.82) / 0.18 * 0.5)
+
+        return col
+
+    return None
 
 
 rows = []
@@ -158,7 +220,7 @@ for py in range(SIZE):
                     shade = (dd - (RING_R - RING_T)) / (RING_T * 2)
                     col = mix(RING, RING_DARK, shade)
 
-                # 石板
+                # 石板（通貨）
                 if octagon(x, y, TAB_W, TAB_H, TAB_BEVEL):
                     inner = octagon(
                         x, y,
@@ -169,11 +231,11 @@ for py in range(SIZE):
 
                     if not inner:
                         # 金枠。左上を明るく、右下を暗くして厚みを出す。
-                        t = ((x - CX) / TAB_W + (y - CY) / TAB_H) + 0.5
+                        t = ((x - TAB_CX) / TAB_W + (y - TAB_CY) / TAB_H) + 0.5
                         col = mix(FRAME_HI, FRAME_LO, t)
                     else:
                         # 石板の面
-                        t = (y - (CY - TAB_H / 2)) / TAB_H
+                        t = (y - (TAB_CY - TAB_H / 2)) / TAB_H
                         col = mix(FACE_TOP, FACE_BOTTOM, t)
 
                         # 紋様と、その周囲のにじみ
@@ -182,6 +244,11 @@ for py in range(SIZE):
                             col = GLYPH
                         elif gd < 7 * S:
                             col = mix(GLYPH_GLOW, col, gd / (7 * S))
+
+                # 薬瓶（交換で得るアイテム）
+                pot = potion_part(x, y)
+                if pot is not None:
+                    col = pot
 
                 rs += col[0]
                 gs += col[1]
