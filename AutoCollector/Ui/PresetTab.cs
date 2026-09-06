@@ -40,18 +40,12 @@ public sealed class PresetTab(Plugin plugin)
             return;
         }
 
-        var monitoring = Plugin.C.MonitoringEnabled;
-        if (ImGui.Checkbox("通貨を監視して自動で交換する", ref monitoring))
-        {
-            Plugin.C.MonitoringEnabled = monitoring;
-            EzConfig.Save();
-        }
-
-        ImGui.TextColored(ImGuiColors.DalamudGrey, "  有効なプリセットが閾値に達したら、自動で交換所へ向かいます");
+        // 監視は常に動いている。有効なプリセットが閾値へ達したら自動で交換所へ向かう。
+        ImGui.TextColored(ImGuiColors.DalamudGrey, "有効なプリセットが閾値に達したら、自動で交換所へ向かいます");
 
         if (!string.IsNullOrEmpty(this.plugin.MonitorService.LastDecision))
         {
-            ImGui.TextColored(ImGuiColors.DalamudYellow, $"  {this.plugin.MonitorService.LastDecision}");
+            ImGui.TextColored(ImGuiColors.DalamudYellow, this.plugin.MonitorService.LastDecision);
         }
 
         ImGui.Spacing();

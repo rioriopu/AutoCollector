@@ -167,11 +167,6 @@ public sealed class Plugin : IDalamudPlugin
     /// </summary>
     private void TryRegisterShortCommand()
     {
-        if (!C.RegisterShortCommand)
-        {
-            return;
-        }
-
         try
         {
             EzCmd.Add(ShortCommand, this.OnCommand, "Auto Collector を開く");
@@ -281,7 +276,7 @@ public sealed class Plugin : IDalamudPlugin
     {
         this.StopFileLog();
 
-        if (!C.DetailedLogEnabled || string.IsNullOrWhiteSpace(C.LogDirectory))
+        if (!C.DetailedLogActive || string.IsNullOrWhiteSpace(C.LogDirectory))
         {
             return;
         }

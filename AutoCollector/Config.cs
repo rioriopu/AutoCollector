@@ -82,8 +82,12 @@ public sealed class ExchangePreset
 
 public sealed class Config
 {
-    /// <summary>閾値監視を行うかどうか。オフの間は手動実行のみ。</summary>
-    public bool MonitoringEnabled { get; set; }
+    /// <summary>
+    /// デバッグモード。開発・不具合調査のためのタブと機能を出す。
+    ///
+    /// 通常の運用では触る必要がないものを隠しておくための切り替えで、既定は無効。
+    /// </summary>
+    public bool DebugMode { get; set; }
 
     public List<ExchangePreset> Presets { get; set; } = [];
 
@@ -117,7 +121,13 @@ public sealed class Config
     /// 状態遷移や外部プラグインの状態を逐一記録する。
     /// 開発中の不具合追跡用で、通常の運用では不要。
     /// </summary>
-    public bool DetailedLogEnabled { get; set; } = true;
+    public bool DetailedLogEnabled { get; set; }
+
+    /// <summary>
+    /// 実際に詳細ログを記録するか。
+    /// デバッグモードを切ったときに書き続けないよう、両方を条件にする。
+    /// </summary>
+    public bool DetailedLogActive => this.DebugMode && this.DetailedLogEnabled;
 
     /// <summary>
     /// 詳細ログの保存先。
@@ -150,9 +160,6 @@ public sealed class Config
 
     /// <summary>NPC へ近づく際の許容距離。</summary>
     public float NpcApproachRange { get; set; } = 3.0f;
-
-    /// <summary>短縮コマンド /ac を登録するか。他プラグインと衝突する場合はオフにする。</summary>
-    public bool RegisterShortCommand { get; set; } = true;
 
     /// <summary>SelfCheck でゲームバージョン差分を検知するために、前回起動時のバージョンを保持する。</summary>
     public string? LastSeenGameVersion { get; set; }

@@ -241,7 +241,7 @@ public sealed class AutoDutyKeeper(
         this.lastStopped = stopped;
         this.lastLooping = looping;
 
-        if (Plugin.C.DetailedLogEnabled)
+        if (Plugin.C.DetailedLogActive)
         {
             this.anomalyLog.Trace(
                 "AutoDuty",
