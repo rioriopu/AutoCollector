@@ -375,18 +375,6 @@ public sealed unsafe class ExchangeExecutor(
         return true;
     }
 
-    private static ulong TryGetContentId()
-    {
-        try
-        {
-            return Svc.PlayerState.ContentId;
-        }
-        catch
-        {
-            return 0;
-        }
-    }
-
     /// <summary>
     /// 直前に記録した再開先。UI から手動で再開するときに使う。
     /// </summary>
@@ -854,7 +842,7 @@ public sealed unsafe class ExchangeExecutor(
     /// </summary>
     private bool WaitForAutoDutyCycleEnd()
     {
-        if (!Plugin.C.WaitForAutoDutyCycleEnd || !this.autoDuty.IsLoaded)
+        if (!this.autoDuty.IsLoaded)
         {
             return true;
         }
@@ -904,29 +892,6 @@ public sealed unsafe class ExchangeExecutor(
             this.Step = ExchangeStep.StopAutoDuty;
             this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(10);
             return;
-        }
-
-        // まもなくベンチャーが完了する場合は、先にそちらを処理させる。
-        // AutoRetainer は一定条件で自動的に始まるため、その直前に抑制をかけると
-        // リテイナー処理を横取りする形になり、周回の流れを壊す。
-        if (Plugin.C.YieldToUpcomingRetainerVenture && !this.autoRetainer.SuppressedByUs)
-        {
-            var contentId = TryGetContentId();
-            if (contentId != 0 &&
-                this.autoRetainer.TryGetClosestVentureSeconds(contentId, out var remaining) &&
-                remaining >= 0 &&
-                remaining <= Plugin.C.RetainerVentureYieldSeconds)
-            {
-                this.StatusDetail = $"リテイナーのベンチャー完了が近いため待機しています（残り {remaining} 秒）";
-
-                if (DateTime.UtcNow - this.lastWaitLogUtc > TimeSpan.FromSeconds(60))
-                {
-                    this.lastWaitLogUtc = DateTime.UtcNow;
-                    this.anomalyLog.Info("Wait", $"ベンチャー完了が近いため交換を後回しにします（残り {remaining} 秒）");
-                }
-
-                return;
-            }
         }
 
         // 1 段目: 処理中なら待つ。時間で打ち切らない。
@@ -1106,7 +1071,7 @@ public sealed unsafe class ExchangeExecutor(
     {
         var context = this.returnContext;
 
-        if (context is null || !context.WasAutoDutyRunning || !Plugin.C.ResumeAutoDuty || !this.autoDuty.IsLoaded)
+        if (context is null || !context.WasAutoDutyRunning || !this.autoDuty.IsLoaded)
         {
             this.FinishAfterExchange();
             return;
@@ -2351,7 +2316,6 @@ public sealed unsafe class ExchangeExecutor(
         {
             if (Plugin.C.ResumeAutoDutyOnFailure &&
                 this.returnContext is { WasAutoDutyRunning: true } context &&
-                Plugin.C.ResumeAutoDuty &&
                 this.autoDuty.IsLoaded &&
                 this.autoDuty.TryContentHasPath(context.AutoDutyTerritoryId, out var hasPath) && hasPath)
             {

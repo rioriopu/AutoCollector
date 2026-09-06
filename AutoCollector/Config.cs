@@ -87,32 +87,11 @@ public sealed class Config
 
     public List<ExchangePreset> Presets { get; set; } = [];
 
-    /// <summary>交換前に AutoDuty が動いていた場合、交換後に再開するか。</summary>
-    public bool ResumeAutoDuty { get; set; } = true;
-
     /// <summary>
     /// 交換に失敗した場合も AutoDuty を再開するか。
     /// 止めっぱなしにすると周回が止まったまま放置されるため既定は有効。
     /// </summary>
     public bool ResumeAutoDutyOnFailure { get; set; } = true;
-
-    /// <summary>
-    /// AutoDuty が全周回を終えて停止するまで交換を待つ。
-    ///
-    /// AutoDuty のループ間処理（リテイナー・GC 納品）は TaskManager に積まれた
-    /// 予約であり、途中で割り込む手段が無い。一時停止しても、こちらが交換のために
-    /// エリアを移動した時点で AutoDuty の TerritoryChanged が走り、
-    /// TaskManager.Abort() で予約ごと破棄されてしまう
-    /// （AutoDuty.cs の TerritoryChanged は Stage.Stopped のときしか抜けない）。
-    ///
-    /// 一方 Stage.Stopped は AutoDuty が唯一「完全に静止した」と保証する状態で、
-    /// 以降 TerritoryChanged にも反応しない。
-    /// そこで、周回の途中に割り込むのをやめ、1 サイクルの終わりを合流点にする。
-    ///
-    /// 交換の頻度は AutoDuty 側の周回数で決まる。こまめに交換したい場合は
-    /// AutoDuty の周回数を小さく（2〜3 周）設定する。
-    /// </summary>
-    public bool WaitForAutoDutyCycleEnd { get; set; } = true;
 
     /// <summary>
     /// AutoDuty が周回を終えて停止したら、こちらから再開させるか。
@@ -157,24 +136,8 @@ public sealed class Config
     /// </summary>
     public bool RequireExternalAutomationRunning { get; set; } = true;
 
-    /// <summary>
-    /// AutoRetainer のベンチャーがまもなく完了する場合、交換を後回しにするか。
-    /// AutoRetainer は一定条件で自動的に処理を始めるため、
-    /// 直前に抑制をかけるとリテイナー処理を横取りする形になる。
-    /// </summary>
-    public bool YieldToUpcomingRetainerVenture { get; set; } = true;
-
-    /// <summary>この秒数以内にベンチャーが完了する場合は待つ。</summary>
-    public int RetainerVentureYieldSeconds { get; set; } = 180;
-
     /// <summary>AutoRetainer が導入されている場合、交換中に SetSuppressed で抑制するか。</summary>
     public bool SuppressAutoRetainer { get; set; } = true;
-
-    /// <summary>
-    /// 緊急停止時に AutoRetainer の実行中タスクも中断するか。
-    /// 既定は false（設計決定 D-1「実行中タスクを中断しない」）。
-    /// </summary>
-    public bool AbortAutoRetainerTasksOnStop { get; set; }
 
     /// <summary>
     /// 交換後に残しておく所持枠の数。
