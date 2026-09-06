@@ -63,6 +63,35 @@ public sealed class CurrencyService(AnomalyLog anomalyLog)
     }
 
     /// <summary>所持枠の空き数。</summary>
+    /// <summary>
+    /// 実効の所持上限。
+    ///
+    /// クライアントが上限を管理している通貨はそちらを優先し、無ければ Item.StackSize を使う。
+    /// 表示と発火判定は必ずこの 1 本を通す。食い違うと
+    /// 「画面では条件を満たしているのに交換されない」という最も説明しにくい壊れ方になる。
+    /// </summary>
+    public unsafe uint? GetEffectiveCap(uint itemId)
+    {
+        try
+        {
+            var manager = CurrencyManager.Instance();
+            if (manager is not null && manager->IsItemLimited(itemId))
+            {
+                var max = manager->GetItemMaxCount(itemId);
+                if (max > 0)
+                {
+                    return max;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Warn("Currency", $"ItemId {itemId} の上限を取得できませんでした: {ex.Message}");
+        }
+
+        return this.GetStackCap(itemId);
+    }
+
     public bool TryGetEmptyBagSlots(out uint slots)
     {
         slots = 0;
@@ -101,7 +130,7 @@ public sealed class CurrencyService(AnomalyLog anomalyLog)
             return false;
         }
 
-        var stackCap = this.GetStackCap(currencyItemId);
+        var stackCap = this.GetEffectiveCap(currencyItemId);
         if (stackCap is null or 0)
         {
             // 上限が分からないと Percentage / BeforeCap は判定できない。
@@ -128,7 +157,7 @@ public sealed class CurrencyService(AnomalyLog anomalyLog)
     /// <summary>UI 表示用に、閾値が実際に何個で発火するかを返す。判定不能なら null。</summary>
     public int? CalculateTriggerAmount(ThresholdSetting setting, uint currencyItemId)
     {
-        var stackCap = this.GetStackCap(currencyItemId);
+        var stackCap = this.GetEffectiveCap(currencyItemId);
         var cap = stackCap is null or 0 ? 0 : (int)Math.Min(stackCap.Value, int.MaxValue);
 
         return setting.Mode switch

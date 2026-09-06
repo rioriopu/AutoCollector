@@ -41,7 +41,7 @@ public sealed partial class MainWindow(Plugin plugin)
         }
 
         this.DrawStatusTab();
-        this.presetTab.Draw();
+        this.presetTab.Draw(ref this.jumpToPresetTab);
 
         // 開発・調査用のタブはデバッグモードのときだけ出す。
         if (Plugin.C.DebugMode)
@@ -447,7 +447,7 @@ public sealed partial class MainWindow(Plugin plugin)
                 ExchangeStep.Error => ImGuiColors.DalamudRed,
                 _ => ImGuiColors.DalamudYellow,
             };
-            ImGui.TextColored(color, $"{executor.Step}: {executor.StatusDetail}");
+            ImGui.TextColored(color, $"{StatusText.StepLabel(executor.Step)}: {executor.StatusDetail}");
         }
 
         if (!identification.IsConfident)
@@ -574,20 +574,10 @@ public sealed partial class MainWindow(Plugin plugin)
             return;
         }
 
-        // 結果未確認の記録は何よりも先に出す。
-        //
-        // これが残っている間は新しい交換を受け付けない。
-        // 以前はトームストーンを解決できないと下の early return でこの表示ごと消えており、
-        // デバッグモードを切っているとクリアする手段が画面から無くなっていた。
-        this.DrawInFlightBanner();
-
         var slots = this.plugin.TomestoneService.ListSlots();
         if (slots.Count == 0)
         {
             ImGui.TextColored(ImGuiColors.DalamudRed, "トームストーンを解決できませんでした。");
-            ImGui.Spacing();
-            ImGui.Separator();
-            this.DrawAutomationStatus();
             return;
         }
 
@@ -787,197 +777,59 @@ public sealed partial class MainWindow(Plugin plugin)
         }
     }
 
-    private void DrawStatusTab()
-    {
-        using var tab = ImRaii.TabItem("状況");
-        if (!tab)
-        {
-            return;
-        }
-
-        var slots = this.plugin.TomestoneService.ListSlots();
-        if (slots.Count == 0)
-        {
-            ImGui.TextColored(ImGuiColors.DalamudRed, "トームストーンを解決できませんでした。");
-            return;
-        }
-
-        ImGui.TextUnformatted("アラガントームストーン");
-        ImGui.Separator();
-
-        using (var table = ImRaii.Table("##tomestones", 5, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp))
-        {
-            if (table)
-            {
-                ImGui.TableSetupColumn("スロット", ImGuiTableColumnFlags.WidthFixed, 70f);
-                ImGui.TableSetupColumn("通貨");
-                ImGui.TableSetupColumn("ItemId", ImGuiTableColumnFlags.WidthFixed, 70f);
-                ImGui.TableSetupColumn("所持", ImGuiTableColumnFlags.WidthFixed, 130f);
-                ImGui.TableSetupColumn("週上限", ImGuiTableColumnFlags.WidthFixed, 90f);
-                ImGui.TableHeadersRow();
-
-                foreach (var slot in slots)
-                {
-                    ImGui.TableNextRow();
-
-                    ImGui.TableNextColumn();
-                    ImGui.TextUnformatted(slot.TomestonesRowId.ToString());
-
-                    ImGui.TableNextColumn();
-                    ImGui.TextUnformatted(slot.Name);
-
-                    ImGui.TableNextColumn();
-                    ImGui.TextUnformatted(slot.ItemId.ToString());
-
-                    ImGui.TableNextColumn();
-                    if (this.plugin.CurrencyService.TryGetCount(slot.ItemId, out var count))
-                    {
-                        var cap = slot.StackCap;
-                        ImGui.TextUnformatted(cap > 0 ? $"{count:N0} / {cap:N0}" : $"{count:N0}");
-                    }
-                    else
-                    {
-                        ImGui.TextColored(ImGuiColors.DalamudRed, "取得不可");
-                    }
-
-                    ImGui.TableNextColumn();
-                    ImGui.TextUnformatted(slot.SheetWeeklyLimit > 0 ? slot.SheetWeeklyLimit.ToString("N0") : "なし");
-                }
-            }
-        }
-
-        ImGui.Spacing();
-
-        var acquired = this.plugin.TomestoneService.GetWeeklyAcquired();
-        var weeklyLimit = this.plugin.TomestoneService.GetWeeklyLimitRuntime();
-        ImGui.TextUnformatted(weeklyLimit > 0
-            ? $"週制限つきトームストーンの今週の取得量: {acquired:N0} / {weeklyLimit:N0}"
-            : "週制限つきトームストーンの上限を取得できませんでした");
-
-        ImGui.Spacing();
-        ImGui.Separator();
-        this.DrawAutomationStatus();
-
-        ImGui.Spacing();
-        ImGui.Separator();
-
-        if (this.plugin.CurrencyService.TryGetEmptyBagSlots(out var freeSlots))
-        {
-            ImGui.TextUnformatted($"所持枠の空き: {freeSlots}");
-        }
-        else
-        {
-            ImGui.TextColored(ImGuiColors.DalamudRed, "所持枠の空きを取得できませんでした");
-        }
-    }
-
     /// <summary>
-    /// 結果が未確認の交換が残っている場合に、常に見える場所へ出す。
+    /// 連携プラグインの一覧。
     ///
-    /// これが残っている間は新しい交換を受け付けないため、
-    /// クリア手段がショップを開かないと出てこない場所にあると復旧できなくなる。
+    /// 問題が無いときは畳んでおく。5 行を常に並べると、
+    /// 使っていないものまで壊れているように見える。
     /// </summary>
-    private void DrawInFlightBanner()
+    private void DrawPluginTable()
     {
-        var executor = this.plugin.ExchangeExecutor;
-        var pending = executor.InFlight;
-
-        if (pending is null)
+        var missing = 0;
+        if (!this.plugin.Vnavmesh.IsLoaded)
         {
-            if (executor.Step == ExchangeStep.Error)
-            {
-                ImGui.TextColored(ImGuiColors.DalamudRed, $"停止中: {executor.Failure} — {executor.StatusDetail}");
-                if (ImGui.Button("状態をリセット##resetstate"))
-                {
-                    executor.ResetAfterError();
-                }
-            }
+            missing++;
+        }
 
+        if (!this.plugin.Lifestream.IsLoaded)
+        {
+            missing++;
+        }
+
+        if (Plugin.C.RequireExternalAutomationRunning && !this.plugin.AutoDuty.IsLoaded)
+        {
+            missing++;
+        }
+
+        using var node = ImRaii.TreeNode(
+            missing == 0 ? "連携プラグイン: 問題ありません##plugins" : $"連携プラグイン: {missing} 件に注意##plugins",
+            missing == 0 ? ImGuiTreeNodeFlags.None : ImGuiTreeNodeFlags.DefaultOpen);
+
+        if (!node)
+        {
             return;
         }
 
-        ImGui.TextColored(ImGuiColors.DalamudRed, "前回の交換の結果が未確認です。新しい交換は行いません。");
-        ImGui.TextUnformatted($"  {pending.RewardName} × {pending.RewardQuantity} / コスト {pending.CurrencyCost}");
-        ImGui.TextUnformatted($"  発火時: 通貨 {pending.CurrencyBefore:N0} / 報酬 {pending.RewardBefore:N0}");
-
-        if (!string.IsNullOrEmpty(pending.Outcome))
+        var keeper = this.plugin.AutoDutyKeeper;
+        if (keeper.RestartCount > 0 && !keeper.GaveUp)
         {
-            ImGui.TextWrapped($"  結果: {pending.Outcome}");
+            var status = string.IsNullOrEmpty(keeper.Status) ? string.Empty : $" / {keeper.Status}";
+            ImGui.TextColored(ImGuiColors.DalamudGrey, $"周回の維持: 再開 {keeper.RestartCount} 回{status}");
         }
 
-        // いまの所持数を並べて出す。ユーザーが実際に交換されたか判断できるようにする。
-        if (this.plugin.CurrencyService.TryGetCount(pending.CurrencyItemId, out var currencyNow) &&
-            this.plugin.CurrencyService.TryGetCount(pending.RewardItemId, out var rewardNow, includeEquipped: true, includeArmory: true))
-        {
-            ImGui.TextUnformatted($"  現在   : 通貨 {currencyNow:N0} / 報酬 {rewardNow:N0}");
-
-            var currencyDelta = currencyNow - pending.CurrencyBefore;
-            var rewardDelta = rewardNow - pending.RewardBefore;
-            ImGui.TextColored(
-                ImGuiColors.DalamudGrey,
-                $"  差分   : 通貨 {currencyDelta:+#;-#;0} / 報酬 {rewardDelta:+#;-#;0}");
-        }
-
-        ImGui.TextColored(ImGuiColors.DalamudGrey, "  ゲーム内で所持数を確認してからクリアしてください。");
-
-        if (ImGui.Button("確認したのでクリアする##clearinflightbanner"))
-        {
-            executor.ClearInFlight();
-        }
-    }
-
-    /// <summary>
-    /// 連携先の状態と、いま交換が実行できる状態かを表示する。
-    /// 何を待っているのかが分からないまま止まって見えるのを避ける。
-    /// </summary>
-    private void DrawAutomationStatus()
-    {
-        var executor = this.plugin.ExchangeExecutor;
-
-        ImGui.TextUnformatted("自動処理の状態");
-
-        if (executor.Step != ExchangeStep.Idle || !string.IsNullOrEmpty(executor.StatusDetail))
-        {
-            var color = executor.Step switch
-            {
-                ExchangeStep.Done => ImGuiColors.HealerGreen,
-                ExchangeStep.Error => ImGuiColors.DalamudRed,
-                ExchangeStep.Idle => ImGuiColors.DalamudGrey,
-                _ => ImGuiColors.DalamudYellow,
-            };
-            ImGui.TextColored(color, $"  {executor.Step}: {executor.StatusDetail}");
-        }
-
-        if (SafetyGuard.IsSafeToStart(out var safetyReason))
-        {
-            ImGui.TextColored(ImGuiColors.HealerGreen, "  開始できる状態です");
-        }
-        else
-        {
-            ImGui.TextColored(ImGuiColors.DalamudYellow, $"  開始できません: {safetyReason}");
-        }
-
-        this.DrawAutoDutyKeeperStatus();
-
-        ImGui.Spacing();
-
-        // 表の外に出す。行として描くと列に収まらず読めない。
-        this.DrawSetupGuide();
-
-        ImGui.Spacing();
-
-        using var table = ImRaii.Table("##automation", 3, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp);
+        using var table = ImRaii.Table("##automation", 4, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp);
         if (!table)
         {
             return;
         }
 
-        ImGui.TableSetupColumn("プラグイン", ImGuiTableColumnFlags.WidthFixed, 120f);
-        ImGui.TableSetupColumn("導入", ImGuiTableColumnFlags.WidthFixed, 60f);
+        ImGui.TableSetupColumn("プラグイン", ImGuiTableColumnFlags.WidthFixed, 110f);
+        ImGui.TableSetupColumn("必要度", ImGuiTableColumnFlags.WidthFixed, 210f);
+        ImGui.TableSetupColumn("導入", ImGuiTableColumnFlags.WidthFixed, 50f);
         ImGui.TableSetupColumn("状態");
         ImGui.TableHeadersRow();
 
-        DrawRow("AutoDuty", this.plugin.AutoDuty.IsLoaded, () =>
+        DrawRow("AutoDuty", "周回に相乗りするなら必須", this.plugin.AutoDuty.IsLoaded, "周回に相乗りできません。設定タブで「AutoDuty や Artisan が動作しているときだけ交換する」を切ると、プリセットだけで動きます", () =>
         {
             // 交換後に再開できなかった場合の受け皿。棒立ちのまま気付かないのを避ける。
             // 一時停止は本プラグインからは使わないが、ユーザーが手動で止めている場合に備えて表示する。
@@ -1021,7 +873,7 @@ public sealed partial class MainWindow(Plugin plugin)
             ImGui.TextColored(ImGuiColors.DalamudYellow, $"動作中（周回={looping} / 移動={navigating}）");
         });
 
-        DrawRow("AutoRetainer", this.plugin.AutoRetainer.IsLoaded, () =>
+        DrawRow("AutoRetainer", "任意", this.plugin.AutoRetainer.IsLoaded, "使いません（問題ありません）", () =>
         {
             var busy = this.plugin.AutoRetainer.IsBusyFailClosed();
             this.plugin.AutoRetainer.TryGetSuppressed(out var suppressed);
@@ -1044,7 +896,7 @@ public sealed partial class MainWindow(Plugin plugin)
             }
         });
 
-        DrawRow("Artisan", this.plugin.Artisan.IsLoaded, () =>
+        DrawRow("Artisan", "任意", this.plugin.Artisan.IsLoaded, "使いません（問題ありません）", () =>
         {
             var endurance = this.plugin.Artisan.TryGetEnduranceStatus(out var e) && e;
             var list = this.plugin.Artisan.TryIsListRunning(out var l) && l;
@@ -1070,7 +922,7 @@ public sealed partial class MainWindow(Plugin plugin)
             }
         });
 
-        DrawRow("vnavmesh", this.plugin.Vnavmesh.IsLoaded, () =>
+        DrawRow("vnavmesh", "必須", this.plugin.Vnavmesh.IsLoaded, "交換所まで自動で移動できません", () =>
         {
             if (!this.plugin.Vnavmesh.TryIsReady(out var ready))
             {
@@ -1081,7 +933,7 @@ public sealed partial class MainWindow(Plugin plugin)
             ImGui.TextUnformatted(ready ? "このエリアで利用可能" : "このエリアのメッシュが未準備");
         });
 
-        DrawRow("Lifestream", this.plugin.Lifestream.IsLoaded, () =>
+        DrawRow("Lifestream", "別エリアの交換所を使うなら必須", this.plugin.Lifestream.IsLoaded, "別エリアの交換所へテレポートできません。同じエリアの交換所だけが使えます", () =>
         {
             if (!this.plugin.Lifestream.TryIsBusy(out var busy))
             {
@@ -1092,12 +944,15 @@ public sealed partial class MainWindow(Plugin plugin)
             ImGui.TextUnformatted(busy ? "処理中" : "待機中");
         });
 
-        static void DrawRow(string name, bool loaded, Action drawState)
+        static void DrawRow(string name, string necessity, bool loaded, string missingText, Action drawState)
         {
             ImGui.TableNextRow();
 
             ImGui.TableNextColumn();
             ImGui.TextUnformatted(name);
+
+            ImGui.TableNextColumn();
+            ImGui.TextColored(ImGuiColors.DalamudGrey, necessity);
 
             ImGui.TableNextColumn();
             if (loaded)
@@ -1116,40 +971,8 @@ public sealed partial class MainWindow(Plugin plugin)
             }
             else
             {
-                ImGui.TextColored(ImGuiColors.DalamudGrey, "該当機能は無効です");
+                ImGui.TextWrapped(missingText);
             }
-        }
-    }
-
-    /// <summary>周回の維持状況。止まったまま気付かない状態を避ける。</summary>
-    private void DrawAutoDutyKeeperStatus()
-    {
-        var keeper = this.plugin.AutoDutyKeeper;
-
-        if (!Plugin.C.KeepAutoDutyLooping || !this.plugin.AutoDuty.IsLoaded)
-        {
-            return;
-        }
-
-        if (keeper.GaveUp)
-        {
-            ImGui.TextColored(ImGuiColors.DalamudOrange, "AutoDuty の周回維持をやめています（手動停止と判断）");
-            ImGui.SameLine();
-            if (ImGui.SmallButton("維持を再開##keeper"))
-            {
-                keeper.Resume();
-            }
-
-            return;
-        }
-
-        if (keeper.RestartCount > 0 || !string.IsNullOrEmpty(keeper.Status))
-        {
-            var label = keeper.RestartCount > 0
-                ? $"周回の維持: 再開 {keeper.RestartCount} 回"
-                : "周回の維持: 有効";
-
-            ImGui.TextColored(ImGuiColors.DalamudGrey, string.IsNullOrEmpty(keeper.Status) ? label : $"{label} / {keeper.Status}");
         }
     }
 
@@ -1339,9 +1162,10 @@ public sealed partial class MainWindow(Plugin plugin)
         if (requireExternal)
         {
             ImGui.SameLine();
-            if (this.plugin.AutomationGate.IsAnyRunning(out var runningNow))
+            var snapshot = this.plugin.MonitorService.Snapshot;
+            if (snapshot.AutomationRunning)
             {
-                ImGui.TextColored(ImGuiColors.HealerGreen, $"いま: {runningNow}");
+                ImGui.TextColored(ImGuiColors.HealerGreen, $"いま: {snapshot.AutomationDetail}");
             }
             else
             {
