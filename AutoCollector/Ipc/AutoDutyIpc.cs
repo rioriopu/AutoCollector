@@ -33,6 +33,19 @@ public sealed class AutoDutyIpc(AnomalyLog anomalyLog) : IpcGateBase("AutoDuty",
     public bool TryGetConfig(string key, out string value)
         => this.TryInvoke("GetConfig", () => this.Func<string, string>("AutoDuty.GetConfig").InvokeFunc(key), out value);
 
+    /// <summary>
+    /// 設定を書き換える。
+    ///
+    /// AutoDuty 側は値を型に合わせて変換したうえで保存まで行う。
+    /// ユーザーの設定を変えることになるため、こちらから自動では呼ばず、
+    /// 画面のボタンを押されたときだけ使う。
+    /// </summary>
+    public bool TrySetConfig(string key, string value)
+        => this.TryAction("SetConfig", () => this.Func<string, object, object>("AutoDuty.SetConfig").InvokeAction(key, value));
+
+    /// <summary>AutoDuty の設定画面を開く。</summary>
+    public bool TryOpenConfig() => this.TryProcessCommand("/ad config");
+
     /// <summary>設定を真偽値として読む。読めない場合は既定値を返す。</summary>
     public bool GetConfigBool(string key, bool fallback)
     {

@@ -951,6 +951,13 @@ public sealed partial class MainWindow(Plugin plugin)
             ImGui.TextColored(ImGuiColors.DalamudYellow, $"  開始できません: {safetyReason}");
         }
 
+        this.DrawAutoDutyKeeperStatus();
+
+        ImGui.Spacing();
+
+        // 表の外に出す。行として描くと列に収まらず読めない。
+        this.DrawSetupGuide();
+
         ImGui.Spacing();
 
         using var table = ImRaii.Table("##automation", 3, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp);
@@ -963,10 +970,6 @@ public sealed partial class MainWindow(Plugin plugin)
         ImGui.TableSetupColumn("導入", ImGuiTableColumnFlags.WidthFixed, 60f);
         ImGui.TableSetupColumn("状態");
         ImGui.TableHeadersRow();
-
-        this.DrawAutoDutyKeeperStatus();
-
-        this.DrawAutoDutySetupCheck();
 
         DrawRow("AutoDuty", this.plugin.AutoDuty.IsLoaded, () =>
         {
@@ -1129,87 +1132,6 @@ public sealed partial class MainWindow(Plugin plugin)
                 : "周回の維持: 有効";
 
             ImGui.TextColored(ImGuiColors.DalamudGrey, string.IsNullOrEmpty(keeper.Status) ? label : $"{label} / {keeper.Status}");
-        }
-    }
-
-    /// <summary>
-    /// 「ID クリア → リテイナー → GC 納品 → 交換 → 次の ID」を成立させるための
-    /// AutoDuty 側の設定を点検する。
-    ///
-    /// こちらから書き換えはしない。ユーザーの設定を黙って変えると、
-    /// 本人が意図した動作との差が分からなくなるため。
-    /// </summary>
-    private void DrawAutoDutySetupCheck()
-    {
-        if (!this.plugin.AutoDuty.IsLoaded)
-        {
-            return;
-        }
-
-        using var node = ImRaii.TreeNode("AutoDuty の設定点検（1 周ごとに交換する場合）");
-        if (!node)
-        {
-            return;
-        }
-
-        ImGui.TextColored(
-            ImGuiColors.DalamudGrey,
-            "周回の途中には割り込めないため、AutoDuty を 1 周で終わらせ、その終わりに交換します。");
-        ImGui.TextColored(
-            ImGuiColors.DalamudGrey,
-            "「Run on last Loop」を入れると、最終周のあともループ間処理（リテイナー・GC 納品）が実行されます。");
-
-        ImGui.Spacing();
-
-        using var table = ImRaii.Table("##adsetup", 4, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp);
-        if (!table)
-        {
-            return;
-        }
-
-        ImGui.TableSetupColumn("AutoDuty の設定", ImGuiTableColumnFlags.WidthFixed, 250f);
-        ImGui.TableSetupColumn("現在", ImGuiTableColumnFlags.WidthFixed, 90f);
-        ImGui.TableSetupColumn("推奨", ImGuiTableColumnFlags.WidthFixed, 90f);
-        ImGui.TableSetupColumn("理由");
-        ImGui.TableHeadersRow();
-
-        Check("LoopTimes", "1", "1 周ごとに交換の機会を作る");
-        Check("ExecuteBetweenLoopActionLastLoop", "True", "最終周のあともリテイナー・GC 納品を実行する（要）");
-        Check("EnableBetweenLoopActions", "True", "ループ間処理そのものの有効化");
-        Check("EnableAutoRetainer", "True", "リテイナーへアクセスする");
-        Check("AutoRetainer_RemainingTime", ">0", "0 のままだとリテイナーへ行かない");
-        Check("AutoGCTurnin", "True", "GC へ希少品を納品する");
-        Check("AutoExitDuty", "True", "ダンジョンから出る。出ないと交換に入れない");
-        Check("TerminationMethodEnum", "Do_Nothing", "毎周回そのまま終了処理が走るため");
-
-        void Check(string key, string expected, string reason)
-        {
-            ImGui.TableNextRow();
-
-            ImGui.TableNextColumn();
-            ImGui.TextUnformatted(key);
-
-            var read = this.plugin.AutoDuty.TryGetConfig(key, out var actual) && !string.IsNullOrEmpty(actual);
-
-            ImGui.TableNextColumn();
-            if (!read)
-            {
-                ImGui.TextColored(ImGuiColors.DalamudGrey, "読めません");
-            }
-            else
-            {
-                var ok = expected == ">0"
-                    ? long.TryParse(actual, out var n) && n > 0
-                    : string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase);
-
-                ImGui.TextColored(ok ? ImGuiColors.HealerGreen : ImGuiColors.DalamudYellow, actual);
-            }
-
-            ImGui.TableNextColumn();
-            ImGui.TextUnformatted(expected);
-
-            ImGui.TableNextColumn();
-            ImGui.TextColored(ImGuiColors.DalamudGrey, reason);
         }
     }
 
