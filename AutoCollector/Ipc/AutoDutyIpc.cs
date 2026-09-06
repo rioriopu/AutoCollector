@@ -104,17 +104,27 @@ public sealed class AutoDutyIpc(AnomalyLog anomalyLog) : IpcGateBase("AutoDuty",
     /// </summary>
     public bool TryIsPaused(out bool paused)
     {
-        paused = false;
+        paused = this.pausedCache;
 
         if (!this.IsLoaded)
         {
             return false;
         }
 
+        // UI から毎フレーム呼ばれる。リフレクションは安くないので短時間だけ使い回す。
+        var now = DateTime.UtcNow;
+        if (now <= this.pausedCacheExpiry)
+        {
+            return this.pausedCacheValid;
+        }
+
+        this.pausedCacheExpiry = now.AddMilliseconds(500);
+
         try
         {
             if (!DalamudReflector.TryGetDalamudPlugin(this.InternalName, out var instance, suppressErrors: true))
             {
+                this.pausedCacheValid = false;
                 return false;
             }
 
@@ -124,19 +134,29 @@ public sealed class AutoDutyIpc(AnomalyLog anomalyLog) : IpcGateBase("AutoDuty",
 
             if (field?.GetValue(instance) is not { } value)
             {
+                this.pausedCacheValid = false;
                 return false;
             }
 
             // PluginState.Paused = 4
             paused = (Convert.ToInt32(value) & 4) != 0;
+            this.pausedCache = paused;
+            this.pausedCacheValid = true;
             return true;
         }
         catch (Exception ex)
         {
-            this.AnomalyLog.Warn("Ipc", $"[AutoDuty] 一時停止の状態を読めませんでした: {ex.Message}");
+            this.pausedCacheValid = false;
+
+            // ここは UI から毎フレーム呼ばれる。間引かないとログが埋まる。
+            this.LogThrottled($"一時停止の状態を読めませんでした: {ex.Message}");
             return false;
         }
     }
+
+    private bool pausedCache;
+    private bool pausedCacheValid;
+    private DateTime pausedCacheExpiry = DateTime.MinValue;
 
     /// <summary>
     /// コマンドを送る。
