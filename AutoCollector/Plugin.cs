@@ -17,7 +17,8 @@ namespace AutoCollector;
 public sealed class Plugin : IDalamudPlugin
 {
     private const string MainCommand = "/autocollector";
-    private const string ShortCommand = "/ac";
+    // /ac は他プラグインが使っているため /acc を使う。
+    private const string ShortCommand = "/acc";
 
     internal static Plugin P = null!;
     internal static Config C = null!;

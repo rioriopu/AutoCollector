@@ -1343,15 +1343,6 @@ public sealed class MainWindow(Plugin plugin)
 
         var changed = false;
 
-        var resumeAutoDuty = Plugin.C.ResumeAutoDuty;
-        if (ImGui.Checkbox("交換前に AutoDuty が動いていた場合、交換後に再開する", ref resumeAutoDuty))
-        {
-            Plugin.C.ResumeAutoDuty = resumeAutoDuty;
-            changed = true;
-        }
-
-        ImGui.TextColored(ImGuiColors.DalamudGrey, "  周回カウンタは 0 から再カウントされます（AutoDuty 側から復元する手段がないため）");
-
         var keepLooping = Plugin.C.KeepAutoDutyLooping;
         if (ImGui.Checkbox("AutoDuty が周回を終えたら再開させる", ref keepLooping))
         {
@@ -1365,6 +1356,9 @@ public sealed class MainWindow(Plugin plugin)
         ImGui.TextColored(
             ImGuiColors.DalamudGrey,
             "  周回数の設定は書き換えません。再開時に渡すのは 0 です");
+        ImGui.TextColored(
+            ImGuiColors.DalamudGrey,
+            "  交換を行った周回は、交換の完了後にこちらから再開させます");
 
         if (keepLooping)
         {
@@ -1390,30 +1384,6 @@ public sealed class MainWindow(Plugin plugin)
 
         ImGui.Spacing();
 
-        var waitCycle = Plugin.C.WaitForAutoDutyCycleEnd;
-        if (ImGui.Checkbox("AutoDuty が全周回を終えてから交換する", ref waitCycle))
-        {
-            Plugin.C.WaitForAutoDutyCycleEnd = waitCycle;
-            changed = true;
-        }
-
-        ImGui.TextColored(
-            ImGuiColors.DalamudGrey,
-            "  周回の途中には割り込めません。AutoDuty のループ間処理（リテイナー・GC 納品）は");
-        ImGui.TextColored(
-            ImGuiColors.DalamudGrey,
-            "  こちらがエリアを移動した時点で AutoDuty 自身に破棄されるためです");
-        ImGui.TextColored(
-            ImGuiColors.DalamudOrange,
-            "  こまめに交換したい場合は、AutoDuty 側の周回数を 2〜3 周に設定してください");
-
-        if (!waitCycle)
-        {
-            ImGui.TextColored(
-                ImGuiColors.DalamudRed,
-                "  オフにすると周回の途中で停止します。リテイナー処理や GC 納品が失われます");
-        }
-
         var resumeOnFailure = Plugin.C.ResumeAutoDutyOnFailure;
         if (ImGui.Checkbox("交換に失敗した場合も AutoDuty を再開する", ref resumeOnFailure))
         {
@@ -1422,24 +1392,6 @@ public sealed class MainWindow(Plugin plugin)
         }
 
         ImGui.TextColored(ImGuiColors.DalamudGrey, "  オフにすると、失敗時は停止したままになります");
-
-        var yieldVenture = Plugin.C.YieldToUpcomingRetainerVenture;
-        if (ImGui.Checkbox("リテイナーのベンチャー完了が近いときは交換を後回しにする", ref yieldVenture))
-        {
-            Plugin.C.YieldToUpcomingRetainerVenture = yieldVenture;
-            changed = true;
-        }
-
-        if (yieldVenture)
-        {
-            var yieldSeconds = Plugin.C.RetainerVentureYieldSeconds;
-            ImGui.SetNextItemWidth(160f);
-            if (ImGui.InputInt("  何秒以内なら待つか", ref yieldSeconds))
-            {
-                Plugin.C.RetainerVentureYieldSeconds = Math.Clamp(yieldSeconds, 0, 3600);
-                changed = true;
-            }
-        }
 
         ImGui.TextUnformatted("詳細ログ");
 
@@ -1535,15 +1487,6 @@ public sealed class MainWindow(Plugin plugin)
 
         ImGui.TextColored(ImGuiColors.DalamudGrey, "  実行中のリテイナー処理は中断しません。交換が終わると自動的に解除します");
 
-        var abortTasks = Plugin.C.AbortAutoRetainerTasksOnStop;
-        if (ImGui.Checkbox("緊急停止時に AutoRetainer の実行中タスクも中断する", ref abortTasks))
-        {
-            Plugin.C.AbortAutoRetainerTasksOnStop = abortTasks;
-            changed = true;
-        }
-
-        ImGui.TextColored(ImGuiColors.DalamudYellow, "  推奨しません。リテイナー処理が中途半端な状態で止まる可能性があります");
-
         ImGui.Spacing();
 
         var keepFree = Plugin.C.KeepFreeInventorySlots;
@@ -1566,7 +1509,7 @@ public sealed class MainWindow(Plugin plugin)
         }
 
         var shortCommand = Plugin.C.RegisterShortCommand;
-        if (ImGui.Checkbox("短縮コマンド /ac を登録する（次回起動時に反映）", ref shortCommand))
+        if (ImGui.Checkbox("短縮コマンド /acc を登録する（次回起動時に反映）", ref shortCommand))
         {
             Plugin.C.RegisterShortCommand = shortCommand;
             changed = true;
