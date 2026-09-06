@@ -4,8 +4,3 @@ obj/
 *.user
 *.suo
 .vs/
-
-# 開発用の作業ファイル（リポジトリには含めない）
-CLAUDE.md
-FFXIV トークン自動交換・周回連携プラグイン 開発仕様書.md
-Token Exchange Automation Plugin.md
