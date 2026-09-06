@@ -106,6 +106,7 @@ public enum ExchangeFailure
     AutoDutyStopFailed,
     AutoDutyResumeFailed,
     AutoRetainerIpcBroken,
+    ExternalPluginError,
 }
 
 /// <summary>
@@ -191,7 +192,8 @@ public sealed unsafe class ExchangeExecutor(
     AetheryteService aetheryte,
     LifestreamIpc lifestream,
     AutoDutyIpc autoDuty,
-    AutoRetainerIpc autoRetainer)
+    AutoRetainerIpc autoRetainer,
+    ArtisanIpc artisan)
 {
     /// <summary>交換コマンド。0 が購入であることの根拠は実測のみ。他の用途に流用しない。</summary>
     private const int ExchangeCommand = 0;
@@ -229,6 +231,7 @@ public sealed unsafe class ExchangeExecutor(
     private readonly LifestreamIpc lifestream = lifestream;
     private readonly AutoDutyIpc autoDuty = autoDuty;
     private readonly AutoRetainerIpc autoRetainer = autoRetainer;
+    private readonly ArtisanIpc artisan = artisan;
 
     private int teleportAttempts;
     private bool aethernetTried;
@@ -317,6 +320,11 @@ public sealed unsafe class ExchangeExecutor(
             {
                 var suppressed = this.autoRetainer.TryGetSuppressed(out var sup) ? sup.ToString() : "?";
                 parts.Add($"AR(処理中={this.autoRetainer.IsBusyFailClosed()} 抑制={suppressed} 本体抑制={this.autoRetainer.SuppressedByUs})");
+            }
+
+            if (this.artisan.IsLoaded)
+            {
+                parts.Add($"Artisan(処理中={this.artisan.IsBusyFailClosed()} 本体停止={this.artisan.StoppedByUs})");
             }
 
             parts.Add($"エリア={Svc.ClientState.TerritoryType}");
@@ -428,6 +436,7 @@ public sealed unsafe class ExchangeExecutor(
         this.aborted = false;
 
         this.autoRetainer.Release();
+        this.artisan.Release();
     }
 
     /// <summary>結果未確定の記録を、ユーザーの確認を経てクリアする。</summary>
@@ -445,6 +454,7 @@ public sealed unsafe class ExchangeExecutor(
         // ここへ来る経路によっては抑制が残っている可能性がある。
         // 抑制したまま放置すると AutoRetainer が動かなくなるため、必ず解く。
         this.autoRetainer.Release();
+        this.artisan.Release();
 
         if (this.Step == ExchangeStep.Error)
         {
@@ -544,6 +554,7 @@ public sealed unsafe class ExchangeExecutor(
         try
         {
             this.autoRetainer.Release();
+        this.artisan.Release();
         }
         catch (Exception ex)
         {
@@ -887,6 +898,14 @@ public sealed unsafe class ExchangeExecutor(
             return;
         }
 
+        // Artisan を先に止める。
+        // 製作の最中は SafetyGuard が弾くのでここへは来ないが、製作の合間は素通りする。
+        // その状態で移動を始めると、Artisan が次の製作を始めようとして操作を取り合う。
+        if (!this.StopArtisanForExchange())
+        {
+            return;
+        }
+
         if (!this.autoRetainer.IsLoaded || !Plugin.C.SuppressAutoRetainer)
         {
             this.Step = ExchangeStep.StopAutoDuty;
@@ -933,6 +952,50 @@ public sealed unsafe class ExchangeExecutor(
         this.StatusDetail = "AutoDuty の状態を確認しています";
 
         this.TickStopAutoDuty();
+    }
+
+    /// <summary>
+    /// 交換の間だけ Artisan を止める。進んでよければ true を返す。
+    ///
+    /// Artisan は停止時に動作中のモード（耐久モード / 製作リスト）を自分で記録し、
+    /// 解除時にそのモードだけを戻す。何も動いていなければ何も起きない。
+    /// </summary>
+    private bool StopArtisanForExchange()
+    {
+        if (!this.artisan.IsLoaded || !Plugin.C.StopArtisan)
+        {
+            return true;
+        }
+
+        if (!this.artisan.StoppedByUs)
+        {
+            if (!this.artisan.Stop())
+            {
+                this.Fail(ExchangeFailure.ExternalPluginError, "Artisan へ停止を依頼できませんでした");
+                return false;
+            }
+
+            this.anomalyLog.Info("Suppress", "交換の間、Artisan の製作を止めました");
+
+            // 止めた直後は製作画面から抜ける処理が残っている。次の呼び出しで確認する。
+            return false;
+        }
+
+        // 製作画面から抜け終わるまで待つ。抜ける前に移動すると操作が噛み合わない。
+        if (this.artisan.IsBusyFailClosed())
+        {
+            this.StatusDetail = "Artisan の製作が止まるのを待っています";
+
+            if (DateTime.UtcNow - this.lastWaitLogUtc > TimeSpan.FromSeconds(60))
+            {
+                this.lastWaitLogUtc = DateTime.UtcNow;
+                this.anomalyLog.Info("Wait", "Artisan の製作が止まるのを待っています");
+            }
+
+            return false;
+        }
+
+        return true;
     }
 
     /// <summary>AutoDuty を止める。止める前の状態を記録して、後で戻せるようにする。</summary>
@@ -1112,6 +1175,7 @@ public sealed unsafe class ExchangeExecutor(
         // AutoDuty はループ間処理で AutoRetainer を呼ぶため、抑制したまま再開すると
         // リテイナー処理が動かないまま次の周回に入る。
         this.autoRetainer.Release();
+        this.artisan.Release();
 
         if (!this.autoDuty.TryContentHasPath(context.AutoDutyTerritoryId, out var hasPath) || !hasPath)
         {
@@ -1136,6 +1200,7 @@ public sealed unsafe class ExchangeExecutor(
         this.CloseOwned("ShopExchangeCurrency", useCloseFirst: true);
 
         this.autoRetainer.Release();
+        this.artisan.Release();
         this.returnContext = null;
         this.session = null;
         this.travelTarget = null;
@@ -2340,6 +2405,7 @@ public sealed unsafe class ExchangeExecutor(
         try
         {
             this.autoRetainer.Release();
+        this.artisan.Release();
         }
         catch (Exception ex)
         {
