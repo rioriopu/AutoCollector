@@ -58,6 +58,9 @@ public enum ExchangeStep
     /// <summary>数量ダイアログが出てしまったので閉じている。</summary>
     CancelDialog,
 
+    /// <summary>アイテム交換画面で、系統と種別を選んでいる。</summary>
+    SelectInclusionCategory,
+
     /// <summary>AutoDuty を再開している。</summary>
     ResumeAutoDuty,
 
@@ -194,10 +197,17 @@ public sealed unsafe class ExchangeExecutor(
     LifestreamIpc lifestream,
     AutoDutyIpc autoDuty,
     AutoRetainerIpc autoRetainer,
-    ArtisanIpc artisan)
+    ArtisanIpc artisan,
+    InclusionShopService inclusionShop)
 {
     /// <summary>交換コマンド。0 が購入であることの根拠は実測のみ。他の用途に流用しない。</summary>
     private const int ExchangeCommand = 0;
+
+    /// <summary>
+    /// アイテム交換画面（InclusionShop）の購入コマンド。
+    /// ECommons の AddonMaster.InclusionShop が Fire(14, index, amount) を使っている。
+    /// </summary>
+    private const int InclusionExchangeCommand = 14;
 
     /// <summary>個数。MVP は 1 固定。2 以上は未実測のため設定に露出させない。</summary>
     private const int ExchangeQuantity = 1;
@@ -233,6 +243,7 @@ public sealed unsafe class ExchangeExecutor(
     private readonly AutoDutyIpc autoDuty = autoDuty;
     private readonly AutoRetainerIpc autoRetainer = autoRetainer;
     private readonly ArtisanIpc artisan = artisan;
+    private readonly InclusionShopService inclusionShop = inclusionShop;
 
     private int teleportAttempts;
     private bool aethernetTried;
@@ -537,6 +548,7 @@ public sealed unsafe class ExchangeExecutor(
 
             // 4. ショップ本体
             this.CloseOwned("ShopExchangeCurrency", useCloseFirst: true);
+        this.CloseOwned("InclusionShop", useCloseFirst: true);
 
             // 5. 会話メニューの残骸
             this.CloseOwned("SelectString", useCloseFirst: false);
@@ -639,18 +651,6 @@ public sealed unsafe class ExchangeExecutor(
         {
             this.pendingRequest = null;
             this.Fail(ExchangeFailure.NpcNotFound, "この交換先は NPC の座標が解決できていません");
-            reason = this.StatusDetail;
-            return false;
-        }
-
-        // InclusionShop（スクリップ交換など）は画面の操作方法が違い、まだ実行に対応していない。
-        // 移動して話しかけたところで交換できないため、始める前に断る。
-        if (definition.UsesInclusionShop)
-        {
-            this.pendingRequest = null;
-            this.Fail(
-                ExchangeFailure.InclusionShopUnsupported,
-                "この交換所（アイテム交換画面）はまだ自動実行に対応していません");
             reason = this.StatusDetail;
             return false;
         }
@@ -758,6 +758,10 @@ public sealed unsafe class ExchangeExecutor(
 
             case ExchangeStep.SelectMenu:
                 this.TickSelectMenu();
+                break;
+
+            case ExchangeStep.SelectInclusionCategory:
+                this.TickSelectInclusionCategory();
                 break;
 
             case ExchangeStep.Armed:
@@ -1177,6 +1181,7 @@ public sealed unsafe class ExchangeExecutor(
         // 開いたまま解除すると、AutoRetainer が動き出したときに
         // こちらのウィンドウが残っていて操作が噛み合わなくなる。
         this.CloseOwned("ShopExchangeCurrency", useCloseFirst: true);
+        this.CloseOwned("InclusionShop", useCloseFirst: true);
 
         // AutoDuty を動かす前に抑制を解く。
         // AutoDuty はループ間処理で AutoRetainer を呼ぶため、抑制したまま再開すると
@@ -1205,6 +1210,7 @@ public sealed unsafe class ExchangeExecutor(
         // 自分が開いたショップは自分で閉じる。開けっ放しにすると
         // 次の交換の事前条件（ブロックするアドオンが無いこと）にも引っかかる。
         this.CloseOwned("ShopExchangeCurrency", useCloseFirst: true);
+        this.CloseOwned("InclusionShop", useCloseFirst: true);
 
         this.autoRetainer.Release();
         this.artisan.Release();
@@ -1514,9 +1520,20 @@ public sealed unsafe class ExchangeExecutor(
             return;
         }
 
-        // ショップが開いたら事前条件の評価へ進む。
-        if (this.shopService.IsShopOpen())
+        // アイテム交換画面（スクリップ等）は系統と種別を選んでから中身が入る。
+        if (target.UsesInclusionShop)
         {
+            if (this.inclusionShop.IsOpen())
+            {
+                this.Step = ExchangeStep.SelectInclusionCategory;
+                this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(30);
+                this.StatusDetail = "交換の種類を選んでいます";
+                return;
+            }
+        }
+        else if (this.shopService.IsShopOpen())
+        {
+            // ショップが開いたら事前条件の評価へ進む。
             this.pendingRequest = target;
             this.Step = ExchangeStep.Armed;
             return;
@@ -1739,6 +1756,13 @@ public sealed unsafe class ExchangeExecutor(
             return;
         }
 
+        // アイテム交換画面は読み取りも発火も別経路になる。
+        if (definition.UsesInclusionShop)
+        {
+            this.FireInclusionExchange(definition);
+            return;
+        }
+
         // P-4: アドオンは 1 回だけ取得し、以降このポインタだけを使う
         if (!GenericHelpers.TryGetAddonByName<AtkUnitBase>("ShopExchangeCurrency", out var addon) || !GenericHelpers.IsAddonReady(addon))
         {
@@ -1892,6 +1916,238 @@ public sealed unsafe class ExchangeExecutor(
         this.Step = ExchangeStep.WaitOutcome;
         this.outcomeDeadlineUtc = DateTime.UtcNow.Add(OutcomeTimeout);
         this.StatusDetail = "交換結果を待っています";
+    }
+
+    /// <summary>
+    /// アイテム交換画面で 1 回交換する。
+    ///
+    /// 事前条件の考え方は ShopExchangeCurrency と同じ。
+    /// 画面から読んだ内容とゲームデータが完全に一致したときだけ撃つ。
+    /// 一致しないものは、直せる見込みがなくても撃たずに止める。
+    /// </summary>
+    private unsafe void FireInclusionExchange(ExchangeDefinition definition)
+    {
+        foreach (var name in BlockingAddons)
+        {
+            if (GenericHelpers.TryGetAddonByName<AtkUnitBase>(name, out var blocking) && GenericHelpers.IsAddonReady(blocking))
+            {
+                this.Fail(ExchangeFailure.BlockingAddonPresent, $"{name} が開いています。閉じてから実行してください");
+                return;
+            }
+        }
+
+        if (!this.inclusionShop.TryGetAddon(out var addon))
+        {
+            this.Fail(ExchangeFailure.ShopNotOpen, "アイテム交換画面が開いていません");
+            return;
+        }
+
+        if (!this.inclusionShop.TryReadEntries(addon, out var entries, out var currencyOnScreen, out var readFailure))
+        {
+            this.Fail(ExchangeFailure.ShopNotOpen, readFailure);
+            return;
+        }
+
+        // index の重複は配置ずれの証拠。撃たない。
+        if (entries.Select(x => x.Index).Distinct().Count() != entries.Count)
+        {
+            this.Fail(ExchangeFailure.IndexDuplicated, "画面から読んだ index に重複があります。配置がずれている可能性があります");
+            return;
+        }
+
+        var match = this.inclusionShop.Match(definition, entries);
+        if (match.Kind != ShopMatchKind.Matched || match.Entry is null)
+        {
+            var failure = match.Kind switch
+            {
+                ShopMatchKind.ItemNotFound => ExchangeFailure.ExchangeItemNotFound,
+                ShopMatchKind.Ambiguous => ExchangeFailure.ExchangeAmbiguous,
+                ShopMatchKind.CostMismatch => ExchangeFailure.CostMismatch,
+                _ => ExchangeFailure.ShopMismatch,
+            };
+            this.Fail(failure, match.Detail);
+            return;
+        }
+
+        var entry = match.Entry;
+
+        int callbackIndex;
+        try
+        {
+            callbackIndex = checked((int)entry.Index);
+        }
+        catch (OverflowException)
+        {
+            this.Fail(ExchangeFailure.IndexOutOfRange, $"index {entry.Index} が int に収まりません");
+            return;
+        }
+
+        if (!this.currencyService.TryGetCount(definition.CurrencyItemId, out var currencyBefore))
+        {
+            this.Fail(ExchangeFailure.CurrencyMismatch, "所持通貨を取得できませんでした");
+            return;
+        }
+
+        // 画面の所持数とインベントリが一致すること。通貨違いに対する唯一の実効的な検証。
+        if (currencyBefore != (int)currencyOnScreen)
+        {
+            this.Fail(
+                ExchangeFailure.CurrencyMismatch,
+                $"画面の通貨 {currencyOnScreen} とインベントリの {currencyBefore} が一致しません。別通貨の画面の可能性があります");
+            return;
+        }
+
+        if (currencyBefore < definition.CurrencyCost)
+        {
+            this.Fail(ExchangeFailure.InsufficientCurrency, $"通貨が足りません（所持 {currencyBefore} / 必要 {definition.CurrencyCost}）");
+            return;
+        }
+
+        var keepFree = Math.Max(0, Plugin.C.KeepFreeInventorySlots);
+        if (!this.currencyService.TryGetEmptyBagSlots(out var freeSlots) || freeSlots <= keepFree)
+        {
+            this.Fail(
+                ExchangeFailure.NoBagSpace,
+                $"所持枠の空きが {freeSlots} です。{keepFree} 枠を残す設定のため交換しません");
+            return;
+        }
+
+        if (!this.currencyService.TryGetCount(definition.RewardItemId, out var rewardBefore, includeEquipped: true, includeArmory: true))
+        {
+            this.Fail(ExchangeFailure.RewardCountUnreadable, "報酬アイテムの所持数を取得できませんでした");
+            return;
+        }
+
+        var rewardName = Svc.Data.GetExcelSheet<Item>()?.GetRowOrDefault(definition.RewardItemId)?.Name.ExtractText() ?? string.Empty;
+
+        // ここから先は不可逆。記録を先に立ててから撃つ。
+        Plugin.C.InFlight = new PurchaseAttempt
+        {
+            ShopId = definition.ShopId,
+            RewardItemId = definition.RewardItemId,
+            RewardName = rewardName,
+            CurrencyItemId = definition.CurrencyItemId,
+            CallbackIndex = callbackIndex,
+            CurrencyCost = definition.CurrencyCost,
+            RewardQuantity = definition.RewardQuantity,
+            RewardBefore = rewardBefore,
+            CurrencyBefore = currencyBefore,
+            FiredAtUtc = DateTime.UtcNow,
+        };
+        EzConfig.Save();
+
+        this.anomalyLog.Info(
+            "Exchange",
+            $"交換を実行します: {rewardName} × {definition.RewardQuantity}" +
+            $"（コスト {definition.CurrencyCost} / index {callbackIndex} / アイテム交換画面）");
+
+        // 数量は 1 回につき 1 個。まとめ買いは結果の検証が複雑になるため行わない。
+        Callback.Fire(addon, true, InclusionExchangeCommand, callbackIndex, 1);
+
+        this.Step = ExchangeStep.WaitOutcome;
+        this.outcomeDeadlineUtc = DateTime.UtcNow.Add(OutcomeTimeout);
+        this.StatusDetail = "交換結果を待っています";
+    }
+
+    /// <summary>
+    /// アイテム交換画面で、目的の系統と種別を選ぶ。
+    ///
+    /// この画面は 2 段の絞り込みを通さないと目的の品が一覧に出てこない。
+    /// 選んだあとは中身が入れ替わるので、実際に切り替わったことを確認してから次へ進む。
+    /// </summary>
+    private void TickSelectInclusionCategory()
+    {
+        var target = this.travelTarget;
+        if (target is null || target.Inclusion is not { } path)
+        {
+            this.Step = ExchangeStep.Idle;
+            return;
+        }
+
+        if (!this.inclusionShop.IsOpen())
+        {
+            if (DateTime.UtcNow > this.stepDeadlineUtc)
+            {
+                this.Fail(ExchangeFailure.ShopNotOpen, "アイテム交換画面が開いていません");
+            }
+
+            return;
+        }
+
+        if (!this.inclusionShop.TryGetSelection(out var selection) || selection is null)
+        {
+            if (DateTime.UtcNow > this.stepDeadlineUtc)
+            {
+                this.Fail(ExchangeFailure.ShopNotOpen, "アイテム交換画面の状態を読み取れませんでした");
+            }
+
+            return;
+        }
+
+        // 系統がまだ目的のものでなければ切り替える。
+        if (selection.SelectedCategoryRowId != path.CategoryId)
+        {
+            if (!EzThrottler.Throttle("AutoCollector.InclusionCategory", 500))
+            {
+                return;
+            }
+
+            if (!this.inclusionShop.TrySelectCategory(path.CategoryId, out var categoryFailure))
+            {
+                if (DateTime.UtcNow > this.stepDeadlineUtc)
+                {
+                    this.Fail(ExchangeFailure.ShopMismatch, categoryFailure);
+                }
+
+                return;
+            }
+
+            this.StatusDetail = $"「{path.CategoryName}」を選んでいます";
+            return;
+        }
+
+        // 系統は合っている。目的の品が一覧に出ているかを確かめる。
+        if (!this.inclusionShop.TryGetAddon(out var addon))
+        {
+            return;
+        }
+
+        if (this.inclusionShop.TryReadEntries(addon, out var entries, out _, out _))
+        {
+            foreach (var entry in entries)
+            {
+                if (entry.ItemId == target.RewardItemId)
+                {
+                    this.pendingRequest = target;
+                    this.Step = ExchangeStep.Armed;
+                    this.StatusDetail = "交換の直前確認をしています";
+                    return;
+                }
+            }
+        }
+
+        // 出ていなければ種別を切り替えて探す。
+        if (!EzThrottler.Throttle("AutoCollector.InclusionSubCategory", 700))
+        {
+            return;
+        }
+
+        if (!this.inclusionShop.TrySelectSubCategory(selection.SelectedSeriesId, target.ShopId, out var subFailure))
+        {
+            if (DateTime.UtcNow > this.stepDeadlineUtc)
+            {
+                this.Fail(ExchangeFailure.ShopMismatch, subFailure);
+            }
+
+            return;
+        }
+
+        if (DateTime.UtcNow > this.stepDeadlineUtc)
+        {
+            this.Fail(
+                ExchangeFailure.ExchangeItemNotFound,
+                "アイテム交換画面に目的の品が見つかりませんでした。種別を手動で選んでからお試しください");
+        }
     }
 
     /// <summary>発火後の待機。判定は次フレーム以降に行う。</summary>

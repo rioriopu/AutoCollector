@@ -144,7 +144,8 @@ public sealed class Plugin : IDalamudPlugin
             this.Lifestream,
             this.AutoDuty,
             this.AutoRetainer,
-            this.Artisan);
+            this.Artisan,
+            this.InclusionShopService);
         this.MonitorService = new MonitorService(
             this.AnomalyLog,
             this.CurrencyService,
