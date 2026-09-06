@@ -124,6 +124,14 @@ public sealed class Config
     public bool DetailedLogEnabled { get; set; }
 
     /// <summary>
+    /// 設定の移行に使う版数。
+    ///
+    /// 詳細ログは当初 既定で有効にしていたため、その値が保存されたままの設定が存在する。
+    /// 既定を無効に変えたので、一度だけ揃え直す。
+    /// </summary>
+    public int ConfigVersion { get; set; }
+
+    /// <summary>
     /// 実際に詳細ログを記録するか。
     /// デバッグモードを切ったときに書き続けないよう、両方を条件にする。
     /// </summary>
