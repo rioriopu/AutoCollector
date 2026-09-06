@@ -16,7 +16,7 @@ namespace AutoCollector.Ui;
 /// メイン画面。MVP 段階では「読み取り専用の状況表示」と「セルフチェック結果」が中心。
 /// 交換の実行系は S5 以降で追加する。
 /// </summary>
-public sealed class MainWindow(Plugin plugin)
+public sealed partial class MainWindow(Plugin plugin)
 {
     private readonly Plugin plugin = plugin;
 
@@ -46,6 +46,7 @@ public sealed class MainWindow(Plugin plugin)
         this.DrawShopTab();
         this.DrawDiagnosticsTab();
         this.DrawSettingsTab();
+        this.DrawDonationTab();
     }
 
     /// <summary>
