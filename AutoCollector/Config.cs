@@ -115,6 +115,24 @@ public sealed class Config
     public bool WaitForAutoDutyCycleEnd { get; set; } = true;
 
     /// <summary>
+    /// AutoDuty が周回を終えて停止したら、こちらから再開させるか。
+    ///
+    /// 1 周ごとに交換する構成では AutoDuty の周回数を 1 にする。
+    /// 交換が起きた周回は交換後の再開処理が動かし直すが、
+    /// 閾値に達していない周回では誰も再開させず 1 周で止まってしまう。
+    /// </summary>
+    public bool KeepAutoDutyLooping { get; set; } = true;
+
+    /// <summary>停止を確認してから再開させるまでの待ち時間。終了処理の残りを踏まないようにする。</summary>
+    public int AutoDutyRestartDelaySeconds { get; set; } = 5;
+
+    /// <summary>
+    /// 直近に周回していたコンテンツのエリア。再開時に AutoDuty へ渡す。
+    /// 停止後は現在地が街になっているため、周回中に記録しておく必要がある。
+    /// </summary>
+    public uint LastDutyTerritoryId { get; set; }
+
+    /// <summary>
     /// 詳細ログをファイルへ書き出すか。
     ///
     /// 状態遷移や外部プラグインの状態を逐一記録する。

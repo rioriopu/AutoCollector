@@ -67,6 +67,8 @@ public sealed class Plugin : IDalamudPlugin
 
     internal MonitorService MonitorService { get; private set; } = null!;
 
+    internal AutoDutyKeeper AutoDutyKeeper { get; private set; } = null!;
+
     private FileLogWriter? fileLog;
 
     /// <summary>詳細ログの書き出し状態。UI から参照する。</summary>
@@ -128,6 +130,11 @@ public sealed class Plugin : IDalamudPlugin
             this.ExchangeResolver,
             this.ExchangeExecutor,
             this.AutomationGate);
+        this.AutoDutyKeeper = new AutoDutyKeeper(
+            this.AnomalyLog,
+            this.AutoDuty,
+            this.AutoRetainer,
+            this.ExchangeExecutor);
 
         Svc.Framework.Update += this.OnFrameworkUpdate;
 
@@ -238,6 +245,7 @@ public sealed class Plugin : IDalamudPlugin
 
             this.ExchangeExecutor.Tick();
             this.MonitorService.Tick();
+            this.AutoDutyKeeper.Tick();
         }
         catch (Exception ex)
         {
