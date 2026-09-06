@@ -32,9 +32,12 @@ public sealed class PresetTab(Plugin plugin)
     private string rewardSearch = string.Empty;
     private Guid editingPresetId = Guid.Empty;
 
-    public void Draw()
+    public void Draw(ref bool select)
     {
-        using var tab = ImRaii.TabItem("プリセット");
+        var flags = select ? ImGuiTabItemFlags.SetSelected : ImGuiTabItemFlags.None;
+        select = false;
+
+        using var tab = ImRaii.TabItem("プリセット", flags);
         if (!tab)
         {
             return;

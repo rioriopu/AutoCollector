@@ -107,6 +107,7 @@ public enum ExchangeFailure
     AutoDutyResumeFailed,
     AutoRetainerIpcBroken,
     ExternalPluginError,
+    InclusionShopUnsupported,
 }
 
 /// <summary>
@@ -351,6 +352,12 @@ public sealed unsafe class ExchangeExecutor(
 
     /// <summary>いま進行中のプリセット。監視からの実行でなければ空。</summary>
     public Guid ActivePresetId => this.session?.PresetId ?? Guid.Empty;
+
+    /// <summary>直前に完了した交換の回数。session は片付けられるため、終わったあとはこちらを見る。</summary>
+    public int LastSessionCompleted { get; private set; }
+
+    /// <summary>直前の交換が終わった時刻。</summary>
+    public DateTime LastFinishedAt { get; private set; }
 
     public bool CanRequest => this.pendingRequest is null && this.InFlight is null && !this.aborted;
 
@@ -642,8 +649,8 @@ public sealed unsafe class ExchangeExecutor(
         {
             this.pendingRequest = null;
             this.Fail(
-                ExchangeFailure.ShopMismatch,
-                "この交換所（アイテム交換画面）はまだ自動実行に対応していません。手動で交換してください");
+                ExchangeFailure.InclusionShopUnsupported,
+                "この交換所（アイテム交換画面）はまだ自動実行に対応していません");
             reason = this.StatusDetail;
             return false;
         }
@@ -1202,6 +1209,10 @@ public sealed unsafe class ExchangeExecutor(
         this.autoRetainer.Release();
         this.artisan.Release();
         this.returnContext = null;
+
+        // session を片付ける前に控える。片付けたあとは交換回数を出す手段が無くなる。
+        this.LastSessionCompleted = this.session?.Completed ?? 0;
+        this.LastFinishedAt = DateTime.Now;
         this.session = null;
         this.travelTarget = null;
         this.ownership.Clear();
