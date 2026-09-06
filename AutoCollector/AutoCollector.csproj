@@ -23,6 +23,14 @@
     -->
     <EmbeddedResource Include="Data\atkvalue_layout.json" />
     <EmbeddedResource Include="Data\special_currency_map.json" />
+    <!--
+      プラグイン一覧に出すアイコン。DalamudPackager が zip へ含める。
+      dev プラグインとして読み込む場合も、DLL の隣の images\icon.png が使われる。
+    -->
+    <None Include="images\icon.png">
+      <Link>images\icon.png</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
   <ItemGroup>
