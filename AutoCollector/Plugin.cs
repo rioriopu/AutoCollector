@@ -67,6 +67,11 @@ public sealed class Plugin : IDalamudPlugin
 
     internal MonitorService MonitorService { get; private set; } = null!;
 
+    private FileLogWriter? fileLog;
+
+    /// <summary>詳細ログの書き出し状態。UI から参照する。</summary>
+    internal FileLogWriter? FileLog => this.fileLog;
+
     public Plugin(IDalamudPluginInterface pluginInterface)
     {
         P = this;
@@ -82,6 +87,7 @@ public sealed class Plugin : IDalamudPlugin
         C = EzConfig.Init<Config>();
 
         this.AnomalyLog = new AnomalyLog();
+        this.StartFileLog();
         this.TomestoneService = new TomestoneService(this.AnomalyLog);
         this.CurrencyService = new CurrencyService(this.AnomalyLog);
         this.SelfCheck = new SelfCheck(C, this.AnomalyLog, this.TomestoneService, this.CurrencyService);
@@ -254,6 +260,65 @@ public sealed class Plugin : IDalamudPlugin
         // 他プラグインやユーザーが開いたものまで閉じてしまうため、S5 では行わない。
     }
 
+    /// <summary>
+    /// 詳細ログの書き出しを始める。
+    ///
+    /// 保存先はネットワーク共有を想定しているため、ここでは到達確認をしない。
+    /// 確認のために待つと読み込みが止まる。書けるかどうかは背景スレッドが判断する。
+    /// </summary>
+    internal void StartFileLog()
+    {
+        this.StopFileLog();
+
+        if (!C.DetailedLogEnabled || string.IsNullOrWhiteSpace(C.LogDirectory))
+        {
+            return;
+        }
+
+        try
+        {
+            this.fileLog = new FileLogWriter(C.LogDirectory);
+            this.AnomalyLog.SetFileWriter(this.fileLog);
+
+            this.AnomalyLog.Info(
+                "Log",
+                $"詳細ログを記録します: {this.fileLog.FilePath}");
+
+            this.AnomalyLog.Trace("Log", $"AutoCollector v{Svc.PluginInterface.Manifest.AssemblyVersion} / ECommons v3.2.1.17");
+
+            foreach (var name in new[] { "AutoDuty", "AutoRetainer", "Artisan", "vnavmesh", "Lifestream" })
+            {
+                foreach (var installed in Svc.PluginInterface.InstalledPlugins)
+                {
+                    if (installed.InternalName == name)
+                    {
+                        this.AnomalyLog.Trace("Log", $"{name} v{installed.Version}（読み込み={installed.IsLoaded}）");
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Svc.Log.Error($"[Auto Collector] 詳細ログを開始できませんでした: {ex}");
+        }
+    }
+
+    internal void StopFileLog()
+    {
+        this.AnomalyLog?.SetFileWriter(null);
+
+        try
+        {
+            this.fileLog?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            Svc.Log.Warning($"[Auto Collector] 詳細ログの停止に失敗しました: {ex.Message}");
+        }
+
+        this.fileLog = null;
+    }
+
     public void Dispose()
     {
         // ハンドラの解除を最優先で行う。ここが漏れると
@@ -302,6 +367,9 @@ public sealed class Plugin : IDalamudPlugin
             // EzCmd で登録したコマンドは ECommonsMain.Dispose が解除する。
             this.shortCommandRegistered = false;
         }
+
+        // ログは最後に閉じる。ここまでの後始末も記録に残したい。
+        this.StopFileLog();
 
         ECommonsMain.Dispose();
     }

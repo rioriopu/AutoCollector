@@ -115,6 +115,22 @@ public sealed class Config
     public bool WaitForAutoDutyCycleEnd { get; set; } = true;
 
     /// <summary>
+    /// 詳細ログをファイルへ書き出すか。
+    ///
+    /// 状態遷移や外部プラグインの状態を逐一記録する。
+    /// 開発中の不具合追跡用で、通常の運用では不要。
+    /// </summary>
+    public bool DetailedLogEnabled { get; set; } = true;
+
+    /// <summary>
+    /// 詳細ログの保存先。
+    ///
+    /// ネットワーク共有を指定できる。共有が落ちていても本体の動作には影響しない
+    /// （書き込みは背景スレッドで行い、失敗しても諦めるだけ）。
+    /// </summary>
+    public string LogDirectory { get; set; } = @"\\rio-pc\DevPlugins\AutoCollectorLogs";
+
+    /// <summary>
     /// 外部の自動化プラグイン（AutoDuty / Artisan）が動作しているときだけ自動交換する。
     ///
     /// プリセットを有効にしただけで動くと、手動で遊んでいる最中に

@@ -244,6 +244,9 @@ public sealed unsafe class ExchangeExecutor(
     private uint observedDutyTerritoryId;
     private int stopAttempts;
 
+    /// <summary>待機中の状態を次に記録する時刻。</summary>
+    private DateTime nextContextLogUtc = DateTime.MinValue;
+
     /// <summary>
     /// 待っている間に AutoDuty が動いているのを観測したか。
     ///
@@ -263,7 +266,70 @@ public sealed unsafe class ExchangeExecutor(
     private DateTime dialogDeadlineUtc;
     private bool aborted;
 
-    public ExchangeStep Step { get; private set; } = ExchangeStep.Idle;
+    private ExchangeStep step = ExchangeStep.Idle;
+
+    /// <summary>
+    /// いまの手順。
+    ///
+    /// 代入箇所が多く、どこで何に移ったかを追うのが難しい。
+    /// 遷移のたびに詳細ログへ残し、そのときの外部プラグインの状態も一緒に記録する。
+    /// </summary>
+    public ExchangeStep Step
+    {
+        get => this.step;
+
+        private set
+        {
+            if (this.step == value)
+            {
+                return;
+            }
+
+            var previous = this.step;
+            this.step = value;
+
+            if (Plugin.C.DetailedLogEnabled)
+            {
+                this.anomalyLog.Trace("Step", $"{previous} → {value} / {this.DescribeContext()}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// いまの外部状態をひとまとめにする。遷移ログに添えて、あとから原因を追えるようにする。
+    /// 例外は握り潰す。ログのために本体を止めない。
+    /// </summary>
+    private string DescribeContext()
+    {
+        try
+        {
+            var parts = new List<string>();
+
+            if (this.autoDuty.IsLoaded)
+            {
+                var stopped = this.autoDuty.TryIsStopped(out var s) ? s.ToString() : "?";
+                var looping = this.autoDuty.TryIsLooping(out var l) ? l.ToString() : "?";
+                var navigating = this.autoDuty.TryIsNavigating(out var n) ? n.ToString() : "?";
+                parts.Add($"AD(停止={stopped} 周回={looping} 移動={navigating})");
+            }
+
+            if (this.autoRetainer.IsLoaded)
+            {
+                var suppressed = this.autoRetainer.TryGetSuppressed(out var sup) ? sup.ToString() : "?";
+                parts.Add($"AR(処理中={this.autoRetainer.IsBusyFailClosed()} 抑制={suppressed} 本体抑制={this.autoRetainer.SuppressedByUs})");
+            }
+
+            parts.Add($"エリア={Svc.ClientState.TerritoryType}");
+            parts.Add($"Duty={Player.IsInDuty}");
+            parts.Add(SafetyGuard.IsSafeToStart(out var reason) ? "安全=OK" : $"安全=NG({reason})");
+
+            return string.Join(" ", parts);
+        }
+        catch (Exception ex)
+        {
+            return $"状態の取得に失敗: {ex.Message}";
+        }
+    }
 
     public ExchangeFailure Failure { get; private set; }
 
@@ -640,6 +706,16 @@ public sealed unsafe class ExchangeExecutor(
     /// <summary>Framework.Update から毎フレーム呼ぶ。</summary>
     public void Tick()
     {
+        // 手順が進まないまま止まっている場合、遷移ログだけでは何も残らない。
+        // 待っている間の外部状態を定期的に残して、あとから追えるようにする。
+        if (Plugin.C.DetailedLogEnabled &&
+            this.Step is not (ExchangeStep.Idle or ExchangeStep.Done) &&
+            DateTime.UtcNow >= this.nextContextLogUtc)
+        {
+            this.nextContextLogUtc = DateTime.UtcNow.AddSeconds(5);
+            this.anomalyLog.Trace("State", $"{this.Step} 継続中: {this.StatusDetail} / {this.DescribeContext()}");
+        }
+
         switch (this.Step)
         {
             case ExchangeStep.WaitingSafeWindow:
