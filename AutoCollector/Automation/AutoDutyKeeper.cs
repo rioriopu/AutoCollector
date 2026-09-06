@@ -47,6 +47,27 @@ public sealed class AutoDutyKeeper(
     private DateTime lastRestartUtc = DateTime.MinValue;
     private int countermands;
 
+    /// <summary>
+    /// 停止する前に「周回=false かつ 停止=false」を観測したか。
+    ///
+    /// これが周回完了と手動停止を分ける決め手になる。
+    ///
+    /// 周回完了では LoopsCompleteActions が
+    ///   States &= ~PluginState.Looping;   ← 即座
+    ///   TaskManager.Enqueue(... Stage = Stage.Stopped);  ← キューの最後
+    /// の順で処理するため、Looping が落ちてから停止するまでに必ず間があく
+    /// （ループ間処理の実行時間そのもの。実測で 19〜25 秒）。
+    ///
+    /// 手動停止は Stage = Stage.Stopped が直接 StopAndResetALL を呼び、
+    /// States = PluginState.None と Stage の変更が同一フレームで起きる。
+    /// つまりこの中間状態は存在しない。
+    /// </summary>
+    private bool sawLoopingClearedBeforeStop;
+
+    /// <summary>直前に観測した状態。変化したときだけログに残す。</summary>
+    private bool? lastStopped;
+    private bool? lastLooping;
+
     /// <summary>この起動中に再開させた回数。</summary>
     public int RestartCount { get; private set; }
 
@@ -85,10 +106,26 @@ public sealed class AutoDutyKeeper(
             return;
         }
 
+        this.autoDuty.TryIsLooping(out var looping);
+        this.TraceStateChange(stopped, looping);
+
         if (!stopped)
         {
             this.sawRunning = true;
             this.stoppedSinceUtc = DateTime.MinValue;
+
+            if (looping)
+            {
+                // 周回中。ここから Looping が落ちるのを待つ。
+                this.sawLoopingClearedBeforeStop = false;
+            }
+            else
+            {
+                // 停止していないのに周回でもない。
+                // これは LoopsCompleteActions が Looping を落としたあと、
+                // ループ間処理が終わって停止するまでの間にしか現れない。
+                this.sawLoopingClearedBeforeStop = true;
+            }
 
             if (Player.IsInDuty)
             {
@@ -110,6 +147,18 @@ public sealed class AutoDutyKeeper(
         if (this.stoppedSinceUtc == DateTime.MinValue)
         {
             this.stoppedSinceUtc = DateTime.UtcNow;
+
+            if (!this.LooksLikeLoopCompletion(out var manualReason))
+            {
+                // 手動で止められた。再開させない。
+                // 次にユーザーが AutoDuty を動かしたら、そこからまた維持を始める。
+                this.sawRunning = false;
+                this.Status = $"手動停止と判断しました（{manualReason}）";
+                this.anomalyLog.Info("AutoDuty", $"AutoDuty の停止を検知しましたが、再開させません（{manualReason}）");
+                return;
+            }
+
+            this.anomalyLog.Trace("AutoDuty", "AutoDuty の停止を検知しました（周回完了と判断）");
 
             // 再開させた直後にコンテンツへ入らないまま止まったなら、
             // ユーザーが手で止めた可能性が高い。
@@ -139,6 +188,66 @@ public sealed class AutoDutyKeeper(
         }
 
         this.Restart();
+    }
+
+    /// <summary>
+    /// 観測した停止が「周回を終えた結果」かどうかを判定する。
+    ///
+    /// AutoDuty の 2 つの停止経路には、外から見て確実に区別できる差がある。
+    ///
+    /// 周回完了（LoopsCompleteActions）:
+    ///   States &= ~PluginState.Looping;                    ← 即座
+    ///   TaskManager.Enqueue(... Stage = Stage.Stopped);    ← ループ間処理の後
+    ///   さらに、ここへ来るのは必ずコンテンツを出たあと。
+    ///
+    /// 手動停止（/ad stop・停止ボタン）:
+    ///   Stage = Stage.Stopped → StopAndResetALL() → States = PluginState.None
+    ///   Looping と Stage が同一フレームで変わるため、中間状態が存在しない。
+    ///   コンテンツ中でも止められる。
+    /// </summary>
+    private bool LooksLikeLoopCompletion(out string manualReason)
+    {
+        // コンテンツ中の停止は手動と断定してよい。
+        // 周回完了で停止するのはコンテンツを出たあとだからである。
+        //
+        // ただし AutoExitDuty が無効だと、最終周は CheckFinishing の else 側で
+        // コンテンツ内のまま停止する。その構成ではこの判定を使わない。
+        if (Player.IsInDuty && this.autoDuty.GetConfigBool("AutoExitDuty", true))
+        {
+            manualReason = "コンテンツ中に停止しました";
+            return false;
+        }
+
+        // ループ間処理の期間（周回=false かつ 停止=false）を観測していないなら、
+        // Looping と停止が同時に変わったということ。手動停止の形である。
+        if (!this.sawLoopingClearedBeforeStop)
+        {
+            manualReason = "周回の終了処理を経ずに停止しました";
+            return false;
+        }
+
+        manualReason = string.Empty;
+        return true;
+    }
+
+    /// <summary>状態が変わったときだけ記録する。停止の前後を後から追えるようにする。</summary>
+    private void TraceStateChange(bool stopped, bool looping)
+    {
+        if (this.lastStopped == stopped && this.lastLooping == looping)
+        {
+            return;
+        }
+
+        this.lastStopped = stopped;
+        this.lastLooping = looping;
+
+        if (Plugin.C.DetailedLogEnabled)
+        {
+            this.anomalyLog.Trace(
+                "AutoDuty",
+                $"状態が変わりました: 停止={stopped} 周回={looping} Duty={Player.IsInDuty} " +
+                $"ループ間処理を観測={this.sawLoopingClearedBeforeStop}");
+        }
     }
 
     /// <summary>周回中のエリアを記録する。</summary>
