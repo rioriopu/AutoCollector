@@ -154,6 +154,14 @@ public sealed class Config
     /// </summary>
     public bool RequireExternalAutomationRunning { get; set; } = true;
 
+    /// <summary>
+    /// Artisan が導入されている場合、交換中は製作を止めるか。
+    ///
+    /// 製作の最中は SafetyGuard が弾くが、製作と製作の合間は素通りする。
+    /// そこで交換に入ると Artisan が次の製作を始めようとして操作を取り合う。
+    /// </summary>
+    public bool StopArtisan { get; set; } = true;
+
     /// <summary>AutoRetainer が導入されている場合、交換中に SetSuppressed で抑制するか。</summary>
     public bool SuppressAutoRetainer { get; set; } = true;
 

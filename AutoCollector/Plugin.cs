@@ -128,8 +128,8 @@ public sealed class Plugin : IDalamudPlugin
         this.Lifestream = new LifestreamIpc(this.AnomalyLog);
         this.AetheryteService = new AetheryteService(this.AnomalyLog);
         this.AutoDuty = new AutoDutyIpc(this.AnomalyLog);
-        this.AutoRetainer = new AutoRetainerIpc(this.AnomalyLog);
         this.Artisan = new ArtisanIpc(this.AnomalyLog);
+        this.AutoRetainer = new AutoRetainerIpc(this.AnomalyLog);
         this.AutomationGate = new ExternalAutomationGate(this.AutoDuty, this.Artisan);
         this.ExchangeExecutor = new ExchangeExecutor(
             this.AnomalyLog,
@@ -143,7 +143,8 @@ public sealed class Plugin : IDalamudPlugin
             this.AetheryteService,
             this.Lifestream,
             this.AutoDuty,
-            this.AutoRetainer);
+            this.AutoRetainer,
+            this.Artisan);
         this.MonitorService = new MonitorService(
             this.AnomalyLog,
             this.CurrencyService,
@@ -356,6 +357,7 @@ public sealed class Plugin : IDalamudPlugin
         try
         {
             this.AutoRetainer?.Release();
+            this.Artisan?.Release();
         }
         catch (Exception ex)
         {

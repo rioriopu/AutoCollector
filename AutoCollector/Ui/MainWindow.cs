@@ -574,10 +574,20 @@ public sealed partial class MainWindow(Plugin plugin)
             return;
         }
 
+        // 結果未確認の記録は何よりも先に出す。
+        //
+        // これが残っている間は新しい交換を受け付けない。
+        // 以前はトームストーンを解決できないと下の early return でこの表示ごと消えており、
+        // デバッグモードを切っているとクリアする手段が画面から無くなっていた。
+        this.DrawInFlightBanner();
+
         var slots = this.plugin.TomestoneService.ListSlots();
         if (slots.Count == 0)
         {
             ImGui.TextColored(ImGuiColors.DalamudRed, "トームストーンを解決できませんでした。");
+            ImGui.Spacing();
+            ImGui.Separator();
+            this.DrawAutomationStatus();
             return;
         }
 
@@ -846,10 +856,6 @@ public sealed partial class MainWindow(Plugin plugin)
 
         ImGui.Spacing();
         ImGui.Separator();
-        this.DrawInFlightBanner();
-
-        ImGui.Spacing();
-        ImGui.Separator();
         this.DrawAutomationStatus();
 
         ImGui.Spacing();
@@ -1046,10 +1052,22 @@ public sealed partial class MainWindow(Plugin plugin)
             if (endurance || list)
             {
                 ImGui.TextColored(ImGuiColors.DalamudYellow, endurance ? "耐久モード実行中" : "製作リスト実行中");
-                return;
+            }
+            else
+            {
+                ImGui.TextUnformatted("待機中");
             }
 
-            ImGui.TextUnformatted("待機中");
+            if (this.plugin.Artisan.StoppedByUs)
+            {
+                ImGui.SameLine();
+                ImGui.TextColored(ImGuiColors.HealerGreen, "（本プラグインが停止中）");
+            }
+            else if (this.plugin.Artisan.TryGetStopRequest(out var stopped) && stopped)
+            {
+                ImGui.SameLine();
+                ImGui.TextColored(ImGuiColors.DalamudGrey, "（他が停止中）");
+            }
         });
 
         DrawRow("vnavmesh", this.plugin.Vnavmesh.IsLoaded, () =>
@@ -1341,6 +1359,17 @@ public sealed partial class MainWindow(Plugin plugin)
         }
 
         ImGui.TextColored(ImGuiColors.DalamudGrey, "  実行中のリテイナー処理は中断しません。交換が終わると自動的に解除します");
+
+        var stopArtisan = Plugin.C.StopArtisan;
+        if (ImGui.Checkbox("交換中は Artisan の製作を止める", ref stopArtisan))
+        {
+            Plugin.C.StopArtisan = stopArtisan;
+            changed = true;
+        }
+
+        ImGui.TextColored(
+            ImGuiColors.DalamudGrey,
+            "  製作の合間に交換へ入ると操作を取り合うため、その間だけ止めます。交換が終わると元のモードへ戻します");
 
         ImGui.Spacing();
 
