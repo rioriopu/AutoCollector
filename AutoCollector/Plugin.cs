@@ -87,9 +87,27 @@ public sealed class Plugin : IDalamudPlugin
         _ = new TickScheduler(this.Load);
     }
 
+    /// <summary>
+    /// 設定の移行。既定値を変えたときに、保存済みの古い値を揃え直す。
+    /// </summary>
+    private static void MigrateConfig()
+    {
+        if (C.ConfigVersion >= 1)
+        {
+            return;
+        }
+
+        // 詳細ログは当初 既定で有効にしていた。既定を無効へ変えたので合わせる。
+        C.DetailedLogEnabled = false;
+
+        C.ConfigVersion = 1;
+        EzConfig.Save();
+    }
+
     private void Load()
     {
         C = EzConfig.Init<Config>();
+        MigrateConfig();
 
         this.AnomalyLog = new AnomalyLog();
         this.StartFileLog();
