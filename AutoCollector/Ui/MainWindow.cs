@@ -1286,6 +1286,65 @@ public sealed class MainWindow(Plugin plugin)
             }
         }
 
+        ImGui.TextUnformatted("詳細ログ");
+
+        var detailedLog = Plugin.C.DetailedLogEnabled;
+        if (ImGui.Checkbox("状態遷移をファイルへ記録する", ref detailedLog))
+        {
+            Plugin.C.DetailedLogEnabled = detailedLog;
+            changed = true;
+            this.plugin.StartFileLog();
+        }
+
+        var logDir = Plugin.C.LogDirectory;
+        ImGui.SetNextItemWidth(420f);
+        if (ImGui.InputText("保存先", ref logDir, 260))
+        {
+            Plugin.C.LogDirectory = logDir;
+            changed = true;
+        }
+
+        if (ImGui.IsItemDeactivatedAfterEdit())
+        {
+            this.plugin.StartFileLog();
+        }
+
+        ImGui.SameLine();
+        if (ImGui.SmallButton("開き直す##restartlog"))
+        {
+            this.plugin.StartFileLog();
+        }
+
+        var writer = this.plugin.FileLog;
+        if (!detailedLog)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudGrey, "  記録していません");
+        }
+        else if (writer is null)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudRed, "  記録を開始できていません");
+        }
+        else if (writer.Failed)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudRed, $"  書き込めないため記録を諦めました: {writer.LastError}");
+        }
+        else
+        {
+            ImGui.TextColored(ImGuiColors.HealerGreen, $"  記録中: {writer.FilePath}");
+
+            if (writer.DroppedLines > 0)
+            {
+                ImGui.TextColored(ImGuiColors.DalamudYellow, $"  書き込みが追いつかず {writer.DroppedLines} 行を捨てました");
+            }
+        }
+
+        ImGui.TextColored(
+            ImGuiColors.DalamudGrey,
+            "  ネットワーク共有を指定できます。書き込みは背景で行うため、共有が落ちてもゲームは止まりません");
+
+        ImGui.Separator();
+        ImGui.Spacing();
+
         var requireExternal = Plugin.C.RequireExternalAutomationRunning;
         if (ImGui.Checkbox("AutoDuty や Artisan が動作しているときだけ自動交換する", ref requireExternal))
         {

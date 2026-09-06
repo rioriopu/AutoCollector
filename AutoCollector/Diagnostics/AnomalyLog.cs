@@ -8,6 +8,8 @@ namespace AutoCollector.Diagnostics;
 
 public enum AnomalySeverity
 {
+    /// <summary>詳細ログ専用。UI の一覧には残さない。</summary>
+    Trace,
     Info,
     Warning,
     Error,
@@ -25,6 +27,13 @@ public sealed class AnomalyLog
 
     private readonly List<AnomalyEntry> entries = [];
     private readonly Lock gate = new();
+
+    private FileLogWriter? file;
+
+    /// <summary>ファイルへの書き出し先を差し替える。null を渡すと書き出しを止める。</summary>
+    public void SetFileWriter(FileLogWriter? writer) => this.file = writer;
+
+    public FileLogWriter? File => this.file;
 
     public IReadOnlyList<AnomalyEntry> Snapshot()
     {
@@ -45,6 +54,14 @@ public sealed class AnomalyLog
         }
     }
 
+    /// <summary>
+    /// 詳細ログ。ファイルにだけ残す。
+    ///
+    /// 状態遷移のように件数が多いものをここへ流す。
+    /// UI の一覧に混ぜると、本当に見るべき警告が押し流されてしまう。
+    /// </summary>
+    public void Trace(string category, string message) => this.Add(AnomalySeverity.Trace, category, message);
+
     public void Info(string category, string message) => this.Add(AnomalySeverity.Info, category, message);
 
     public void Warn(string category, string message) => this.Add(AnomalySeverity.Warning, category, message);
@@ -61,16 +78,26 @@ public sealed class AnomalyLog
 
     private void Add(AnomalySeverity severity, string category, string message)
     {
-        lock (this.gate)
+        var at = DateTime.Now;
+
+        // Trace は件数が多い。UI の一覧に混ぜると本当に見るべき警告が押し流される。
+        if (severity != AnomalySeverity.Trace)
         {
-            this.entries.Add(new AnomalyEntry(DateTime.Now, severity, category, message));
-            if (this.entries.Count > MaxEntries)
+            lock (this.gate)
             {
-                this.entries.RemoveRange(0, this.entries.Count - MaxEntries);
+                this.entries.Add(new AnomalyEntry(at, severity, category, message));
+                if (this.entries.Count > MaxEntries)
+                {
+                    this.entries.RemoveRange(0, this.entries.Count - MaxEntries);
+                }
             }
         }
 
         var line = $"[{category}] {message}";
+
+        // ファイルへは全部残す。書けなくても本体の動作は変えない。
+        this.file?.Write($"{at:yyyy-MM-dd HH:mm:ss.fff} [{Label(severity)}] {line}");
+
         switch (severity)
         {
             case AnomalySeverity.Error:
@@ -79,9 +106,20 @@ public sealed class AnomalyLog
             case AnomalySeverity.Warning:
                 Svc.Log.Warning(line);
                 break;
+            case AnomalySeverity.Trace:
+                Svc.Log.Debug(line);
+                break;
             default:
                 Svc.Log.Information(line);
                 break;
         }
     }
+
+    private static string Label(AnomalySeverity severity) => severity switch
+    {
+        AnomalySeverity.Error => "ERR",
+        AnomalySeverity.Warning => "WRN",
+        AnomalySeverity.Trace => "TRC",
+        _ => "INF",
+    };
 }
