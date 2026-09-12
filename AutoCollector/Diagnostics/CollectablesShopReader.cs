@@ -123,6 +123,56 @@ public sealed unsafe class CollectablesShopReader
         return list;
     }
 
+    /// <summary>その ItemId の収集品が、どの収集価値で手元にあるかを並べる。</summary>
+    public static IReadOnlyList<int> ListCollectability(uint itemId)
+    {
+        var values = new List<int>();
+
+        try
+        {
+            var manager = InventoryManager.Instance();
+            if (manager is null)
+            {
+                return values;
+            }
+
+            var types = new[]
+            {
+                InventoryType.Inventory1, InventoryType.Inventory2,
+                InventoryType.Inventory3, InventoryType.Inventory4,
+            };
+
+            foreach (var type in types)
+            {
+                var container = manager->GetInventoryContainer(type);
+                if (container is null || !container->IsLoaded)
+                {
+                    continue;
+                }
+
+                for (var i = 0; i < container->Size; i++)
+                {
+                    var slot = container->GetInventorySlot(i);
+                    if (slot is null || slot->ItemId == 0 || !slot->IsCollectable())
+                    {
+                        continue;
+                    }
+
+                    if (slot->GetBaseItemId() == itemId)
+                    {
+                        values.Add(slot->GetCollectability());
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // 読めないだけ。判断材料が減るだけで、動作は変えない。
+        }
+
+        return values;
+    }
+
     /// <summary>納品画面が開いているか。</summary>
     public bool IsOpen()
     {
