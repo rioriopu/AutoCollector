@@ -13,13 +13,13 @@ namespace AutoCollector.Automation;
 /// 納品できる品 1 件。画面の一覧に並んでいる 1 行に対応する。
 ///
 /// <para>
-/// Verified は「発火に渡す番号の意味が実測で裏づけられている範囲か」を表す。
-/// 画面の値には、番号だけがあって品目が空の位置が混ざる。そこを境に
-/// 「並びの位置」と「書かれている番号」がずれ、どちらを渡すべきかが決まらなくなる。
-/// 実測できているのはずれる前の行だけなので、ずれた先は発火させない。
+/// RowIndex は画面に書かれている行番号で、品目だけを数えた通し番号である。
+/// 見出しを含む「並びの位置」とは一致しない。発火に渡すのはこちら。
+/// 位置とずれる行（ItemId 35665 / 行 7 / 位置 8）で実測し、
+/// Fire(12, 7u) が記録されたことで確定した。
 /// </para>
 /// </summary>
-public sealed record CollectableOffer(int RowIndex, uint ItemId, string ItemName, bool Verified);
+public sealed record CollectableOffer(int RowIndex, uint ItemId, string ItemName);
 
 /// <summary>
 /// 収集品納品画面（CollectablesShop）の読み取りと納品。
@@ -140,9 +140,6 @@ public sealed unsafe class CollectablesShopService(AnomalyLog anomalyLog)
             var seen = new HashSet<uint>();
             var emptyRun = 0;
 
-            // 位置と書かれている番号が一致しているあいだだけ、発火してよい範囲とする。
-            // 一度ずれたら、そこから先はどちらを渡すべきか実測で裏づけられていない。
-            var stillAligned = true;
 
             // 並び順と行番号が一致するとは限らない。
             // 実測したデータには、行番号だけがあって品目が空の位置があり、
@@ -195,14 +192,9 @@ public sealed unsafe class CollectablesShopService(AnomalyLog anomalyLog)
                     return false;
                 }
 
-                if (rowIndex != i)
-                {
-                    stillAligned = false;
-                }
-
                 var itemId = rawItemId - CollectableOffset;
                 var name = sheet?.GetRowOrDefault(itemId)?.Name.ExtractText() ?? $"ItemId {itemId}";
-                list.Add(new CollectableOffer((int)rowIndex, itemId, name, stillAligned));
+                list.Add(new CollectableOffer((int)rowIndex, itemId, name));
 
                 if (list.Count >= displayRows)
                 {
@@ -290,14 +282,6 @@ public sealed unsafe class CollectablesShopService(AnomalyLog anomalyLog)
         {
             failureReason =
                 $"行 {offer.RowIndex} の中身が変わっています（期待 {offer.ItemName} / 画面 {current.ItemName}）。納品しません";
-            return false;
-        }
-
-        if (!current.Verified)
-        {
-            failureReason =
-                $"{current.ItemName} は、渡す番号の意味が実測で裏づけられていない範囲にあります。" +
-                "別の品を納品してしまう恐れがあるため実行しません";
             return false;
         }
 
