@@ -21,7 +21,8 @@ public sealed record InclusionShopEntry(
     byte CostType,
     uint CostAmount,
     uint Index,
-    bool CanSelectAmount);
+    bool CanSelectAmount,
+    uint RawFlags);
 
 /// <summary>ドロップダウンの選択状態。</summary>
 public sealed record InclusionShopSelection(
@@ -341,7 +342,8 @@ public sealed unsafe class InclusionShopService(AnomalyLog anomalyLog, SpecialCu
                     0,
                     costAmountProbe.Value,
                     indexProbe.Value,
-                    flagsProbe.Usable && (flagsProbe.Value & FlagCanSelectAmount) != 0));
+                    flagsProbe.Usable && (flagsProbe.Value & FlagCanSelectAmount) != 0,
+                    flagsProbe.Usable ? flagsProbe.Value : 0u));
             }
 
             entries = result;
