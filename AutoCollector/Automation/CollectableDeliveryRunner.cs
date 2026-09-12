@@ -146,6 +146,18 @@ public sealed class CollectableDeliveryRunner(
             held[itemId] = count;
         }
 
+        // どのスクリップにも余裕が無ければ、そこで終わる。
+        //
+        // 報酬の種類は品目ごとに違い、まだ納品したことのない品では分からない。
+        // 全部が一杯なら、どれを納品しても捨てることになる。
+        if (this.AllScripsFull(out var fullDetail))
+        {
+            this.Finish($"スクリップがすべて上限です（{fullDetail}）");
+            return;
+        }
+
+        var skipped = string.Empty;
+
         foreach (var offer in offers)
         {
             if (!held.TryGetValue(offer.ItemId, out var owned) || owned <= 0)
@@ -153,12 +165,19 @@ public sealed class CollectableDeliveryRunner(
                 continue;
             }
 
-            // この品でスクリップが溢れるなら納品しない。
-            // 溢れたぶんは捨てられるだけで、収集品を失うだけになる。
+            // この品でスクリップが溢れるなら飛ばす。
+            // 溢れたぶんは捨てられるだけで、収集品を失うことになる。
+            //
+            // ここで全体を止めない。スクリップは種類ごとに上限が別なので、
+            // 片方が一杯でも、もう片方をもらえる品はまだ納品できる。
             if (this.WouldOverflow(offer.ItemId, out var overflowDetail))
             {
-                this.Finish($"これ以上納品するとスクリップが溢れます（{overflowDetail}）");
-                return;
+                if (string.IsNullOrEmpty(skipped))
+                {
+                    skipped = overflowDetail;
+                }
+
+                continue;
             }
 
             this.target = offer;
@@ -177,7 +196,10 @@ public sealed class CollectableDeliveryRunner(
             return;
         }
 
-        this.Finish("納品できる収集品がなくなりました");
+        this.Finish(
+            string.IsNullOrEmpty(skipped)
+                ? "納品できる収集品がなくなりました"
+                : $"残りはスクリップが溢れるため納品していません（{skipped}）");
     }
 
     /// <summary>納品ボタンが押せるようになるのを待って押す。時間ではなく状態で判断する。</summary>
@@ -272,15 +294,60 @@ public sealed class CollectableDeliveryRunner(
 
         this.target = null;
 
-        // 上限に届いたら、そこで終わる。
-        // 報酬が観測できていない品でも、実際に届いた時点で止められる。
+        // 上限に届いたら、その種類の報酬になる品はもう納品しない。
+        // 観測済みの報酬として控えてあるので、次の選択で飛ばされる。
         if (this.IsAtCap(gainedScrip, out var capDetail))
         {
-            this.Finish($"スクリップが上限に達しました（{capDetail}）");
-            return;
+            this.anomalyLog.Info("Collect", $"スクリップが上限に達しました（{capDetail}）");
         }
 
         this.Step = DeliveryStep.Select;
+    }
+
+    /// <summary>
+    /// すべてのスクリップが上限に達しているか。
+    ///
+    /// 報酬の種類が分からない品を納品してよいかの判断に使う。
+    /// 1 つでも余裕があれば、そこへ入る可能性があるので納品を試す。
+    /// </summary>
+    private bool AllScripsFull(out string detail)
+    {
+        detail = string.Empty;
+
+        var names = new List<string>();
+        var known = 0;
+
+        foreach (var (itemId, name) in this.currencyMap.ListCurrencies())
+        {
+            var cap = this.currency.GetEffectiveCap(itemId);
+            if (cap is not { } limit || limit == 0)
+            {
+                continue;
+            }
+
+            if (!this.currency.TryGetCount(itemId, out var current))
+            {
+                continue;
+            }
+
+            known++;
+
+            if (current < limit)
+            {
+                return false;
+            }
+
+            names.Add($"{name} {current:N0} / {limit:N0}");
+        }
+
+        if (known == 0)
+        {
+            // 上限を 1 つも読めない場合は判断しない。止める根拠がない。
+            return false;
+        }
+
+        detail = string.Join(" / ", names);
+        return true;
     }
 
     /// <summary>その通貨が上限に達しているか。</summary>

@@ -172,18 +172,30 @@ public sealed unsafe class CallbackRecorder : IDisposable
         }
         else
         {
+            // 開始時と停止時の両方を突き合わせる。
+            // 停止時の一覧だけを回すと、使い切って 0 になった品が
+            // 一覧から消えるため、何を消費したのかが出なくなる。
             var before = this.currencyAtStart.ToDictionary(x => x.ItemId, x => x);
+            var after = this.currencyAtStop.ToDictionary(x => x.ItemId, x => x);
+
+            var ids = new HashSet<uint>(before.Keys);
+            ids.UnionWith(after.Keys);
+
             var changed = 0;
 
-            foreach (var after in this.currencyAtStop)
+            foreach (var id in ids)
             {
-                if (!before.TryGetValue(after.ItemId, out var start) || start.Count == after.Count)
+                var startCount = before.TryGetValue(id, out var b) ? b.Count : 0;
+                var endCount = after.TryGetValue(id, out var a) ? a.Count : 0;
+
+                if (startCount == endCount)
                 {
                     continue;
                 }
 
+                var name = after.TryGetValue(id, out var an) ? an.Name : before[id].Name;
                 changed++;
-                sb.AppendLine($"{after.Name}（ItemId {after.ItemId}）: {start.Count:N0} → {after.Count:N0}（{after.Count - start.Count:+#;-#;0}）");
+                sb.AppendLine($"{name}（ItemId {id}）: {startCount:N0} → {endCount:N0}（{endCount - startCount:+#;-#;0}）");
             }
 
             if (changed == 0)
