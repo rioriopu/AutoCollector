@@ -57,6 +57,14 @@ public sealed class ExchangePreset
     /// </summary>
     public uint TomestonesRowId { get; set; } = 2;
 
+    /// <summary>
+    /// スロットの概念が無い通貨を監視する場合の ItemId。0 ならトームストーンのスロットを使う。
+    ///
+    /// スクリップは Tomestones シートに載っていないため、スロット参照では指せない。
+    /// こちらは入れ替わりが無いので、ItemId を直接持っても追従の問題は起きない。
+    /// </summary>
+    public uint CurrencyItemId { get; set; }
+
     /// <summary>交換して得るアイテムの ItemId。</summary>
     public uint RewardItemId { get; set; }
 

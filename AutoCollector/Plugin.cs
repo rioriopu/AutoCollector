@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using AutoCollector.Automation;
 using AutoCollector.Diagnostics;
@@ -40,6 +40,8 @@ public sealed class Plugin : IDalamudPlugin
     internal ExchangeResolver ExchangeResolver { get; private set; } = null!;
 
     internal SpecialCurrencyMap SpecialCurrencyMap { get; private set; } = null!;
+
+    internal CurrencyCatalog CurrencyCatalog { get; private set; } = null!;
 
     internal ShopService ShopService { get; private set; } = null!;
 
@@ -127,6 +129,7 @@ public sealed class Plugin : IDalamudPlugin
         this.SelfCheck = new SelfCheck(C, this.AnomalyLog, this.TomestoneService, this.CurrencyService);
         this.NpcLocationService = new NpcLocationService(this.AnomalyLog);
         this.SpecialCurrencyMap = new SpecialCurrencyMap(this.AnomalyLog);
+        this.CurrencyCatalog = new CurrencyCatalog(this.TomestoneService, this.SpecialCurrencyMap);
         this.ExchangeResolver = new ExchangeResolver(this.AnomalyLog, this.TomestoneService, this.NpcLocationService, this.SpecialCurrencyMap);
         this.ShopService = new ShopService(this.AnomalyLog, DataFileLoader.LoadShopLayout(this.AnomalyLog));
         this.InclusionShopService = new InclusionShopService(this.AnomalyLog, this.SpecialCurrencyMap);
@@ -168,6 +171,7 @@ public sealed class Plugin : IDalamudPlugin
             this.AnomalyLog,
             this.CurrencyService,
             this.TomestoneService,
+            this.CurrencyCatalog,
             this.ExchangeResolver,
             this.ExchangeExecutor,
             this.AutomationGate);
