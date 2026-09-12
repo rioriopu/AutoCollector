@@ -141,7 +141,7 @@ public sealed unsafe class CallbackRecorder : IDisposable
         }
 
         sb.AppendLine();
-        sb.AppendLine("-- 通貨の増減（記録の開始時 → 停止時）--");
+        sb.AppendLine("-- 所持数の増減（記録の開始時 → 停止時）--");
 
         if (this.currencyAtStart.Count == 0 || this.currencyAtStop.Count == 0)
         {

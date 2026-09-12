@@ -63,6 +63,66 @@ public sealed unsafe class CollectablesShopReader
         }
     }
 
+    /// <summary>
+    /// 手持ちの収集品を ItemId ごとにまとめて返す。
+    /// 納品の前後で比べれば、1 回で何個渡されるのかが分かる。
+    /// </summary>
+    public static IReadOnlyList<(uint ItemId, string Name, int Count)> ListHeldCollectables()
+    {
+        var totals = new Dictionary<uint, int>();
+
+        try
+        {
+            var manager = InventoryManager.Instance();
+            if (manager is null)
+            {
+                return [];
+            }
+
+            var types = new[]
+            {
+                InventoryType.Inventory1, InventoryType.Inventory2,
+                InventoryType.Inventory3, InventoryType.Inventory4,
+            };
+
+            foreach (var type in types)
+            {
+                var container = manager->GetInventoryContainer(type);
+                if (container is null || !container->IsLoaded)
+                {
+                    continue;
+                }
+
+                for (var i = 0; i < container->Size; i++)
+                {
+                    var slot = container->GetInventorySlot(i);
+                    if (slot is null || slot->ItemId == 0 || !slot->IsCollectable())
+                    {
+                        continue;
+                    }
+
+                    var id = slot->GetBaseItemId();
+                    totals[id] = totals.GetValueOrDefault(id) + slot->Quantity;
+                }
+            }
+        }
+        catch
+        {
+            return [];
+        }
+
+        var sheet = Svc.Data.GetExcelSheet<Lumina.Excel.Sheets.Item>();
+        var list = new List<(uint, string, int)>();
+
+        foreach (var (itemId, count) in totals)
+        {
+            var name = sheet?.GetRowOrDefault(itemId)?.Name.ExtractText() ?? $"ItemId {itemId}";
+            list.Add((itemId, name, count));
+        }
+
+        return list;
+    }
+
     /// <summary>納品画面が開いているか。</summary>
     public bool IsOpen()
     {
