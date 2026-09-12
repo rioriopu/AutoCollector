@@ -14,12 +14,29 @@ namespace AutoCollector.Diagnostics;
 /// </summary>
 public static unsafe class InventorySnapshot
 {
+    /// <summary>
+    /// 数える入れ物。
+    ///
+    /// 装備や道具はアーマリーチェストへ入り、鞄には現れない。
+    /// 鞄だけを見ていると、そうした品を受け取っても増減に出ない。
+    /// </summary>
     private static readonly InventoryType[] Bags =
     [
         InventoryType.Inventory1,
         InventoryType.Inventory2,
         InventoryType.Inventory3,
         InventoryType.Inventory4,
+        InventoryType.ArmoryMainHand,
+        InventoryType.ArmoryOffHand,
+        InventoryType.ArmoryHead,
+        InventoryType.ArmoryBody,
+        InventoryType.ArmoryHands,
+        InventoryType.ArmoryLegs,
+        InventoryType.ArmoryFeets,
+        InventoryType.ArmoryEar,
+        InventoryType.ArmoryNeck,
+        InventoryType.ArmoryWrist,
+        InventoryType.ArmoryRings,
     ];
 
     /// <summary>鞄にある品を ItemId ごとにまとめて返す。</summary>

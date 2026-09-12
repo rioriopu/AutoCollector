@@ -123,18 +123,46 @@ public sealed unsafe class InclusionShopObserver(AnomalyLog anomalyLog, Inclusio
         // 所持済みで交換できない品を見分けるビットがあるはずだが、
         // どのビットかは分かっていない。交換できる品とできない品を
         // 並べて比べられるようにしておく。
-        sb.AppendLine("index  スロット  ItemId  品名  コスト通貨(値)  コスト  数量選択  Flags");
+        sb.AppendLine("index  スロット  ItemId  品名  コスト通貨(値)  コスト  数量選択  Flags  種別  入る場所");
 
         foreach (var entry in entries)
         {
             sb.AppendLine(
                 $"{entry.Index,5}  {entry.Slot,8}  {entry.ItemId,6}  {entry.ItemName}  " +
                 $"{entry.CostItemId}(型 {entry.CostType})  {entry.CostAmount}  {entry.CanSelectAmount}  " +
-                $"0x{entry.RawFlags:X}({Convert.ToString(entry.RawFlags, 2).PadLeft(8, '0')})");
+                $"0x{entry.RawFlags:X}({Convert.ToString(entry.RawFlags, 2).PadLeft(8, '0')})  " +
+                $"{DescribeItem(entry.ItemId)}");
         }
 
         signature += $"/{entries.Count}";
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// 品の種別と、受け取ったときにどこへ入るかを書く。
+    ///
+    /// 装備や道具はアーマリーチェストへ入り、鞄には現れない。
+    /// 交換の成否を所持数で確かめるとき、どこを数えるべきかがこれで分かる。
+    /// </summary>
+    private static string DescribeItem(uint itemId)
+    {
+        try
+        {
+            var sheet = Svc.Data.GetExcelSheet<Lumina.Excel.Sheets.Item>();
+            if (sheet is null || !sheet.TryGetRow(itemId, out var row))
+            {
+                return "不明";
+            }
+
+            var category = row.ItemUICategory.ValueNullable?.Name.ExtractText() ?? "不明";
+            var goesToArmoury = row.EquipSlotCategory.RowId != 0;
+
+            return $"{category}  {(goesToArmoury ? "アーマリー" : "鞄")}";
+        }
+        catch
+        {
+            return "不明";
+        }
     }
 
     private void Append(string directory, string text, bool opened)
