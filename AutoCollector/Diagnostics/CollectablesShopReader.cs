@@ -157,6 +157,7 @@ public sealed unsafe class CollectablesShopReader
             }
 
             DumpAddon(sb, addon);
+            DumpLists(sb, addon);
             DumpAtkValues(sb, addon);
             var held = DumpCollectables(sb);
             this.DumpCurrencies(sb);
@@ -221,9 +222,9 @@ public sealed unsafe class CollectablesShopReader
     private static void DumpAtkValues(StringBuilder sb, AtkUnitBase* addon)
     {
         sb.AppendLine();
-        sb.AppendLine($"-- AtkValues（{addon->AtkValuesCount} 件のうち先頭 120）--");
+        sb.AppendLine($"-- AtkValues（{addon->AtkValuesCount} 件のうち先頭 450）--");
 
-        var count = Math.Min(addon->AtkValuesCount, 120u);
+        var count = Math.Min(addon->AtkValuesCount, 450u);
         for (var i = 0u; i < count; i++)
         {
             try
@@ -240,6 +241,74 @@ public sealed unsafe class CollectablesShopReader
             {
                 sb.AppendLine($"[{i,3}] 読み出しに失敗");
             }
+        }
+    }
+
+    /// <summary>
+    /// 一覧の行を読み出す。
+    ///
+    /// 左の一覧（納品できる品）と右の一覧（手持ちの現物）のどちらに
+    /// 発火の index が対応しているかを判別するために、両方の中身と選択位置を出す。
+    /// </summary>
+    private static void DumpLists(StringBuilder sb, AtkUnitBase* addon)
+    {
+        sb.AppendLine();
+        sb.AppendLine("-- 一覧の中身 --");
+
+        foreach (var id in new uint[] { 28, 31 })
+        {
+            try
+            {
+                var component = addon->GetComponentByNodeId(id);
+                if (component is null)
+                {
+                    continue;
+                }
+
+                var type = component->GetComponentType();
+
+                if (type == ComponentType.TreeList)
+                {
+                    var tree = (AtkComponentTreeList*)component;
+                    sb.AppendLine($"node {id} (TreeList) 行数={tree->Items.LongCount} 選択={tree->SelectedItemIndex}");
+
+                    for (var i = 0; i < tree->Items.LongCount && i < 40; i++)
+                    {
+                        var item = tree->Items[i];
+                        if (item.Value is null)
+                        {
+                            continue;
+                        }
+
+                        sb.AppendLine(
+                            $"  [{i,2}] Type={item.Value->Type} Depth={item.Value->Depth} " +
+                            $"UInt0={item.Value->UIntValues[0]} UInt1={item.Value->UIntValues[1]} " +
+                            $"Str0=\"{ReadTreeString(item.Value, 0)}\"");
+                    }
+                }
+                else if (type == ComponentType.List)
+                {
+                    var list = (AtkComponentList*)component;
+                    sb.AppendLine($"node {id} (List) 行数={list->ListLength} 選択={list->SelectedItemIndex}");
+                }
+            }
+            catch (Exception ex)
+            {
+                sb.AppendLine($"node {id}: 読み出しに失敗 {ex.Message}");
+            }
+        }
+    }
+
+    private static string ReadTreeString(AtkComponentTreeListItem* item, int index)
+    {
+        try
+        {
+            var value = item->StringValues[index];
+            return value.Value is null ? string.Empty : value.ToString();
+        }
+        catch
+        {
+            return "[読めません]";
         }
     }
 
