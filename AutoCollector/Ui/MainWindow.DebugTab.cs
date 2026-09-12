@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using AutoCollector.Automation;
 using AutoCollector.Diagnostics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Colors;
@@ -362,6 +363,38 @@ public sealed partial class MainWindow
                 ImGuiColors.DalamudGrey,
                 $"画面の一覧: {offers.Count} 件 / 手持ちのある品: {shown} 件 / " +
                 $"所持している収集品: {held.Count} 種類");
+
+            var runner = this.plugin.CollectableDelivery;
+
+            if (runner.IsRunning)
+            {
+                ImGui.TextColored(ImGuiColors.DalamudYellow, $"納品中: {runner.StatusDetail}（{runner.Delivered} 個）");
+
+                if (ImGui.Button("中止する##stopdeliver"))
+                {
+                    runner.Stop("ユーザー操作");
+                }
+            }
+            else
+            {
+                if (ImGui.Button("手持ちをまとめて納品する##deliverall"))
+                {
+                    if (!runner.Start(out var startFailure))
+                    {
+                        this.plugin.AnomalyLog.Warn("Collect", startFailure);
+                    }
+                }
+
+                if (!string.IsNullOrEmpty(runner.StatusDetail))
+                {
+                    ImGui.SameLine();
+                    ImGui.TextColored(
+                        runner.Step == DeliveryStep.Error ? ImGuiColors.DalamudRed : ImGuiColors.DalamudGrey,
+                        $"{runner.StatusDetail}（{runner.Delivered} 個）");
+                }
+            }
+
+            ImGui.Spacing();
 
             if (shown == 0)
             {
