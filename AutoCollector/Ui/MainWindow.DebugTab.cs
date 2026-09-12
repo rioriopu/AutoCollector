@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using AutoCollector.Diagnostics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Colors;
@@ -281,9 +282,21 @@ public sealed partial class MainWindow
     {
         try
         {
-            var location = Svc.PluginInterface.AssemblyLocation;
-            var version = Svc.PluginInterface.Manifest.AssemblyVersion;
-            return $"v{version} / {System.IO.File.GetLastWriteTime(location.FullName):MM-dd HH:mm:ss}";
+            var assembly = typeof(Plugin).Assembly;
+            var version = assembly.GetName().Version?.ToString() ?? "?";
+
+            // ファイルの更新時刻ではなく、アセンブリへ埋め込んだ値を読む。
+            // ファイル時刻だと、古い DLL が読み込まれたままファイルだけ
+            // 上書きされた場合に、新しい時刻を表示しながら古いコードが動く。
+            foreach (var meta in assembly.GetCustomAttributes<System.Reflection.AssemblyMetadataAttribute>())
+            {
+                if (meta.Key == "BuildTime")
+                {
+                    return $"v{version} / {meta.Value}";
+                }
+            }
+
+            return $"v{version} / ビルド時刻が埋め込まれていません";
         }
         catch
         {

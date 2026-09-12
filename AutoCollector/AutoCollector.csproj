@@ -33,6 +33,16 @@
     </None>
   </ItemGroup>
 
+  <!--
+    ビルド時刻をアセンブリ自身へ埋め込む。
+    ファイルの更新時刻を読むと、古い DLL が読み込まれたまま
+    ファイルだけ上書きされた場合に、新しい時刻を表示しながら
+    古いコードが動くことになる。切り分けの役に立たない。
+  -->
+  <ItemGroup>
+    <AssemblyMetadata Include="BuildTime" Value="$([System.DateTime]::Now.ToString('yyyy-MM-dd HH:mm:ss'))" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="ECommons" Version="3.2.1.17" />
   </ItemGroup>
