@@ -157,6 +157,7 @@ public sealed unsafe class CollectablesShopReader
             }
 
             DumpAddon(sb, addon);
+            DumpParse(sb, addon);
             DumpLists(sb, addon);
             DumpAtkValues(sb, addon);
             var held = DumpCollectables(sb);
@@ -219,12 +220,99 @@ public sealed unsafe class CollectablesShopReader
         }
     }
 
+    /// <summary>
+    /// 一覧の解析を 1 位置ずつなぞって書き出す。
+    ///
+    /// 「申告 33 件に対して 28 件しか読めない」のような食い違いは、
+    /// 生の値だけを見ても、どの位置でどう判断したのかが分からない。
+    /// 実装と同じ手順を同じ順序でたどり、各位置の判断をそのまま残す。
+    /// </summary>
+    private static void DumpParse(StringBuilder sb, AtkUnitBase* addon)
+    {
+        sb.AppendLine();
+        sb.AppendLine("-- 一覧の解析 --");
+
+        try
+        {
+            var values = addon->AtkValues;
+            var total = addon->AtkValuesCount;
+
+            if (values is null || total <= 20)
+            {
+                sb.AppendLine("値を読み取れません。");
+                return;
+            }
+
+            var declared = ReadUInt(values[20]);
+            sb.AppendLine($"申告件数 [20] = {declared} / 値の総数 = {total}");
+            sb.AppendLine("位置  index位置  行番号  品目の生値  判断");
+
+            var accepted = 0;
+
+            for (var i = 0u; i < declared * 2; i++)
+            {
+                var indexAt = 33 + (i * 11);
+                var itemAt = indexAt + 1;
+
+                if (itemAt >= total)
+                {
+                    sb.AppendLine($"{i,4}  {indexAt,8}  範囲外のため終了");
+                    break;
+                }
+
+                var rowIndex = ReadUInt(values[indexAt]);
+                var raw = ReadUInt(values[itemAt]);
+
+                string verdict;
+                if (raw == 0)
+                {
+                    verdict = "品目なし → 飛ばす";
+                }
+                else if (raw < 500000)
+                {
+                    verdict = "収集品の形ではない → ここで失敗";
+                }
+                else
+                {
+                    accepted++;
+                    verdict = $"採用（ItemId {raw - 500000}）{(rowIndex == i ? string.Empty : " ※位置と番号がずれている")}";
+                }
+
+                sb.AppendLine($"{i,4}  {indexAt,8}  {rowIndex,6}  {raw,10}  {verdict}");
+
+                if (raw != 0 && raw < 500000)
+                {
+                    break;
+                }
+
+                if (accepted == declared)
+                {
+                    sb.AppendLine("申告件数に達したため終了");
+                    break;
+                }
+            }
+
+            sb.AppendLine($"採用した件数: {accepted} / 申告 {declared}");
+        }
+        catch (Exception ex)
+        {
+            sb.AppendLine($"解析に失敗しました: {ex.Message}");
+        }
+    }
+
+    private static uint ReadUInt(AtkValue value) => value.Type switch
+    {
+        AtkValueType.UInt => value.UInt,
+        AtkValueType.Int => value.Int < 0 ? 0u : (uint)value.Int,
+        _ => 0u,
+    };
+
     private static void DumpAtkValues(StringBuilder sb, AtkUnitBase* addon)
     {
         sb.AppendLine();
-        sb.AppendLine($"-- AtkValues（{addon->AtkValuesCount} 件のうち先頭 450）--");
+        sb.AppendLine($"-- AtkValues（{addon->AtkValuesCount} 件のうち先頭 800）--");
 
-        var count = Math.Min(addon->AtkValuesCount, 450u);
+        var count = Math.Min(addon->AtkValuesCount, 800u);
         for (var i = 0u; i < count; i++)
         {
             try

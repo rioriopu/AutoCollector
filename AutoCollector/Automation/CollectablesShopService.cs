@@ -49,8 +49,17 @@ public sealed unsafe class CollectablesShopService(AnomalyLog anomalyLog)
     /// <summary>1 行あたりの AtkValue の数。</summary>
     private const uint EntryStride = 11;
 
-    /// <summary>一覧の行数が入っている位置。</summary>
-    private const uint EntryCountIndex = 20;
+    /// <summary>
+    /// 画面の一覧の行数が入っている位置。
+    ///
+    /// ここに入っているのは品目の件数ではなく、見出しを含めた表示行の数である。
+    /// 実測では品目 28 件・見出し 5 件で 33 だった。品目の件数と比べてはいけない。
+    /// 走査の上限としてだけ使う。
+    /// </summary>
+    private const uint DisplayRowCountIndex = 20;
+
+    /// <summary>空の位置がこの回数続いたら、一覧の終わりとみなす。</summary>
+    private const int EmptyRunToStop = 3;
 
     /// <summary>
     /// 収集品の ItemId に足されているオフセット。
@@ -113,22 +122,23 @@ public sealed unsafe class CollectablesShopService(AnomalyLog anomalyLog)
             var values = addon->AtkValues;
             var total = addon->AtkValuesCount;
 
-            if (values is null || total <= EntryCountIndex)
+            if (values is null || total <= DisplayRowCountIndex)
             {
                 failureReason = "画面の値を読み取れませんでした";
                 return false;
             }
 
-            var declared = ReadUInt(values[EntryCountIndex]);
-            if (declared == 0)
+            var displayRows = ReadUInt(values[DisplayRowCountIndex]);
+            if (displayRows == 0)
             {
                 failureReason = "納品できる品がありません";
                 return false;
             }
 
             var sheet = Svc.Data.GetExcelSheet<Item>();
-            var list = new List<CollectableOffer>((int)declared);
+            var list = new List<CollectableOffer>((int)displayRows);
             var seen = new HashSet<uint>();
+            var emptyRun = 0;
 
             // 位置と書かれている番号が一致しているあいだだけ、発火してよい範囲とする。
             // 一度ずれたら、そこから先はどちらを渡すべきか実測で裏づけられていない。
@@ -139,8 +149,8 @@ public sealed unsafe class CollectablesShopService(AnomalyLog anomalyLog)
             // そのあとの位置に同じ行番号と品目が入っていた。
             // そのため位置から行番号を決めつけず、画面に書かれた行番号をそのまま使う。
             //
-            // 走査する範囲は申告件数より広く取る。空の位置があるぶん後ろへずれるため。
-            var maxSlots = declared * 2;
+            // 見出しのぶん位置が後ろへずれるので、表示行数より広く走査する。
+            var maxSlots = displayRows * 2;
 
             for (var i = 0u; i < maxSlots; i++)
             {
@@ -157,9 +167,19 @@ public sealed unsafe class CollectablesShopService(AnomalyLog anomalyLog)
 
                 if (rawItemId == 0)
                 {
-                    // 品目が無い位置。行番号だけが入っていることがある。
+                    // 品目が無い位置。見出しの行で、次の品目の番号だけが入っている。
+                    // 一覧の終わりにも空の位置が続くため、続いたら打ち切る。
+                    emptyRun++;
+
+                    if (list.Count > 0 && emptyRun >= EmptyRunToStop)
+                    {
+                        break;
+                    }
+
                     continue;
                 }
+
+                emptyRun = 0;
 
                 if (rawItemId < CollectableOffset)
                 {
@@ -184,23 +204,17 @@ public sealed unsafe class CollectablesShopService(AnomalyLog anomalyLog)
                 var name = sheet?.GetRowOrDefault(itemId)?.Name.ExtractText() ?? $"ItemId {itemId}";
                 list.Add(new CollectableOffer((int)rowIndex, itemId, name, stillAligned));
 
-                if (list.Count == declared)
+                if (list.Count >= displayRows)
                 {
-                    break;
+                    // 表示行数を超えることはない。超えたら読み違えている。
+                    failureReason = $"品目の件数が表示行数 {displayRows} を超えました。配置がずれている可能性があります";
+                    return false;
                 }
             }
 
             if (list.Count == 0)
             {
                 failureReason = "納品できる品を 1 件も読み取れませんでした";
-                return false;
-            }
-
-            // 申告された件数と読めた件数が違う場合は撃たない。
-            // 欠けたまま進むと、目的の品が一覧に無いのに別の行を掴むことになる。
-            if (list.Count != declared)
-            {
-                failureReason = $"一覧の件数が合いません（申告 {declared} / 読めた {list.Count}）";
                 return false;
             }
 
