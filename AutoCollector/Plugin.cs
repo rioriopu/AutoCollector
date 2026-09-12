@@ -49,6 +49,8 @@ public sealed class Plugin : IDalamudPlugin
 
     internal CollectablesShopReader CollectablesShopReader { get; private set; } = null!;
 
+    internal CollectablesShopService CollectablesShopService { get; private set; } = null!;
+
     internal ExchangeExecutor ExchangeExecutor { get; private set; } = null!;
 
     internal AddonOwnershipTracker AddonOwnership { get; private set; } = null!;
@@ -126,6 +128,7 @@ public sealed class Plugin : IDalamudPlugin
         this.InclusionShopService = new InclusionShopService(this.AnomalyLog, this.SpecialCurrencyMap);
         this.CallbackRecorder = new CallbackRecorder(this.AnomalyLog);
         this.CollectablesShopReader = new CollectablesShopReader();
+        this.CollectablesShopService = new CollectablesShopService(this.AnomalyLog);
 
         // スクリップの増減を人に数えさせないため、通貨の読み取り口を渡しておく。
         this.CollectablesShopReader.CurrencySampler = this.SampleSpecialCurrencies;
