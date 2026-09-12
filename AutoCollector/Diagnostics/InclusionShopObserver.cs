@@ -117,13 +117,18 @@ public sealed unsafe class InclusionShopObserver(AnomalyLog anomalyLog, Inclusio
 
         sb.AppendLine($"画面の所持通貨: {currency:N0}");
         sb.AppendLine($"品数: {entries.Count}");
-        sb.AppendLine("index  スロット  ItemId  品名  コスト通貨(値)  コスト  数量選択");
+        // Flags は生の値も出す。
+        // 所持済みで交換できない品を見分けるビットがあるはずだが、
+        // どのビットかは分かっていない。交換できる品とできない品を
+        // 並べて比べられるようにしておく。
+        sb.AppendLine("index  スロット  ItemId  品名  コスト通貨(値)  コスト  数量選択  Flags");
 
         foreach (var entry in entries)
         {
             sb.AppendLine(
                 $"{entry.Index,5}  {entry.Slot,8}  {entry.ItemId,6}  {entry.ItemName}  " +
-                $"{entry.CostItemId}(型 {entry.CostType})  {entry.CostAmount}  {entry.CanSelectAmount}");
+                $"{entry.CostItemId}(型 {entry.CostType})  {entry.CostAmount}  {entry.CanSelectAmount}  " +
+                $"0x{entry.RawFlags:X}({Convert.ToString(entry.RawFlags, 2).PadLeft(8, '0')})");
         }
 
         signature += $"/{entries.Count}";
