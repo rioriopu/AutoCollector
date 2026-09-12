@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Linq;
 using AutoCollector.Automation;
 using AutoCollector.Game;
@@ -120,8 +120,8 @@ public sealed class PresetTab(Plugin plugin)
 
     private string BuildSummary(ExchangePreset preset, string label)
     {
-        var currency = this.plugin.TomestoneService.TryResolveItemId(preset.TomestonesRowId, out var currencyItemId)
-            ? this.plugin.TomestoneService.ListSlots().FirstOrDefault(x => x.ItemId == currencyItemId)?.Name ?? "?"
+        var currency = this.plugin.CurrencyCatalog.TryResolve(preset, out var currencyItemId)
+            ? this.plugin.CurrencyCatalog.ListChoices().FirstOrDefault(x => x.ItemId == currencyItemId)?.Name ?? "?"
             : "?";
 
         var reward = preset.RewardItemId == 0
@@ -144,24 +144,33 @@ public sealed class PresetTab(Plugin plugin)
         }
 
         // --- 通貨 ---
-        var slots = this.plugin.TomestoneService.ListSlots().Where(x => !string.IsNullOrEmpty(x.Name)).ToList();
-        if (slots.Count > 0)
+        var choices = this.plugin.CurrencyCatalog.ListChoices()
+            .Where(x => !string.IsNullOrEmpty(x.Name))
+            .ToList();
+
+        if (choices.Count > 0)
         {
-            var names = slots.Select(x => x.Name).ToArray();
-            var index = slots.FindIndex(x => x.TomestonesRowId == preset.TomestonesRowId);
+            // 見出しを添えて、トームストーンとスクリップを見分けられるようにする。
+            var names = choices.Select(x => $"[{x.Group}] {x.Name}").ToArray();
+            var index = CurrencyCatalog.IndexOf(choices, preset);
             if (index < 0)
             {
                 index = 0;
             }
 
-            ImGui.SetNextItemWidth(280f);
+            ImGui.SetNextItemWidth(320f);
             if (ImGui.Combo("監視する通貨", ref index, names, names.Length))
             {
-                preset.TomestonesRowId = slots[index].TomestonesRowId;
+                CurrencyCatalog.Apply(preset, choices[index]);
+
+                // 通貨が変われば買えるものも変わる。前の通貨で選んだ品は残さない。
+                preset.RewardItemId = 0;
                 changed = true;
             }
 
-            ImGui.TextColored(ImGuiColors.DalamudGrey, "  スロット番号で保存するため、パッチで通貨が入れ替わっても自動追従します");
+            ImGui.TextColored(
+                ImGuiColors.DalamudGrey,
+                "  トームストーンはスロット番号で保存するため、パッチで入れ替わっても自動追従します");
         }
 
         // --- 交換対象 ---
@@ -191,7 +200,7 @@ public sealed class PresetTab(Plugin plugin)
             changed = true;
         }
 
-        if (this.plugin.TomestoneService.TryResolveItemId(preset.TomestonesRowId, out var currencyId))
+        if (this.plugin.CurrencyCatalog.TryResolve(preset, out var currencyId))
         {
             var trigger = this.plugin.CurrencyService.CalculateTriggerAmount(preset.Threshold, currencyId);
             var current = this.plugin.CurrencyService.GetCountOrZero(currencyId);
@@ -279,7 +288,7 @@ public sealed class PresetTab(Plugin plugin)
     /// <summary>交換対象を、その通貨で実際に買えるものから選ばせる。</summary>
     private void DrawRewardPicker(ExchangePreset preset, ref bool changed)
     {
-        if (!this.plugin.TomestoneService.TryResolveItemId(preset.TomestonesRowId, out var currencyItemId))
+        if (!this.plugin.CurrencyCatalog.TryResolve(preset, out var currencyItemId))
         {
             ImGui.TextColored(ImGuiColors.DalamudRed, "通貨を解決できないため、交換対象を選べません");
             return;

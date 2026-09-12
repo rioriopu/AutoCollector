@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using AutoCollector.Diagnostics;
@@ -87,6 +87,7 @@ public sealed class MonitorService(
     AnomalyLog anomalyLog,
     CurrencyService currencyService,
     TomestoneService tomestoneService,
+    CurrencyCatalog currencyCatalog,
     ExchangeResolver resolver,
     ExchangeExecutor executor,
     ExternalAutomationGate automationGate)
@@ -107,6 +108,7 @@ public sealed class MonitorService(
     private readonly AnomalyLog anomalyLog = anomalyLog;
     private readonly CurrencyService currencyService = currencyService;
     private readonly TomestoneService tomestoneService = tomestoneService;
+    private readonly CurrencyCatalog currencyCatalog = currencyCatalog;
     private readonly ExchangeResolver resolver = resolver;
     private readonly ExchangeExecutor executor = executor;
     private readonly ExternalAutomationGate automationGate = automationGate;
@@ -216,7 +218,7 @@ public sealed class MonitorService(
     /// <summary>索引を用意し、交換先を決めて開始する。</summary>
     private void TryStart(ExchangePreset preset)
     {
-        if (!this.tomestoneService.TryResolveItemId(preset.TomestonesRowId, out var currencyItemId))
+        if (!this.currencyCatalog.TryResolve(preset, out var currencyItemId))
         {
             return;
         }
@@ -331,7 +333,7 @@ public sealed class MonitorService(
 
     private PresetProgress BuildProgress(ExchangePreset preset)
     {
-        var currencyResolved = this.tomestoneService.TryResolveItemId(preset.TomestonesRowId, out var currencyItemId);
+        var currencyResolved = this.currencyCatalog.TryResolve(preset, out var currencyItemId);
         var currencyName = currencyResolved ? StatusText.ItemName(currencyItemId) : "（解決できません）";
         var rewardName = preset.RewardItemId == 0 ? "（未選択）" : StatusText.ItemName(preset.RewardItemId);
 
