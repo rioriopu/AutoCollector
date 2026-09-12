@@ -47,7 +47,15 @@ public sealed class NpcLocationService(AnomalyLog anomalyLog)
     /// 起動が実用に耐えなくなるため読まない。
     /// planevent に無い NPC は、そのエリアにいるときに実際のオブジェクトから解決する。
     /// </summary>
-    private static readonly string[] LayerFileNames = ["planevent.lgb"];
+    /// <summary>
+    /// 読む配置ファイル。
+    ///
+    /// planevent だけでは足りない。スクリップ取引窓口の場合、
+    /// リムサ・ロミンサ（ENpc 1003633）とグリダニア（ENpc 1003077）の 2 体は
+    /// planner にしか置かれておらず、planevent だけを読むと座標が取れない。
+    /// 座標が無い NPC は移動先を決められないため、候補から無言で消えていた。
+    /// </summary>
+    private static readonly string[] LayerFileNames = ["planevent.lgb", "planner.lgb"];
 
     private readonly AnomalyLog anomalyLog = anomalyLog;
     private readonly Dictionary<uint, List<NpcLocation>> index = [];
