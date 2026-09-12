@@ -61,6 +61,9 @@ public enum ExchangeStep
     /// <summary>アイテム交換画面で、系統と種別を選んでいる。</summary>
     SelectInclusionCategory,
 
+    /// <summary>アイテム交換画面の確認ダイアログに答えている。</summary>
+    InclusionConfirm,
+
     /// <summary>AutoDuty を再開している。</summary>
     ResumeAutoDuty,
 
@@ -545,6 +548,7 @@ public sealed unsafe class ExchangeExecutor(
             // 3. 内側のダイアログ。確認ダイアログは絶対に Yes を押さない。
             this.CloseOwned("SelectYesno", useCloseFirst: false);
             this.CloseOwned("ShopExchangeCurrencyDialog", useCloseFirst: false);
+            this.CloseOwned("ShopExchangeItemDialog", useCloseFirst: false);
 
             // 4. ショップ本体
             this.CloseOwned("ShopExchangeCurrency", useCloseFirst: true);
@@ -762,6 +766,10 @@ public sealed unsafe class ExchangeExecutor(
 
             case ExchangeStep.SelectInclusionCategory:
                 this.TickSelectInclusionCategory();
+                break;
+
+            case ExchangeStep.InclusionConfirm:
+                this.TickInclusionConfirm();
                 break;
 
             case ExchangeStep.Armed:
@@ -2044,9 +2052,12 @@ public sealed unsafe class ExchangeExecutor(
         // 数量は 1 回につき 1 個。まとめ買いは結果の検証が複雑になるため行わない。
         Callback.Fire(addon, true, InclusionExchangeCommand, callbackIndex, 1);
 
-        this.Step = ExchangeStep.WaitOutcome;
+        // 実測では、撃った直後に確認ダイアログが出る。
+        // これに答えないと交換は成立しない。
+        this.Step = ExchangeStep.InclusionConfirm;
+        this.dialogDeadlineUtc = DateTime.UtcNow.Add(DialogTimeout);
         this.outcomeDeadlineUtc = DateTime.UtcNow.Add(OutcomeTimeout);
-        this.StatusDetail = "交換結果を待っています";
+        this.StatusDetail = "確認ダイアログに答えています";
     }
 
     /// <summary>
@@ -2150,6 +2161,61 @@ public sealed unsafe class ExchangeExecutor(
         }
     }
 
+    /// <summary>
+    /// アイテム交換画面の確認ダイアログに答える。
+    ///
+    /// 実測では、交換を撃った直後に ShopExchangeItemDialog が出る。
+    /// さらに品によっては SelectYesno も続く。
+    ///
+    /// ここは撃ったあとなので、答えないと結果が確定しない。
+    /// ただしこちらから内容を照合する手立てが無いため、
+    /// 「自分が撃った直後に出たものだけ」を対象にする。
+    /// </summary>
+    private void TickInclusionConfirm()
+    {
+        var attempt = this.InFlight;
+        if (attempt is null)
+        {
+            this.Step = ExchangeStep.Idle;
+            return;
+        }
+
+        if (GenericHelpers.TryGetAddonByName<AtkUnitBase>("ShopExchangeItemDialog", out var dialog) &&
+            GenericHelpers.IsAddonReady(dialog))
+        {
+            if (!EzThrottler.Throttle("AutoCollector.InclusionConfirm", 400))
+            {
+                return;
+            }
+
+            this.anomalyLog.Info("Exchange", "交換の確認ダイアログに答えます");
+
+            try
+            {
+                new AddonMaster.ShopExchangeItemDialog((nint)dialog).Exchange();
+            }
+            catch (Exception ex)
+            {
+                this.FailUnresolved(ExchangeFailure.ConfirmDialogNotConfirmable, $"確認ダイアログを押せませんでした: {ex.Message}");
+            }
+
+            return;
+        }
+
+        // 品によっては、さらに確認が続く。
+        if (this.TryFindConfirmDialog(attempt, out _, out _))
+        {
+            this.Step = ExchangeStep.ConfirmDialog;
+            this.dialogDeadlineUtc = DateTime.UtcNow.Add(DialogTimeout);
+            this.StatusDetail = "確認ダイアログを処理しています";
+            return;
+        }
+
+        // ダイアログが消えたら結果の確認へ進む。
+        this.Step = ExchangeStep.WaitOutcome;
+        this.StatusDetail = "交換結果を待っています";
+    }
+
     /// <summary>発火後の待機。判定は次フレーム以降に行う。</summary>
     private void TickWaitOutcome()
     {
@@ -2166,6 +2232,16 @@ public sealed unsafe class ExchangeExecutor(
             this.Step = ExchangeStep.CancelDialog;
             this.dialogDeadlineUtc = DateTime.UtcNow.Add(DialogTimeout);
             this.StatusDetail = "数量ダイアログを閉じています";
+            return;
+        }
+
+        // アイテム交換画面の確認ダイアログが遅れて出ることがある。
+        if (GenericHelpers.TryGetAddonByName<AtkUnitBase>("ShopExchangeItemDialog", out var itemDialog) &&
+            GenericHelpers.IsAddonReady(itemDialog))
+        {
+            this.Step = ExchangeStep.InclusionConfirm;
+            this.dialogDeadlineUtc = DateTime.UtcNow.Add(DialogTimeout);
+            this.StatusDetail = "確認ダイアログに答えています";
             return;
         }
 

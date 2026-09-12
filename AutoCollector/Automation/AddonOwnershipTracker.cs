@@ -26,7 +26,7 @@ public sealed unsafe class AddonOwnershipTracker : IDisposable
 {
     private static readonly string[] Tracked =
     [
-        "ShopExchangeCurrency", "ShopExchangeCurrencyDialog", "InclusionShop", "CollectablesShop",
+        "ShopExchangeCurrency", "ShopExchangeCurrencyDialog", "InclusionShop", "ShopExchangeItemDialog", "CollectablesShop",
         "SelectYesno", "SelectString", "SelectIconString", "Talk",
     ];
 
