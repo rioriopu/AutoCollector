@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using AutoCollector.Diagnostics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Colors;
@@ -195,6 +196,8 @@ public sealed partial class MainWindow
             open ? ImGuiColors.HealerGreen : ImGuiColors.DalamudGrey,
             open ? "納品画面が開いています" : "納品画面が開いていません");
 
+        this.DrawCollectablesOffers();
+
         ImGui.Spacing();
         ImGui.Separator();
         ImGui.Spacing();
@@ -262,5 +265,151 @@ public sealed partial class MainWindow
         {
             EzConfig.Save();
         }
+    }
+
+    /// <summary>
+    /// 納品できる品の一覧と、1 個だけ納品する動作確認。
+    ///
+    /// 実装したばかりの経路を、周回に組み込む前に単体で確かめるための場所。
+    /// </summary>
+    private void DrawCollectablesOffers()
+    {
+        var service = this.plugin.CollectablesShopService;
+
+        if (!service.IsOpen())
+        {
+            return;
+        }
+
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.Spacing();
+
+        ImGui.TextUnformatted("納品できる品（動作確認用）");
+
+        unsafe
+        {
+            if (!service.TryGetAddon(out var addon))
+            {
+                return;
+            }
+
+            if (!service.TryReadOffers(addon, out var offers, out var failure))
+            {
+                ImGui.TextColored(ImGuiColors.DalamudRed, failure);
+                return;
+            }
+
+            var held = CollectablesShopReader.ListHeldCollectables();
+            var counts = new Dictionary<uint, int>();
+            foreach (var (itemId, _, count) in held)
+            {
+                counts[itemId] = count;
+            }
+
+            ImGui.TextColored(ImGuiColors.DalamudGrey, $"画面の一覧: {offers.Count} 件。手持ちがあるものだけ出します。");
+
+            using var table = ImRaii.Table("##offers", 4, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp);
+            if (!table)
+            {
+                return;
+            }
+
+            ImGui.TableSetupColumn("行", ImGuiTableColumnFlags.WidthFixed, 40f);
+            ImGui.TableSetupColumn("品目");
+            ImGui.TableSetupColumn("手持ち", ImGuiTableColumnFlags.WidthFixed, 70f);
+            ImGui.TableSetupColumn("", ImGuiTableColumnFlags.WidthFixed, 120f);
+            ImGui.TableHeadersRow();
+
+            foreach (var offer in offers)
+            {
+                if (!counts.TryGetValue(offer.ItemId, out var owned) || owned <= 0)
+                {
+                    continue;
+                }
+
+                ImGui.TableNextRow();
+
+                ImGui.TableNextColumn();
+                ImGui.TextUnformatted(offer.RowIndex.ToString());
+
+                ImGui.TableNextColumn();
+                ImGui.TextUnformatted(offer.ItemName);
+
+                ImGui.TableNextColumn();
+                ImGui.TextUnformatted(owned.ToString());
+
+                ImGui.TableNextColumn();
+                if (ImGui.SmallButton($"1 個納品する##deliver{offer.RowIndex}"))
+                {
+                    this.DeliverAndVerify(offer, owned);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// 1 個納品して、結果を自分で確かめる。
+    /// 撃ったことをもって成功とせず、所持数の変化で判断する。
+    /// </summary>
+    private void DeliverAndVerify(Automation.CollectableOffer offer, int ownedBefore)
+    {
+        var scripBefore = this.plugin.SampleSpecialCurrencies();
+
+        if (!this.plugin.CollectablesShopService.TryDeliverOne(offer, out var failure))
+        {
+            this.plugin.AnomalyLog.Error("Collect", $"納品できませんでした: {failure}");
+            return;
+        }
+
+        // 反映は同じフレームでは終わらない。少し置いてから確かめる。
+        _ = new ECommons.Schedulers.TickScheduler(
+            () =>
+            {
+                var after = CollectablesShopReader.ListHeldCollectables();
+                var ownedAfter = 0;
+                foreach (var (itemId, _, count) in after)
+                {
+                    if (itemId == offer.ItemId)
+                    {
+                        ownedAfter = count;
+                        break;
+                    }
+                }
+
+                var scripAfter = this.plugin.SampleSpecialCurrencies();
+                var gained = string.Empty;
+
+                foreach (var (itemId, name, count) in scripAfter)
+                {
+                    foreach (var (beforeId, _, beforeCount) in scripBefore)
+                    {
+                        if (beforeId == itemId && count > beforeCount)
+                        {
+                            gained = $"{name} +{count - beforeCount}";
+                            break;
+                        }
+                    }
+
+                    if (!string.IsNullOrEmpty(gained))
+                    {
+                        break;
+                    }
+                }
+
+                if (ownedAfter < ownedBefore && !string.IsNullOrEmpty(gained))
+                {
+                    this.plugin.AnomalyLog.Info(
+                        "Collect",
+                        $"納品しました: {offer.ItemName} {ownedBefore} → {ownedAfter} / {gained}");
+                }
+                else
+                {
+                    this.plugin.AnomalyLog.Error(
+                        "Collect",
+                        $"納品の結果を確認できませんでした: {offer.ItemName} {ownedBefore} → {ownedAfter} / 通貨の増加 {(string.IsNullOrEmpty(gained) ? "なし" : gained)}");
+                }
+            },
+            1500);
     }
 }
