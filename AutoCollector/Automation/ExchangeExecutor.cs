@@ -2050,7 +2050,10 @@ public sealed unsafe class ExchangeExecutor(
             $"（コスト {definition.CurrencyCost} / index {callbackIndex} / アイテム交換画面）");
 
         // 数量は 1 回につき 1 個。まとめ買いは結果の検証が複雑になるため行わない。
-        Callback.Fire(addon, true, InclusionExchangeCommand, callbackIndex, 1);
+        //
+        // 実測は Fire(14, 0u, 1u)。コマンドは Int、index と数量は UInt だった。
+        // int のまま渡すと AtkValueType.Int になり、実測と型が食い違う。
+        Callback.Fire(addon, true, InclusionExchangeCommand, (uint)callbackIndex, 1u);
 
         // 実測では、撃った直後に確認ダイアログが出る。
         // これに答えないと交換は成立しない。
