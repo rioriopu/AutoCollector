@@ -34,6 +34,14 @@ public sealed unsafe class CallbackRecorder : IDisposable
 
     private Hook<AtkUnitBase.Delegates.FireCallback>? hook;
 
+    /// <summary>
+    /// 別経路のコールバック。
+    ///
+    /// ボタンの押下はこちらを通ることがあり、FireCallback だけを見ていると
+    /// 「記録に出ないのに画面が動く」という取りこぼしになる。
+    /// </summary>
+    private Hook<AtkUnitBase.Delegates.FireCallbackWithResult>? resultHook;
+
     public CallbackRecorder(AnomalyLog anomalyLog)
     {
         this.anomalyLog = anomalyLog;
@@ -64,6 +72,12 @@ public sealed unsafe class CallbackRecorder : IDisposable
 
         try
         {
+            this.resultHook ??= Svc.Hook.HookFromAddress<AtkUnitBase.Delegates.FireCallbackWithResult>(
+                AtkUnitBase.MemberFunctionPointers.FireCallbackWithResult,
+                this.OnFireCallbackWithResult);
+
+            this.resultHook.Enable();
+
             this.hook ??= Svc.Hook.HookFromAddress<AtkUnitBase.Delegates.FireCallback>(
                 AtkUnitBase.MemberFunctionPointers.FireCallback,
                 this.Detour);
@@ -83,6 +97,15 @@ public sealed unsafe class CallbackRecorder : IDisposable
     public void Stop()
     {
         this.currencyAtStop = this.SampleCurrency();
+
+        try
+        {
+            this.resultHook?.Disable();
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Warn("Record", $"記録の停止に失敗しました: {ex.Message}");
+        }
 
 
         try
@@ -215,6 +238,33 @@ public sealed unsafe class CallbackRecorder : IDisposable
         return result;
     }
 
+    /// <summary>
+    /// 戻り値つきのコールバック。ボタンの押下はこちらを通ることがある。
+    /// 記録の印として名前の末尾に印を付け、どちらの経路か分かるようにする。
+    /// </summary>
+    private AtkValue* OnFireCallbackWithResult(AtkUnitBase* addon, AtkValue* returnValue, uint valueCount, AtkValue* values)
+    {
+        var result = this.resultHook!.Original(addon, returnValue, valueCount, values);
+
+        try
+        {
+            if (addon is not null)
+            {
+                var name = GenericHelpers.Read(addon->Name);
+                if (string.IsNullOrEmpty(this.AddonFilter) || name == this.AddonFilter)
+                {
+                    this.Record($"{name}(戻り値つき)", valueCount, values, false);
+                }
+            }
+        }
+        catch
+        {
+            // 記録の失敗でゲーム側の処理に影響を出さない。
+        }
+
+        return result;
+    }
+
     private void Record(string addonName, uint valueCount, AtkValue* values, bool updateState)
     {
         // 上限は 64。収集品納品のように値が多いアドオンで、途中で切れると判断材料にならない。
@@ -273,6 +323,15 @@ public sealed unsafe class CallbackRecorder : IDisposable
 
     public void Dispose()
     {
+        try
+        {
+            this.resultHook?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            Svc.Log.Error($"[Auto Collector] callback 記録の解放に失敗しました: {ex}");
+        }
+
         try
         {
             this.hook?.Dispose();
