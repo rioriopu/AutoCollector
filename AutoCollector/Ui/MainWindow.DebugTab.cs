@@ -238,11 +238,14 @@ public sealed partial class MainWindow
         ImGui.Separator();
         ImGui.Spacing();
 
-        // 納品の発火手段を実測するための 3 手順。押す順に上から並べる。
-        ImGui.TextUnformatted("納品の操作を記録する");
+        // 発火手段を実測するための 3 手順。押す順に上から並べる。
+        //
+        // 納品だけでなく交換の確認にも使う。見出しを納品に限ると
+        // 交換のときに使う道具だと分からなくなる。
+        ImGui.TextUnformatted("操作を記録する（納品・交換の確認用）");
         ImGui.TextColored(
             ImGuiColors.DalamudGrey,
-            "上から順に押してください。停止すると、記録と通貨の増減がファイルへ保存されます。");
+            "上から順に押してください。停止すると、記録と通貨・所持品の増減がファイルへ保存されます。");
 
         var recorder = this.plugin.CallbackRecorder;
         var allAddons = string.IsNullOrWhiteSpace(recorder.AddonFilter);
