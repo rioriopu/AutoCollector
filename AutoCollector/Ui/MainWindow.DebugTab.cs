@@ -210,6 +210,34 @@ public sealed partial class MainWindow
         ImGui.Separator();
         ImGui.Spacing();
 
+        // スクリップ交換は系統と種別の 2 段で絞る。
+        // どの組み合わせに何が並ぶのかは、画面を切り替えながら見ないと分からない。
+        ImGui.TextUnformatted("アイテム交換画面の観測（読み取りのみ）");
+        ImGui.TextColored(
+            ImGuiColors.DalamudGrey,
+            "有効にしてから手動で交換してください。画面が切り替わるたびに 1 つのファイルへ追記します。");
+
+        var observer = this.plugin.InclusionShopObserver;
+        var observing = observer.Enabled;
+
+        if (ImGui.Checkbox("アイテム交換画面を観測する", ref observing))
+        {
+            observer.Enabled = observing;
+        }
+
+        if (observer.Entries > 0)
+        {
+            ImGui.TextColored(ImGuiColors.HealerGreen, $"  {observer.Entries} 件を記録: {observer.FilePath}");
+        }
+        else if (observing)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudGrey, "  まだ記録していません。交換画面を開いてください");
+        }
+
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.Spacing();
+
         // 納品の発火手段を実測するための 3 手順。押す順に上から並べる。
         ImGui.TextUnformatted("納品の操作を記録する");
         ImGui.TextColored(
