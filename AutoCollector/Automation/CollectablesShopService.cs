@@ -9,8 +9,17 @@ using Lumina.Excel.Sheets;
 
 namespace AutoCollector.Automation;
 
-/// <summary>納品できる品 1 件。画面の一覧に並んでいる 1 行に対応する。</summary>
-public sealed record CollectableOffer(int RowIndex, uint ItemId, string ItemName);
+/// <summary>
+/// 納品できる品 1 件。画面の一覧に並んでいる 1 行に対応する。
+///
+/// <para>
+/// Verified は「発火に渡す番号の意味が実測で裏づけられている範囲か」を表す。
+/// 画面の値には、番号だけがあって品目が空の位置が混ざる。そこを境に
+/// 「並びの位置」と「書かれている番号」がずれ、どちらを渡すべきかが決まらなくなる。
+/// 実測できているのはずれる前の行だけなので、ずれた先は発火させない。
+/// </para>
+/// </summary>
+public sealed record CollectableOffer(int RowIndex, uint ItemId, string ItemName, bool Verified);
 
 /// <summary>
 /// 収集品納品画面（CollectablesShop）の読み取りと納品。
@@ -119,16 +128,28 @@ public sealed unsafe class CollectablesShopService(AnomalyLog anomalyLog)
 
             var sheet = Svc.Data.GetExcelSheet<Item>();
             var list = new List<CollectableOffer>((int)declared);
+            var seen = new HashSet<uint>();
 
-            for (var i = 0u; i < declared; i++)
+            // 位置と書かれている番号が一致しているあいだだけ、発火してよい範囲とする。
+            // 一度ずれたら、そこから先はどちらを渡すべきか実測で裏づけられていない。
+            var stillAligned = true;
+
+            // 並び順と行番号が一致するとは限らない。
+            // 実測したデータには、行番号だけがあって品目が空の位置があり、
+            // そのあとの位置に同じ行番号と品目が入っていた。
+            // そのため位置から行番号を決めつけず、画面に書かれた行番号をそのまま使う。
+            //
+            // 走査する範囲は申告件数より広く取る。空の位置があるぶん後ろへずれるため。
+            var maxSlots = declared * 2;
+
+            for (var i = 0u; i < maxSlots; i++)
             {
                 var indexAt = FirstEntry + (i * EntryStride);
                 var itemAt = indexAt + 1;
 
                 if (itemAt >= total)
                 {
-                    failureReason = $"行 {i} が画面の範囲を超えています（値の総数 {total}）";
-                    return false;
+                    break;
                 }
 
                 var rowIndex = ReadUInt(values[indexAt]);
@@ -136,33 +157,65 @@ public sealed unsafe class CollectablesShopService(AnomalyLog anomalyLog)
 
                 if (rawItemId == 0)
                 {
-                    // 空の行がありうる。行番号は詰めない。
+                    // 品目が無い位置。行番号だけが入っていることがある。
                     continue;
                 }
 
                 if (rawItemId < CollectableOffset)
                 {
-                    failureReason = $"行 {i} のアイテムが収集品の形をしていません（値 {rawItemId}）";
+                    // 収集品の形をしていない。配置がずれた可能性があるので、
+                    // ここまでの読み取りごと捨てる。撃つ前に止める方を選ぶ。
+                    failureReason = $"位置 {i} のアイテムが収集品の形をしていません（値 {rawItemId}）";
                     return false;
                 }
 
-                // 行番号は画面の値をそのまま使う。こちらで数え直さない。
-                // 空行があるため、並び順と行番号は一致しない。
+                if (!seen.Add(rowIndex))
+                {
+                    failureReason = $"行番号 {rowIndex} が複数の位置にあります。配置がずれている可能性があります";
+                    return false;
+                }
+
                 if (rowIndex != i)
                 {
-                    failureReason = $"行 {i} の行番号が {rowIndex} になっています。配置がずれている可能性があります";
-                    return false;
+                    stillAligned = false;
                 }
 
                 var itemId = rawItemId - CollectableOffset;
                 var name = sheet?.GetRowOrDefault(itemId)?.Name.ExtractText() ?? $"ItemId {itemId}";
-                list.Add(new CollectableOffer((int)rowIndex, itemId, name));
+                list.Add(new CollectableOffer((int)rowIndex, itemId, name, stillAligned));
+
+                if (list.Count == declared)
+                {
+                    break;
+                }
             }
 
             if (list.Count == 0)
             {
                 failureReason = "納品できる品を 1 件も読み取れませんでした";
                 return false;
+            }
+
+            // 申告された件数と読めた件数が違う場合は撃たない。
+            // 欠けたまま進むと、目的の品が一覧に無いのに別の行を掴むことになる。
+            if (list.Count != declared)
+            {
+                failureReason = $"一覧の件数が合いません（申告 {declared} / 読めた {list.Count}）";
+                return false;
+            }
+
+            // 番号は 0 から連番で並ぶはず。
+            // 走査が実体の末尾を越えて無関係な値を拾った場合、ここで崩れる。
+            // 画面の別の場所には 4150289 のような大きな値も入っており、
+            // それらを収集品として読んでしまう余地があるため、形で弾く。
+            for (var i = 0; i < list.Count; i++)
+            {
+                if (list[i].RowIndex != i)
+                {
+                    failureReason =
+                        $"行番号が連番になっていません（{i} 番目の行番号が {list[i].RowIndex}）。配置がずれている可能性があります";
+                    return false;
+                }
             }
 
             offers = list;
@@ -226,9 +279,19 @@ public sealed unsafe class CollectablesShopService(AnomalyLog anomalyLog)
             return false;
         }
 
+        if (!current.Verified)
+        {
+            failureReason =
+                $"{current.ItemName} は、渡す番号の意味が実測で裏づけられていない範囲にあります。" +
+                "別の品を納品してしまう恐れがあるため実行しません";
+            return false;
+        }
+
         this.anomalyLog.Info("Collect", $"納品します: {current.ItemName}（行 {current.RowIndex}）");
 
-        Callback.Fire(addon, true, DeliverCommand, current.RowIndex);
+        // 実測は Fire(12, 0u)。第 2 引数は UInt だった。
+        // int のまま渡すと AtkValueType.Int になり、実測と型が食い違う。
+        Callback.Fire(addon, true, DeliverCommand, (uint)current.RowIndex);
         return true;
     }
 

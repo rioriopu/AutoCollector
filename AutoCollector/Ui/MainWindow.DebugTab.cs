@@ -31,6 +31,12 @@ public sealed partial class MainWindow
 
         var changed = false;
 
+        // どのビルドが動いているかを最初に出す。
+        // 配置したはずの機能が画面に無いとき、原因が「古い版が動いている」なのか
+        // 「実装が出ていない」なのかを、これが無いと切り分けられない。
+        ImGui.TextColored(ImGuiColors.DalamudGrey, $"実行中のビルド: {BuildStamp()}");
+        ImGui.Separator();
+
         ImGui.TextUnformatted("詳細ログ");
         ImGui.TextColored(
             ImGuiColors.DalamudGrey,
@@ -268,29 +274,52 @@ public sealed partial class MainWindow
     }
 
     /// <summary>
+    /// いま動いている DLL の版と、その作成時刻。
+    /// 再読み込みを忘れたまま「表示されない」と追いかける事故を防ぐ。
+    /// </summary>
+    private static string BuildStamp()
+    {
+        try
+        {
+            var location = Svc.PluginInterface.AssemblyLocation;
+            var version = Svc.PluginInterface.Manifest.AssemblyVersion;
+            return $"v{version} / {System.IO.File.GetLastWriteTime(location.FullName):MM-dd HH:mm:ss}";
+        }
+        catch
+        {
+            return "取得できません";
+        }
+    }
+
+    /// <summary>
     /// 納品できる品の一覧と、1 個だけ納品する動作確認。
     ///
     /// 実装したばかりの経路を、周回に組み込む前に単体で確かめるための場所。
     /// </summary>
     private void DrawCollectablesOffers()
     {
-        var service = this.plugin.CollectablesShopService;
-
-        if (!service.IsOpen())
-        {
-            return;
-        }
-
+        // 見出しは常に描く。
+        // 条件を満たさないときに何も出さない作りにしていたため、
+        // 表示されない理由が画面から分からなくなっていた。
         ImGui.Spacing();
         ImGui.Separator();
         ImGui.Spacing();
 
         ImGui.TextUnformatted("納品できる品（動作確認用）");
 
+        var service = this.plugin.CollectablesShopService;
+
+        if (!service.IsOpen())
+        {
+            ImGui.TextColored(ImGuiColors.DalamudGrey, "納品画面が開いていません。窓口に話しかけてください。");
+            return;
+        }
+
         unsafe
         {
             if (!service.TryGetAddon(out var addon))
             {
+                ImGui.TextColored(ImGuiColors.DalamudRed, "納品画面を掴めませんでした。");
                 return;
             }
 
@@ -307,7 +336,36 @@ public sealed partial class MainWindow
                 counts[itemId] = count;
             }
 
-            ImGui.TextColored(ImGuiColors.DalamudGrey, $"画面の一覧: {offers.Count} 件。手持ちがあるものだけ出します。");
+            var shown = 0;
+            foreach (var offer in offers)
+            {
+                if (counts.TryGetValue(offer.ItemId, out var owned) && owned > 0)
+                {
+                    shown++;
+                }
+            }
+
+            var verified = 0;
+            foreach (var offer in offers)
+            {
+                if (offer.Verified)
+                {
+                    verified++;
+                }
+            }
+
+            ImGui.TextColored(
+                ImGuiColors.DalamudGrey,
+                $"画面の一覧: {offers.Count} 件（うち発火を確認できている範囲 {verified} 件） / " +
+                $"手持ちのある品: {shown} 件 / 所持している収集品: {held.Count} 種類");
+
+            if (shown == 0)
+            {
+                ImGui.TextColored(
+                    ImGuiColors.DalamudYellow,
+                    "手持ちの収集品が、いま開いている職業の一覧にありません。職業タブを切り替えてください。");
+                return;
+            }
 
             using var table = ImRaii.Table("##offers", 4, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp);
             if (!table)
@@ -340,9 +398,28 @@ public sealed partial class MainWindow
                 ImGui.TextUnformatted(owned.ToString());
 
                 ImGui.TableNextColumn();
-                if (ImGui.SmallButton($"1 個納品する##deliver{offer.RowIndex}"))
+
+                if (offer.Verified)
                 {
-                    this.DeliverAndVerify(offer, owned);
+                    if (ImGui.SmallButton($"1 個納品する##deliver{offer.RowIndex}"))
+                    {
+                        this.DeliverAndVerify(offer, owned);
+                    }
+                }
+                else
+                {
+                    // 渡す番号の意味が実測で裏づけられていない範囲。
+                    // 別の品を納品してしまう恐れがあるため、押せないようにする。
+                    ImGui.TextColored(ImGuiColors.DalamudYellow, "未検証のため不可");
+
+                    if (ImGui.IsItemHovered())
+                    {
+                        ImGui.SetTooltip(
+                            "画面の値には、番号だけがあって品目が空の位置が混ざります。\n" +
+                            "そこから先は「並びの位置」と「書かれている番号」がずれ、\n" +
+                            "どちらを渡すべきかが実測で確かめられていません。\n" +
+                            "この品を手動で 1 個納品して記録すると確定します。");
+                    }
                 }
             }
         }
