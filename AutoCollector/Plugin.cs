@@ -53,6 +53,8 @@ public sealed class Plugin : IDalamudPlugin
 
     internal CollectableDeliveryRunner CollectableDelivery { get; private set; } = null!;
 
+    internal InclusionShopObserver InclusionShopObserver { get; private set; } = null!;
+
     internal ExchangeExecutor ExchangeExecutor { get; private set; } = null!;
 
     internal AddonOwnershipTracker AddonOwnership { get; private set; } = null!;
@@ -128,6 +130,7 @@ public sealed class Plugin : IDalamudPlugin
         this.ExchangeResolver = new ExchangeResolver(this.AnomalyLog, this.TomestoneService, this.NpcLocationService, this.SpecialCurrencyMap);
         this.ShopService = new ShopService(this.AnomalyLog, DataFileLoader.LoadShopLayout(this.AnomalyLog));
         this.InclusionShopService = new InclusionShopService(this.AnomalyLog, this.SpecialCurrencyMap);
+        this.InclusionShopObserver = new InclusionShopObserver(this.AnomalyLog, this.InclusionShopService);
         this.CallbackRecorder = new CallbackRecorder(this.AnomalyLog);
         this.CollectablesShopReader = new CollectablesShopReader();
         this.CollectablesShopService = new CollectablesShopService(this.AnomalyLog);
@@ -284,6 +287,7 @@ public sealed class Plugin : IDalamudPlugin
 
             // 納品画面が開いた瞬間を捉えて自動でダンプする。読み取りのみ。
             this.CollectablesShopReader.Tick(ResolveLogDirectory());
+            this.InclusionShopObserver.Tick(ResolveLogDirectory());
         }
         catch (Exception ex)
         {
@@ -309,23 +313,39 @@ public sealed class Plugin : IDalamudPlugin
     }
 
     /// <summary>
-    /// 特殊通貨（スクリップ等）の所持数を並べる。
-    /// 対応表はクライアントから実行時に取っているので、通貨が増えても追従する。
+    /// 所持品の一覧を控える。記録の前後で比べ、何が増えて何が減ったかを出すために使う。
+    ///
+    /// 特殊通貨だけを見ていると、交換で受け取った品が出てこない。
+    /// 何と引き換えに何を得たのかは、両方を並べないと分からない。
     /// </summary>
     internal IReadOnlyList<(uint ItemId, string Name, int Count)> SampleSpecialCurrencies()
     {
         var list = new List<(uint, string, int)>();
+        var seen = new HashSet<uint>();
 
         foreach (var (itemId, name) in this.SpecialCurrencyMap.ListCurrencies())
         {
             list.Add((itemId, name, this.CurrencyService.GetCountOrZero(itemId)));
+            seen.Add(itemId);
         }
 
-        // 収集品そのものの増減も控える。
-        // 1 回の納品で 1 個減るのか、スタックごと渡されるのかが、これで分かる。
+        // 収集品は、1 回の納品で何個渡されるかを見るために個別に出す。
+        var collectables = new HashSet<uint>();
         foreach (var (itemId, name, count) in CollectablesShopReader.ListHeldCollectables())
         {
             list.Add((itemId, $"[収集品] {name}", count));
+            collectables.Add(itemId);
+        }
+
+        // 鞄の中身。交換で受け取った品はここに入る。
+        foreach (var (itemId, name, count) in InventorySnapshot.ListBagItems())
+        {
+            if (seen.Contains(itemId) || collectables.Contains(itemId))
+            {
+                continue;
+            }
+
+            list.Add((itemId, name, count));
         }
 
         return list;
