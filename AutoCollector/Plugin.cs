@@ -313,6 +313,13 @@ public sealed class Plugin : IDalamudPlugin
             list.Add((itemId, name, this.CurrencyService.GetCountOrZero(itemId)));
         }
 
+        // 収集品そのものの増減も控える。
+        // 1 回の納品で 1 個減るのか、スタックごと渡されるのかが、これで分かる。
+        foreach (var (itemId, name, count) in CollectablesShopReader.ListHeldCollectables())
+        {
+            list.Add((itemId, $"[収集品] {name}", count));
+        }
+
         return list;
     }
 
