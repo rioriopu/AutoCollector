@@ -105,7 +105,9 @@ public sealed unsafe class InclusionShopObserver(AnomalyLog anomalyLog, Inclusio
                 $"系統: 行 {selection.SelectedCategoryRowId}（{selection.SelectedCategoryIndex + 1} / {selection.CategoryCount}）" +
                 $"  種別: 系列 {selection.SelectedSeriesId}（タブ {selection.SelectedSubCategoryTab + 1} / {selection.VisibleSubCategoryCount}）");
 
-            signature = $"{selection.SelectedCategoryRowId}/{selection.SelectedSeriesId}";
+            // 種別はタブ番号で表される。系列は系統の写しなので、これだけでは区別できない。
+            // タブを入れないと、品数が同じ種別が同じ画面とみなされて記録されない。
+            signature = $"{selection.SelectedCategoryRowId}/{selection.SelectedSubCategoryTab}";
         }
 
         if (!this.shop.TryReadEntries(addon, out var entries, out var currency, out var failure))
