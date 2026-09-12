@@ -51,6 +51,8 @@ public sealed class Plugin : IDalamudPlugin
 
     internal CollectablesShopService CollectablesShopService { get; private set; } = null!;
 
+    internal CollectableDeliveryRunner CollectableDelivery { get; private set; } = null!;
+
     internal ExchangeExecutor ExchangeExecutor { get; private set; } = null!;
 
     internal AddonOwnershipTracker AddonOwnership { get; private set; } = null!;
@@ -129,6 +131,8 @@ public sealed class Plugin : IDalamudPlugin
         this.CallbackRecorder = new CallbackRecorder(this.AnomalyLog);
         this.CollectablesShopReader = new CollectablesShopReader();
         this.CollectablesShopService = new CollectablesShopService(this.AnomalyLog);
+        this.CollectableDelivery = new CollectableDeliveryRunner(
+            this.AnomalyLog, this.CollectablesShopService, this.CurrencyService, this.SpecialCurrencyMap);
 
         // スクリップの増減を人に数えさせないため、通貨の読み取り口を渡しておく。
         this.CollectablesShopReader.CurrencySampler = this.SampleSpecialCurrencies;
@@ -276,6 +280,7 @@ public sealed class Plugin : IDalamudPlugin
             this.ExchangeExecutor.Tick();
             this.MonitorService.Tick();
             this.AutoDutyKeeper.Tick();
+            this.CollectableDelivery.Tick();
 
             // 納品画面が開いた瞬間を捉えて自動でダンプする。読み取りのみ。
             this.CollectablesShopReader.Tick(ResolveLogDirectory());
