@@ -345,7 +345,8 @@ public sealed class PresetTab(Plugin plugin)
             {
                 var selected = selectedItem && preset.PreferredNpcDataId == definition.NpcDataId;
                 var area = NpcLocationService.GetTerritoryName(definition.TerritoryId);
-                var note = definition.UsesInclusionShop ? "（アイテム交換画面・自動実行は未対応）" : string.Empty;
+                // アイテム交換画面の自動実行は実装済み。未対応と書いたままだと選べないものに見える。
+                var note = definition.UsesInclusionShop ? "（アイテム交換画面）" : string.Empty;
 
                 if (ImGui.Selectable($"  {definition.NpcName} — {area}{note}##npc{group.RewardItemId}_{definition.NpcDataId}_{definition.ShopId}", selected))
                 {
