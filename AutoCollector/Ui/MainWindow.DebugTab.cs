@@ -148,6 +148,17 @@ public sealed partial class MainWindow
         var reader = this.plugin.CollectablesShopReader;
         var open = reader.IsOpen();
 
+        var autoDump = reader.AutoDump;
+        if (ImGui.Checkbox("納品画面を開いたら自動でダンプする", ref autoDump))
+        {
+            reader.AutoDump = autoDump;
+        }
+
+        if (!string.IsNullOrEmpty(reader.LastAutoDumpPath))
+        {
+            ImGui.TextColored(ImGuiColors.HealerGreen, $"  最後の自動ダンプ: {reader.LastAutoDumpPath}");
+        }
+
         using (ImRaii.Disabled(!open))
         {
             if (ImGui.Button("ダンプをファイルへ保存##dumpcollect"))
@@ -183,6 +194,69 @@ public sealed partial class MainWindow
         ImGui.TextColored(
             open ? ImGuiColors.HealerGreen : ImGuiColors.DalamudGrey,
             open ? "納品画面が開いています" : "納品画面が開いていません");
+
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.Spacing();
+
+        // 納品の発火手段を実測するための 3 手順。押す順に上から並べる。
+        ImGui.TextUnformatted("納品の操作を記録する");
+        ImGui.TextColored(
+            ImGuiColors.DalamudGrey,
+            "上から順に押してください。停止すると、記録と通貨の増減がファイルへ保存されます。");
+
+        var recorder = this.plugin.CallbackRecorder;
+        var allAddons = string.IsNullOrWhiteSpace(recorder.AddonFilter);
+
+        using (ImRaii.Disabled(recorder.IsRecording))
+        {
+            if (ImGui.Button("1. 全アドオンを対象にする##recall"))
+            {
+                recorder.AddonFilter = string.Empty;
+                recorder.Clear();
+            }
+        }
+
+        ImGui.SameLine();
+        ImGui.TextColored(
+            allAddons ? ImGuiColors.HealerGreen : ImGuiColors.DalamudYellow,
+            allAddons ? "対象: 全アドオン" : $"対象: {recorder.AddonFilter}");
+
+        using (ImRaii.Disabled(recorder.IsRecording))
+        {
+            if (ImGui.Button("2. 記録を開始##recstart"))
+            {
+                recorder.Clear();
+                recorder.Start();
+            }
+        }
+
+        ImGui.SameLine();
+
+        using (ImRaii.Disabled(!recorder.IsRecording))
+        {
+            if (ImGui.Button("3. 停止して保存##recstop"))
+            {
+                recorder.Stop();
+
+                try
+                {
+                    var path = recorder.Save(Plugin.ResolveLogDirectory());
+                    this.plugin.AnomalyLog.Info("Record", $"記録を保存しました: {path}");
+                }
+                catch (Exception ex)
+                {
+                    this.plugin.AnomalyLog.Error("Record", $"記録を保存できませんでした: {ex.Message}");
+                }
+            }
+        }
+
+        ImGui.SameLine();
+        ImGui.TextColored(
+            recorder.IsRecording ? ImGuiColors.DalamudYellow : ImGuiColors.DalamudGrey,
+            recorder.IsRecording ? $"記録中（{recorder.Snapshot().Count} 件）" : "停止中");
+
+        ImGui.TextColored(ImGuiColors.DalamudGrey, $"  保存先: {Plugin.ResolveLogDirectory()}");
 
         if (changed)
         {
