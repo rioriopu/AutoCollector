@@ -92,11 +92,32 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
     /// <summary>
     /// 目的地を変えて移動をやり直す。
     /// 目的地だけ書き換えて移動を出し直さないと、経路と到着判定がずれる。
+    ///
+    /// **先に止めてはいけない。**
+    /// vnavmesh の MoveTo は経路探索を積むだけで、今の経路は消さない。
+    /// 差し替わるのは探索が終わってからで、それまでは元の経路を歩き続ける。
+    /// （AsyncMoveRequest.cs: MoveTo は _pendingTask を積むだけ、
+    ///   Update が IsCompleted を見て初めて _follow.Move を呼ぶ）
+    ///
+    /// ここで止めると、探索が終わるまで棒立ちになる。
+    /// 街中では数秒かかるため、目に見えて固まる。止めなければ
+    /// 元の目的地へ歩きながら、探索が終わった時点で新しい経路へ移る。
     /// </summary>
     public bool Reissue(Vector3 destination, float range, out string failureReason)
     {
-        this.vnavmesh.TryStop();
-        return this.BeginMove(destination, range, out failureReason);
+        var wasMoving = this.moveIssued;
+
+        if (this.BeginMove(destination, range, out failureReason))
+        {
+            return true;
+        }
+
+        // 引き直しに失敗しても、元の経路はまだ生きている。
+        // BeginMove は入口で moveIssued を倒すので、そのままだと
+        // 移動していないことになり、Tick が失敗を返して交換ごと中止になる。
+        // 歩いている事実は変わらないため、元の状態へ戻す。
+        this.moveIssued = wasMoving;
+        return false;
     }
 
     /// <summary>移動を開始する。1 回だけ発行し、以降は状態を監視するだけにする。</summary>
