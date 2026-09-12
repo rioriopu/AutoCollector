@@ -43,6 +43,18 @@ public sealed class CollectableDeliveryRunner(
     /// <summary>品目ごとに観測した報酬。1 回目の納品で分かる。</summary>
     private readonly Dictionary<uint, (uint ScripItemId, int Amount)> observedReward = [];
 
+    /// <summary>
+    /// 撃っても納品されなかった品。この実行では以後試さない。
+    ///
+    /// 納品できない理由はいくつもあり（条件を満たさない、受け付けられない等）、
+    /// こちらから理由を確定できないものもある。
+    /// 1 品が納品できないだけで残り全部を諦めるのは行き過ぎなので、飛ばして続ける。
+    /// </summary>
+    private readonly HashSet<uint> blocked = [];
+
+    /// <summary>取りこぼしの可能性があるので、1 度だけ撃ち直す。</summary>
+    private readonly HashSet<uint> retried = [];
+
     private CollectableOffer? target;
     private int ownedBefore;
     private IReadOnlyList<(uint ItemId, string Name, int Count)> scripBefore = [];
@@ -77,6 +89,8 @@ public sealed class CollectableDeliveryRunner(
 
         this.Delivered = 0;
         this.observedReward.Clear();
+        this.blocked.Clear();
+        this.retried.Clear();
         this.Step = DeliveryStep.Select;
         this.StatusDetail = "納品する品を選んでいます";
         reason = string.Empty;
@@ -165,6 +179,11 @@ public sealed class CollectableDeliveryRunner(
                 continue;
             }
 
+            if (this.blocked.Contains(offer.ItemId))
+            {
+                continue;
+            }
+
             // この品でスクリップが溢れるなら飛ばす。
             // 溢れたぶんは捨てられるだけで、収集品を失うことになる。
             //
@@ -196,10 +215,12 @@ public sealed class CollectableDeliveryRunner(
             return;
         }
 
+        var blockedNote = this.blocked.Count > 0 ? $"。納品できなかった品が {this.blocked.Count} 種類あります" : string.Empty;
+
         this.Finish(
             string.IsNullOrEmpty(skipped)
-                ? "納品できる収集品がなくなりました"
-                : $"残りはスクリップが溢れるため納品していません（{skipped}）");
+                ? $"納品できる収集品がなくなりました{blockedNote}"
+                : $"残りはスクリップが溢れるため納品していません（{skipped}）{blockedNote}");
     }
 
     /// <summary>納品ボタンが押せるようになるのを待って押す。時間ではなく状態で判断する。</summary>
@@ -279,9 +300,44 @@ public sealed class CollectableDeliveryRunner(
 
         if (ownedAfter >= this.ownedBefore || gainedAmount <= 0)
         {
-            this.Fail(
-                $"納品の結果を確認できませんでした（{offer.ItemName} {this.ownedBefore} → {ownedAfter} / " +
-                $"スクリップの増加 {(gainedAmount > 0 ? gainedAmount.ToString() : "なし")}）");
+            // まず上限を疑う。
+            //
+            // まだ納品したことのない品は報酬が分からないため、事前に溢れを判定できない。
+            // 上限際でそういう品を撃つと、ゲーム側が受け付けずに何も起きない。
+            // これは異常ではなく、上限に達したという結果である。
+            if (this.NearCap(out var nearDetail))
+            {
+                this.blocked.Add(offer.ItemId);
+
+                this.anomalyLog.Info(
+                    "Collect",
+                    $"{offer.ItemName} はスクリップが上限に近いため納品できませんでした（{nearDetail}）。この品は飛ばして続けます");
+
+                this.target = null;
+                this.Step = DeliveryStep.Select;
+                return;
+            }
+
+            // 取りこぼしの可能性があるので、1 度だけ撃ち直す。
+            if (this.retried.Add(offer.ItemId))
+            {
+                this.anomalyLog.Info("Collect", $"{offer.ItemName} が納品されなかったため、もう一度試します");
+                this.target = null;
+                this.Step = DeliveryStep.Select;
+                return;
+            }
+
+            // 2 度試しても変わらないなら、この品は納品できない。
+            // 理由をこちらから確定できないため断定はせず、飛ばして他を続ける。
+            this.blocked.Add(offer.ItemId);
+
+            this.anomalyLog.Warn(
+                "Collect",
+                $"{offer.ItemName} は納品できませんでした（所持 {this.ownedBefore} のまま / スクリップの増加なし。" +
+                $"収集価値 {DescribeCollectability(offer.ItemId)}）。この品は飛ばして続けます");
+
+            this.target = null;
+            this.Step = DeliveryStep.Select;
             return;
         }
 
@@ -348,6 +404,66 @@ public sealed class CollectableDeliveryRunner(
 
         detail = string.Join(" / ", names);
         return true;
+    }
+
+    /// <summary>
+    /// どれかのスクリップが上限際か。
+    ///
+    /// 「あと少しで一杯」の判断には、この実行で観測した報酬のうち最大のものを使う。
+    /// まだ 1 つも観測していない場合は控えめな値で見る。
+    /// </summary>
+    private bool NearCap(out string detail)
+    {
+        detail = string.Empty;
+
+        var margin = 0;
+        foreach (var reward in this.observedReward.Values)
+        {
+            if (reward.Amount > margin)
+            {
+                margin = reward.Amount;
+            }
+        }
+
+        if (margin == 0)
+        {
+            margin = 200;
+        }
+
+        foreach (var (itemId, name) in this.currencyMap.ListCurrencies())
+        {
+            var cap = this.currency.GetEffectiveCap(itemId);
+            if (cap is not { } limit || limit == 0)
+            {
+                continue;
+            }
+
+            if (!this.currency.TryGetCount(itemId, out var current))
+            {
+                continue;
+            }
+
+            if (limit - current <= margin)
+            {
+                detail = $"{name} {current:N0} / {limit:N0}";
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>手持ちの収集価値を並べる。納品できない理由を追うための材料。</summary>
+    private static string DescribeCollectability(uint itemId)
+    {
+        var values = new List<int>();
+
+        foreach (var value in CollectablesShopReader.ListCollectability(itemId))
+        {
+            values.Add(value);
+        }
+
+        return values.Count == 0 ? "不明" : string.Join(" / ", values);
     }
 
     /// <summary>その通貨が上限に達しているか。</summary>
