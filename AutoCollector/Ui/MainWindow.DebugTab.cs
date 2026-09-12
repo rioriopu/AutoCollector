@@ -345,19 +345,10 @@ public sealed partial class MainWindow
                 }
             }
 
-            var verified = 0;
-            foreach (var offer in offers)
-            {
-                if (offer.Verified)
-                {
-                    verified++;
-                }
-            }
-
             ImGui.TextColored(
                 ImGuiColors.DalamudGrey,
-                $"画面の一覧: {offers.Count} 件（うち発火を確認できている範囲 {verified} 件） / " +
-                $"手持ちのある品: {shown} 件 / 所持している収集品: {held.Count} 種類");
+                $"画面の一覧: {offers.Count} 件 / 手持ちのある品: {shown} 件 / " +
+                $"所持している収集品: {held.Count} 種類");
 
             if (shown == 0)
             {
@@ -399,27 +390,9 @@ public sealed partial class MainWindow
 
                 ImGui.TableNextColumn();
 
-                if (offer.Verified)
+                if (ImGui.SmallButton($"1 個納品する##deliver{offer.RowIndex}"))
                 {
-                    if (ImGui.SmallButton($"1 個納品する##deliver{offer.RowIndex}"))
-                    {
-                        this.DeliverAndVerify(offer, owned);
-                    }
-                }
-                else
-                {
-                    // 渡す番号の意味が実測で裏づけられていない範囲。
-                    // 別の品を納品してしまう恐れがあるため、押せないようにする。
-                    ImGui.TextColored(ImGuiColors.DalamudYellow, "未検証のため不可");
-
-                    if (ImGui.IsItemHovered())
-                    {
-                        ImGui.SetTooltip(
-                            "画面の値には、番号だけがあって品目が空の位置が混ざります。\n" +
-                            "そこから先は「並びの位置」と「書かれている番号」がずれ、\n" +
-                            "どちらを渡すべきかが実測で確かめられていません。\n" +
-                            "この品を手動で 1 個納品して記録すると確定します。");
-                    }
+                    this.DeliverAndVerify(offer, owned);
                 }
             }
         }
