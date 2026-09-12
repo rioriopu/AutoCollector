@@ -4,6 +4,7 @@ using AutoCollector.Diagnostics;
 using ECommons;
 using ECommons.Automation;
 using ECommons.DalamudServices;
+using ECommons.UIHelpers.AddonMasterImplementations;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 using Lumina.Excel.Sheets;
 
@@ -40,8 +41,16 @@ public sealed unsafe class CollectablesShopService(AnomalyLog anomalyLog)
 {
     public const string AddonName = "CollectablesShop";
 
-    /// <summary>納品の発火コマンド。実測で確定した値。</summary>
-    private const int DeliverCommand = 12;
+    /// <summary>
+    /// 一覧から品目を選ぶコマンド。実測で確定した値。
+    ///
+    /// これは選択であって納品ではない。撃つと画面がその品目の表示に切り替わり、
+    /// 納品ボタン（node 51）が現れる。納品はそのボタンを押して行う。
+    /// </summary>
+    private const int SelectCommand = 12;
+
+    /// <summary>納品ボタンのノード。ECommons の AddonMaster.CollectablesShop と同じ。</summary>
+    private const uint TradeButtonNodeId = 51;
 
     /// <summary>一覧の先頭が入っている位置。</summary>
     private const uint FirstEntry = 33;
@@ -235,12 +244,78 @@ public sealed unsafe class CollectablesShopService(AnomalyLog anomalyLog)
     }
 
     /// <summary>
-    /// 1 個だけ納品する。
+    /// 納品ボタンが押せる状態か。
+    ///
+    /// 品目を選ぶ前は隠れており、選ぶと現れる。
+    /// これが押せることをもって「選択が効いた」と判断する。
+    /// </summary>
+    public bool IsTradeReady()
+    {
+        try
+        {
+            if (!this.TryGetAddon(out var addon))
+            {
+                return false;
+            }
+
+            var button = addon->GetComponentButtonById(TradeButtonNodeId);
+            if (button is null || button->AtkComponentBase.OwnerNode is null)
+            {
+                return false;
+            }
+
+            return button->AtkComponentBase.OwnerNode->AtkResNode.IsVisible() && button->IsEnabled;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 納品ボタンを押す。選択済みであることが前提。
+    /// </summary>
+    public bool TryTrade(out string failureReason)
+    {
+        failureReason = string.Empty;
+
+        if (!Svc.Framework.IsInFrameworkUpdateThread)
+        {
+            failureReason = "Framework スレッド以外から実行されました";
+            return false;
+        }
+
+        if (!this.TryGetAddon(out var addon))
+        {
+            failureReason = "納品画面が開いていません";
+            return false;
+        }
+
+        if (!this.IsTradeReady())
+        {
+            failureReason = "納品ボタンがまだ押せる状態ではありません";
+            return false;
+        }
+
+        try
+        {
+            new AddonMaster.CollectablesShop((nint)addon).Trade();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            failureReason = $"納品ボタンを押せませんでした: {ex.Message}";
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 一覧から品目を選ぶ。納品はしない。
     ///
     /// 撃つ前に、渡された行番号が画面の内容と一致していることをもう一度確かめる。
-    /// 行番号を取り違えると、意図しない品を渡してしまい取り返しがつかない。
+    /// 行番号を取り違えると、そのあとの納品で意図しない品を渡してしまう。
     /// </summary>
-    public bool TryDeliverOne(CollectableOffer offer, out string failureReason)
+    public bool TrySelect(CollectableOffer offer, out string failureReason)
     {
         failureReason = string.Empty;
 
@@ -285,11 +360,11 @@ public sealed unsafe class CollectablesShopService(AnomalyLog anomalyLog)
             return false;
         }
 
-        this.anomalyLog.Info("Collect", $"納品します: {current.ItemName}（行 {current.RowIndex}）");
+        this.anomalyLog.Info("Collect", $"{current.ItemName} を選びます（行 {current.RowIndex}）");
 
         // 実測は Fire(12, 0u)。第 2 引数は UInt だった。
         // int のまま渡すと AtkValueType.Int になり、実測と型が食い違う。
-        Callback.Fire(addon, true, DeliverCommand, (uint)current.RowIndex);
+        Callback.Fire(addon, true, SelectCommand, (uint)current.RowIndex);
         return true;
     }
 

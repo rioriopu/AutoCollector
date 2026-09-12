@@ -419,15 +419,53 @@ public sealed partial class MainWindow
     {
         var scripBefore = this.plugin.SampleSpecialCurrencies();
 
-        if (!this.plugin.CollectablesShopService.TryDeliverOne(offer, out var failure))
+        var service = this.plugin.CollectablesShopService;
+
+        // 1 段目: 一覧から選ぶ。ここではまだ何も渡さない。
+        if (!service.TrySelect(offer, out var failure))
         {
-            this.plugin.AnomalyLog.Error("Collect", $"納品できませんでした: {failure}");
+            this.plugin.AnomalyLog.Error("Collect", $"選べませんでした: {failure}");
             return;
         }
 
-        // 反映は同じフレームでは終わらない。少し置いてから確かめる。
-        _ = new ECommons.Schedulers.TickScheduler(
-            () =>
+        // 2 段目: 納品ボタンが押せるようになるのを待ってから押す。
+        // 選んだ直後は画面が切り替わっておらず、まだ押せない。
+        // 何回目で押せたかを残し、待ち方が足りているかを後から判断できるようにする。
+        var attempt = 0;
+
+        void PressWhenReady()
+        {
+            attempt++;
+
+            if (service.IsTradeReady())
+            {
+                if (!service.TryTrade(out var tradeFailure))
+                {
+                    this.plugin.AnomalyLog.Error("Collect", $"納品ボタンを押せませんでした: {tradeFailure}");
+                    return;
+                }
+
+                this.plugin.AnomalyLog.Info("Collect", $"納品ボタンを押しました（{attempt} 回目の確認で押せました）");
+                _ = new ECommons.Schedulers.TickScheduler(Verify, 1500);
+                return;
+            }
+
+            if (attempt >= 20)
+            {
+                this.plugin.AnomalyLog.Error(
+                    "Collect",
+                    $"{offer.ItemName} を選びましたが、納品ボタンが押せる状態になりませんでした");
+                return;
+            }
+
+            _ = new ECommons.Schedulers.TickScheduler(PressWhenReady, 150);
+        }
+
+        _ = new ECommons.Schedulers.TickScheduler(PressWhenReady, 150);
+        return;
+
+        void Verify()
+        {
             {
                 var after = CollectablesShopReader.ListHeldCollectables();
                 var ownedAfter = 0;
@@ -472,7 +510,7 @@ public sealed partial class MainWindow
                         "Collect",
                         $"納品の結果を確認できませんでした: {offer.ItemName} {ownedBefore} → {ownedAfter} / 通貨の増加 {(string.IsNullOrEmpty(gained) ? "なし" : gained)}");
                 }
-            },
-            1500);
+            }
+        }
     }
 }
