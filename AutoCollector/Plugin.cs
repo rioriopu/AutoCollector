@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using AutoCollector.Automation;
 using AutoCollector.Diagnostics;
 using AutoCollector.Ipc;
@@ -125,6 +126,10 @@ public sealed class Plugin : IDalamudPlugin
         this.InclusionShopService = new InclusionShopService(this.AnomalyLog, this.SpecialCurrencyMap);
         this.CallbackRecorder = new CallbackRecorder(this.AnomalyLog);
         this.CollectablesShopReader = new CollectablesShopReader();
+
+        // スクリップの増減を人に数えさせないため、通貨の読み取り口を渡しておく。
+        this.CollectablesShopReader.CurrencySampler = this.SampleSpecialCurrencies;
+        this.CallbackRecorder.CurrencySampler = this.SampleSpecialCurrencies;
         this.AddonOwnership = new AddonOwnershipTracker(this.AnomalyLog);
         this.Vnavmesh = new VnavmeshIpc(this.AnomalyLog);
         this.MenuService = new MenuService(this.AnomalyLog);
@@ -268,6 +273,9 @@ public sealed class Plugin : IDalamudPlugin
             this.ExchangeExecutor.Tick();
             this.MonitorService.Tick();
             this.AutoDutyKeeper.Tick();
+
+            // 納品画面が開いた瞬間を捉えて自動でダンプする。読み取りのみ。
+            this.CollectablesShopReader.Tick(ResolveLogDirectory());
         }
         catch (Exception ex)
         {
@@ -290,6 +298,22 @@ public sealed class Plugin : IDalamudPlugin
         // S6 以降でここに移動停止・ショップ閉鎖・外部抑制の解除を追加する。
         // 自分が開いたウィンドウかどうかの判定を先に実装しないと、
         // 他プラグインやユーザーが開いたものまで閉じてしまうため、S5 では行わない。
+    }
+
+    /// <summary>
+    /// 特殊通貨（スクリップ等）の所持数を並べる。
+    /// 対応表はクライアントから実行時に取っているので、通貨が増えても追従する。
+    /// </summary>
+    internal IReadOnlyList<(uint ItemId, string Name, int Count)> SampleSpecialCurrencies()
+    {
+        var list = new List<(uint, string, int)>();
+
+        foreach (var (itemId, name) in this.SpecialCurrencyMap.ListCurrencies())
+        {
+            list.Add((itemId, name, this.CurrencyService.GetCountOrZero(itemId)));
+        }
+
+        return list;
     }
 
     /// <summary>
@@ -334,6 +358,12 @@ public sealed class Plugin : IDalamudPlugin
             Svc.Log.Error($"[Auto Collector] 詳細ログを開始できませんでした: {ex}");
         }
     }
+
+    /// <summary>ダンプの保存先。詳細ログと同じ場所へまとめる。</summary>
+    internal static string ResolveLogDirectory()
+        => string.IsNullOrWhiteSpace(C.LogDirectory)
+            ? Svc.PluginInterface.ConfigDirectory.FullName
+            : C.LogDirectory;
 
     internal void StopFileLog()
     {

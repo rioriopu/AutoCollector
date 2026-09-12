@@ -22,6 +22,47 @@ public sealed unsafe class CollectablesShopReader
 {
     public const string AddonName = "CollectablesShop";
 
+    /// <summary>
+    /// 通貨の所持数を読む手段。スクリップの増減を人に数えさせないために持つ。
+    /// </summary>
+    public Func<IReadOnlyList<(uint ItemId, string Name, int Count)>>? CurrencySampler { get; set; }
+
+    private bool wasOpen;
+    private string? autoDirectory;
+
+    /// <summary>
+    /// 納品画面が開いた瞬間に自動でダンプする。
+    /// ボタンを押しに行く手間を無くし、押し忘れも防ぐ。
+    /// </summary>
+    public bool AutoDump { get; set; }
+
+    /// <summary>自動ダンプで保存したファイル。UI に出す。</summary>
+    public string LastAutoDumpPath { get; private set; } = string.Empty;
+
+    /// <summary>
+    /// 毎フレーム呼ぶ。開いた瞬間だけを捉える。
+    /// 読み取りしか行わないので、失敗しても本体の動作は変えない。
+    /// </summary>
+    public void Tick(string directory)
+    {
+        try
+        {
+            this.autoDirectory = directory;
+            var open = this.IsOpen();
+
+            if (open && !this.wasOpen && this.AutoDump)
+            {
+                this.LastAutoDumpPath = this.Save(directory);
+            }
+
+            this.wasOpen = open;
+        }
+        catch
+        {
+            // ここで落ちても本体を止めない。
+        }
+    }
+
     /// <summary>納品画面が開いているか。</summary>
     public bool IsOpen()
     {
@@ -57,7 +98,9 @@ public sealed unsafe class CollectablesShopReader
 
             DumpAddon(sb, addon);
             DumpAtkValues(sb, addon);
-            DumpCollectables(sb);
+            var held = DumpCollectables(sb);
+            this.DumpCurrencies(sb);
+            DumpVerdict(sb, addon, held);
         }
         catch (Exception ex)
         {
@@ -165,7 +208,79 @@ public sealed unsafe class CollectablesShopReader
     /// 手持ちの収集品を書き出す。
     /// シートのしきい値と画面の収集価値が同じ単位かを確かめるために使う。
     /// </summary>
-    private static void DumpCollectables(StringBuilder sb)
+    /// <summary>
+    /// スクリップの所持数を書き出す。
+    /// 納品の前後でこのファイルを 2 つ取れば、増えた通貨がそのまま分かる。
+    /// </summary>
+    private void DumpCurrencies(StringBuilder sb)
+    {
+        sb.AppendLine();
+        sb.AppendLine("-- スクリップなど特殊通貨の所持数 --");
+
+        try
+        {
+            var list = this.CurrencySampler?.Invoke();
+            if (list is null || list.Count == 0)
+            {
+                sb.AppendLine("取得できません。");
+                return;
+            }
+
+            foreach (var (itemId, name, count) in list)
+            {
+                sb.AppendLine($"{name}（ItemId {itemId}）: {count:N0}");
+            }
+        }
+        catch (Exception ex)
+        {
+            sb.AppendLine($"取得に失敗しました: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 一覧の行数と手持ちの収集品を突き合わせる。
+    ///
+    /// 一覧が「納品できる品の定義一覧」なのか「手持ちの収集品一覧」なのかで、
+    /// 行の特定方法が変わる。手持ちを変えた状態のダンプを 2 つ並べれば判別できる。
+    /// </summary>
+    private static void DumpVerdict(StringBuilder sb, AtkUnitBase* addon, int heldKinds)
+    {
+        sb.AppendLine();
+        sb.AppendLine("-- 突き合わせ --");
+        sb.AppendLine($"手持ちの収集品: {heldKinds} 種類");
+
+        foreach (var id in new uint[] { 27, 28, 29, 30, 31, 32 })
+        {
+            try
+            {
+                var component = addon->GetComponentByNodeId(id);
+                if (component is null)
+                {
+                    continue;
+                }
+
+                var type = component->GetComponentType();
+
+                if (type == ComponentType.List)
+                {
+                    sb.AppendLine($"node {id} (List): {((AtkComponentList*)component)->ListLength} 行");
+                }
+                else if (type == ComponentType.TreeList)
+                {
+                    sb.AppendLine($"node {id} (TreeList): {((AtkComponentTreeList*)component)->Items.LongCount} 行");
+                }
+            }
+            catch
+            {
+                // 読めないものは飛ばす。
+            }
+        }
+
+        sb.AppendLine("行数が手持ちの種類数と一致していれば「手持ちの一覧」、");
+        sb.AppendLine("一致せず手持ちを変えても変わらなければ「納品できる品の定義一覧」です。");
+    }
+
+    private static int DumpCollectables(StringBuilder sb)
     {
         sb.AppendLine();
         sb.AppendLine("-- 所持している収集品 --");
@@ -176,7 +291,7 @@ public sealed unsafe class CollectablesShopReader
             if (manager is null)
             {
                 sb.AppendLine("インベントリを取得できません。");
-                return;
+                return 0;
             }
 
             var found = 0;
@@ -214,10 +329,13 @@ public sealed unsafe class CollectablesShopReader
             {
                 sb.AppendLine("収集品を持っていません。");
             }
+
+            return found;
         }
         catch (Exception ex)
         {
             sb.AppendLine($"インベントリの読み出しに失敗しました: {ex.Message}");
+            return 0;
         }
     }
 
