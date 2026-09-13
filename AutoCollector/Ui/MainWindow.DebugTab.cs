@@ -262,6 +262,14 @@ public sealed partial class MainWindow
             ImGui.TextColored(ImGuiColors.DalamudYellow, "（交換画面を検出しています）");
         }
 
+        if (orderStore.UnmatchedScreens > 0)
+        {
+            ImGui.TextColored(
+                ImGuiColors.DalamudYellow,
+                $"  種別を特定できなかった画面: {orderStore.UnmatchedScreens} 件" +
+                $"（直近は {orderStore.LastUnmatchedCount} 品）");
+        }
+
         if (ImGui.Button("覚えた並びを消す##clearorder"))
         {
             orderStore.Clear();

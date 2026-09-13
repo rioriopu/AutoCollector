@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -127,6 +127,27 @@ public sealed class InclusionShopOrderStore(AnomalyLog anomalyLog)
         this.dirty = true;
 
         this.anomalyLog.Info("Inclusion", $"並び順を覚えました（SpecialShop {specialShopId} / {itemIds.Count} 件）");
+    }
+
+    /// <summary>特定できなかった画面の件数。原因を追うために数える。</summary>
+    public int UnmatchedScreens { get; private set; }
+
+    /// <summary>直近で特定できなかった画面の品数。</summary>
+    public int LastUnmatchedCount { get; private set; }
+
+    /// <summary>
+    /// 画面は見えたが、どの種別か特定できなかった。
+    /// 覚えられないので、数だけ控えて画面に出す。
+    /// </summary>
+    public void NoteUnmatched(int itemCount)
+    {
+        if (this.LastUnmatchedCount == itemCount)
+        {
+            return;
+        }
+
+        this.LastUnmatchedCount = itemCount;
+        this.UnmatchedScreens++;
     }
 
     /// <summary>覚えたものがあれば保存する。書き込みは間隔を空ける。</summary>
