@@ -1,5 +1,7 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Linq;
+using System.Numerics;
 using AutoCollector.Automation;
 using AutoCollector.Game;
 using Dalamud.Bindings.ImGui;
@@ -31,6 +33,15 @@ public sealed class PresetTab(Plugin plugin)
 
     private string rewardSearch = string.Empty;
     private Guid editingPresetId = Guid.Empty;
+
+    /// <summary>選んでいる系統。ゲーム内の交換画面と同じ並び。</summary>
+    private int categoryIndex;
+
+    /// <summary>選んでいる種別。</summary>
+    private int seriesIndex;
+
+    /// <summary>名前で探した結果。入力が変わるまで使い回す。</summary>
+    private IReadOnlyList<(InclusionCategory Category, InclusionSeries Series, InclusionOffer Offer)>? searchResults;
 
     public void Draw(ref bool select)
     {
@@ -176,6 +187,11 @@ public sealed class PresetTab(Plugin plugin)
         // --- 交換対象 ---
         this.DrawRewardPicker(preset, ref changed);
 
+        if (this.plugin.CurrencyCatalog.TryResolve(preset, out var pickerCurrency))
+        {
+            this.DrawNpcPicker(preset, pickerCurrency, ref changed);
+        }
+
         // --- 閾値 ---
         var thresholdMode = (int)preset.Threshold.Mode;
         ImGui.SetNextItemWidth(280f);
@@ -286,6 +302,18 @@ public sealed class PresetTab(Plugin plugin)
     }
 
     /// <summary>交換対象を、その通貨で実際に買えるものから選ばせる。</summary>
+    /// <summary>
+    /// 交換対象を選ぶ。
+    ///
+    /// ゲーム内のアイテム交換画面と同じ形にしてある。
+    /// 系統（装備品／秘伝書・素材・雑貨／マテリア）を選び、
+    /// その中の種別（Lv90～向け素材 など）を選んでから品が並ぶ。
+    ///
+    /// **品は種別を選んだときに初めて読む。**
+    /// 数百件を五十音順に並べても探せないうえ、全部を先に読むと開いた瞬間に固まる。
+    ///
+    /// 名前しか分からない場合のために、横断検索も残してある。
+    /// </summary>
     private void DrawRewardPicker(ExchangePreset preset, ref bool changed)
     {
         if (!this.plugin.CurrencyCatalog.TryResolve(preset, out var currencyItemId))
@@ -296,71 +324,196 @@ public sealed class PresetTab(Plugin plugin)
 
         ImGui.TextUnformatted($"交換対象: {(preset.RewardItemId == 0 ? "未設定" : ItemName(preset.RewardItemId))}");
 
-        if (!this.plugin.ExchangeResolver.IsBuiltFor(currencyItemId))
-        {
-            if (ImGui.Button("この通貨の交換候補を読み込む"))
-            {
-                this.plugin.ExchangeResolver.BeginBuild(currencyItemId);
-            }
+        var catalog = this.plugin.InclusionShopCatalog;
+        var categories = catalog.ListCategories();
 
-            ImGui.SameLine();
-            ImGui.TextColored(ImGuiColors.DalamudGrey, "読み込むと一覧から選べます");
+        if (categories.Count == 0)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudRed, "交換の一覧を作れませんでした");
             return;
         }
 
-        // 構築済みの索引をこの通貨へ切り替える。
-        // BeginBuild は同じ通貨なら何もしないため、毎フレーム呼んでも作り直しは起きない。
-        this.plugin.ExchangeResolver.BeginBuild(currencyItemId);
-
+        // --- 名前で探す（横断） ---
         ImGui.SetNextItemWidth(280f);
-        ImGui.InputTextWithHint("##rewardsearch", "アイテム名で絞り込み", ref this.rewardSearch, 64);
+        if (ImGui.InputTextWithHint("##rewardsearch", "アイテム名で探す（系統をまたいで探します）", ref this.rewardSearch, 64))
+        {
+            // 入力が変わったときだけ探す。毎フレーム全種別を読むと重い。
+            this.searchResults = null;
+        }
 
-        var groups = this.plugin.ExchangeResolver.GroupByReward(true);
-        var filtered = string.IsNullOrWhiteSpace(this.rewardSearch)
-            ? groups
-            : groups.Where(g => g.RewardName.Contains(this.rewardSearch, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (!string.IsNullOrWhiteSpace(this.rewardSearch))
+        {
+            this.searchResults ??= catalog.Search(this.rewardSearch, currencyItemId);
 
-        using var child = ImRaii.Child("##rewardlist", new System.Numerics.Vector2(0, 140), true);
+            using var searchChild = ImRaii.Child("##searchlist", new Vector2(0, 150), true);
+            if (searchChild)
+            {
+                if (this.searchResults.Count == 0)
+                {
+                    ImGui.TextColored(ImGuiColors.DalamudGrey, "見つかりませんでした");
+                }
+
+                foreach (var (category, series, offer) in this.searchResults)
+                {
+                    if (ImGui.Selectable($"{offer.RewardName}  （{offer.CurrencyCost:N0}）##s{series.SpecialShopId}_{offer.RewardItemId}",
+                            preset.RewardItemId == offer.RewardItemId))
+                    {
+                        preset.RewardItemId = offer.RewardItemId;
+                        preset.PreferredNpcDataId = 0;
+                        changed = true;
+                    }
+
+                    ImGui.SameLine();
+                    ImGui.TextColored(ImGuiColors.DalamudGrey, $"  {ShortCategory(category.Name)} / {series.Name}");
+                }
+            }
+
+            ImGui.TextColored(ImGuiColors.DalamudGrey, "  検索欄を空にすると、系統から辿る表示に戻ります");
+            return;
+        }
+
+        // --- 系統 ---
+        var categoryNames = categories.Select(x => x.Name).ToArray();
+        if (this.categoryIndex >= categoryNames.Length)
+        {
+            this.categoryIndex = 0;
+        }
+
+        ImGui.SetNextItemWidth(360f);
+        if (ImGui.Combo("系統", ref this.categoryIndex, categoryNames, categoryNames.Length))
+        {
+            // 系統が変われば種別の並びも変わる。選び直しになる。
+            this.seriesIndex = 0;
+        }
+
+        var selectedCategory = categories[this.categoryIndex];
+
+        // --- 種別 ---
+        var seriesNames = selectedCategory.Series.Select(x => x.Name).ToArray();
+        if (this.seriesIndex >= seriesNames.Length)
+        {
+            this.seriesIndex = 0;
+        }
+
+        ImGui.SetNextItemWidth(360f);
+        ImGui.Combo("種別", ref this.seriesIndex, seriesNames, seriesNames.Length);
+
+        var selectedSeries = selectedCategory.Series[this.seriesIndex];
+
+        // --- 品（ここで初めて読む） ---
+        var offers = catalog.ListOffers(selectedSeries.SpecialShopId, currencyItemId);
+
+        if (offers.Count == 0)
+        {
+            ImGui.TextColored(
+                ImGuiColors.DalamudGrey,
+                "この種別に、いま選んでいる通貨で買えるものはありません");
+            return;
+        }
+
+        using var child = ImRaii.Child("##rewardlist", new Vector2(0, 170), true);
         if (!child)
         {
             return;
         }
 
-        foreach (var group in filtered.Take(200))
+        foreach (var offer in offers)
         {
-            var selectedItem = preset.RewardItemId == group.RewardItemId;
+            var label = offer.RewardQuantity > 1
+                ? $"{offer.RewardName} ×{offer.RewardQuantity}"
+                : offer.RewardName;
 
-            // 同じアイテムを複数の NPC が扱うことがある。
-            // 1 つ目だけを出すと、行きたい交換所を選べない。
-            using var node = ImRaii.TreeNode(
-                $"{group.RewardName}（{group.Definitions[0].CurrencyCost:N0}）##reward{group.RewardItemId}",
-                selectedItem ? ImGuiTreeNodeFlags.DefaultOpen : ImGuiTreeNodeFlags.None);
-
-            if (!node)
+            if (ImGui.Selectable($"{label}##r{offer.RewardItemId}", preset.RewardItemId == offer.RewardItemId))
             {
-                continue;
+                preset.RewardItemId = offer.RewardItemId;
+
+                // 品が変われば扱う窓口も変わる。前の指定は持ち越さない。
+                preset.PreferredNpcDataId = 0;
+                changed = true;
             }
 
-            foreach (var definition in group.Definitions)
-            {
-                var selected = selectedItem && preset.PreferredNpcDataId == definition.NpcDataId;
-                var area = NpcLocationService.GetTerritoryName(definition.TerritoryId);
-                // アイテム交換画面の自動実行は実装済み。未対応と書いたままだと選べないものに見える。
-                var note = definition.UsesInclusionShop ? "（アイテム交換画面）" : string.Empty;
+            ImGui.SameLine();
+            ImGui.TextColored(ImGuiColors.DalamudGrey, $"  {offer.CurrencyCost:N0}");
+        }
+    }
 
-                if (ImGui.Selectable($"  {definition.NpcName} — {area}{note}##npc{group.RewardItemId}_{definition.NpcDataId}_{definition.ShopId}", selected))
-                {
-                    preset.RewardItemId = group.RewardItemId;
-                    preset.PreferredNpcDataId = definition.NpcDataId;
-                    changed = true;
-                }
+    /// <summary>
+    /// 交換所を指定する。
+    ///
+    /// 同じ品を複数の窓口が扱う。指定しなければ、アクセス済みのエーテライトがある
+    /// エリアから自動で選ぶ。行きつけの街がある場合はここで固定できる。
+    ///
+    /// 窓口の一覧を作るにはゲームデータ全体の走査が要るため、押されたときだけ行う。
+    /// </summary>
+    private void DrawNpcPicker(ExchangePreset preset, uint currencyItemId, ref bool changed)
+    {
+        if (preset.RewardItemId == 0)
+        {
+            return;
+        }
+
+        var resolver = this.plugin.ExchangeResolver;
+
+        if (!resolver.IsBuiltFor(currencyItemId))
+        {
+            ImGui.TextColored(
+                ImGuiColors.DalamudGrey,
+                preset.PreferredNpcDataId == 0
+                    ? "  交換所: 自動で選びます"
+                    : $"  交換所: {NpcLocationService.GetName(preset.PreferredNpcDataId)}（指定中）");
+
+            if (ImGui.SmallButton("交換所を指定する##buildnpc"))
+            {
+                resolver.BeginBuild(currencyItemId);
+            }
+
+            return;
+        }
+
+        // 構築済みの索引をこの通貨へ切り替える。同じ通貨なら作り直しは起きない。
+        resolver.BeginBuild(currencyItemId);
+
+        var group = resolver.GroupByReward(true).FirstOrDefault(x => x.RewardItemId == preset.RewardItemId);
+
+        if (group is null || group.Definitions.Count == 0)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudYellow, "  この品を扱う交換所が見つかりません");
+            return;
+        }
+
+        // 同じ NPC が複数のショップで同じ品を扱うことがある。1 行にまとめる。
+        var npcs = group.Definitions
+            .GroupBy(x => x.NpcDataId)
+            .Select(g => g.First())
+            .ToList();
+
+        var labels = new List<string> { "自動で選ぶ" };
+        labels.AddRange(npcs.Select(x =>
+            $"{x.NpcName} — {NpcLocationService.GetTerritoryName(x.TerritoryId)}"));
+
+        var index = 0;
+        for (var i = 0; i < npcs.Count; i++)
+        {
+            if (npcs[i].NpcDataId == preset.PreferredNpcDataId)
+            {
+                index = i + 1;
+                break;
             }
         }
 
-        if (filtered.Count > 200)
+        ImGui.SetNextItemWidth(360f);
+        if (ImGui.Combo("交換所", ref index, labels.ToArray(), labels.Count))
         {
-            ImGui.TextColored(ImGuiColors.DalamudYellow, $"{filtered.Count - 200} 件は表示していません。絞り込んでください。");
+            preset.PreferredNpcDataId = index == 0 ? 0 : npcs[index - 1].NpcDataId;
+            changed = true;
         }
+    }
+
+    /// <summary>系統名は長いので、検索結果では後半だけを出す。</summary>
+    private static string ShortCategory(string name)
+    {
+        var separator = name.LastIndexOf('：');
+        return separator >= 0 && separator + 1 < name.Length ? name[(separator + 1)..] : name;
     }
 
     private static string ItemName(uint itemId)
