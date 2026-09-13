@@ -341,11 +341,14 @@ public sealed class GoalRunner(
             return false;
         }
 
-        // 2. スクリップはもう足りている。交換して終わらせる。
+        // 2. 目標ぶんのスクリップが貯まった。交換して終わらせる。
+        //
+        // **上限なしのときはここを通らない。** 目標が無いので「貯まった」が常に真になり、
+        // 作りもせず交換へ行き来するだけで終わってしまう。
         //
         // 監視の閾値は問わない。上限まで貯めてから交換する設定にしていると、
         // 目標ぶんが貯まっても閾値に届かず、いつまでも交換されない。
-        if (goal.MissingScrips <= 0)
+        if (!goal.Endless && goal.MissingScrips <= 0)
         {
             if (this.monitor.RequestManualRun(preset, out var exchangeReason))
             {
@@ -358,13 +361,16 @@ public sealed class GoalRunner(
         }
 
         // 3. 納品できる収集品を持っている。納品して貯める。
+        // 上限に達したときの交換も CollectableCycleRunner が面倒をみる。
         if (this.HasDeliverable(goal.CurrencyItemId))
         {
             if (this.cycle.Start(out var cycleReason))
             {
                 this.BeginWaiting(
                     GoalStep.Cycling,
-                    $"納品へ向かいます（あと {goal.MissingScrips:N0} {goal.CurrencyName}）");
+                    goal.Endless
+                        ? "納品へ向かいます"
+                        : $"納品へ向かいます（あと {goal.MissingScrips:N0} {goal.CurrencyName}）");
                 return true;
             }
 
@@ -372,7 +378,31 @@ public sealed class GoalRunner(
         }
 
         // 4 と 5. 作る。
-        return this.BeginCraft(preset, goal, out reason);
+        if (this.BeginCraft(preset, goal, out var craftReason))
+        {
+            return true;
+        }
+
+        // 作れない。持っているスクリップで買えるなら、使い切ってから終わる。
+        //
+        // ここが無いと、素材が尽きた時点で貯めたスクリップが宙に浮く。
+        // 「作れるぶんだけ作って進める」のだから、貯めたぶんも使い切る。
+        if (goal.CheapestCost > 0 && goal.HeldScrips >= goal.CheapestCost)
+        {
+            this.Note($"これ以上作れません: {craftReason}");
+
+            if (this.monitor.RequestManualRun(preset, out var lastReason))
+            {
+                this.BeginWaiting(GoalStep.Exchanging, "貯めたぶんを交換して終わります");
+                return true;
+            }
+
+            reason = $"{craftReason} / 交換も始められません（{lastReason}）";
+            return false;
+        }
+
+        reason = craftReason;
+        return false;
     }
 
     /// <summary>足りないぶんを作る。素材が足りなければ先に取り出す。</summary>
@@ -392,7 +422,8 @@ public sealed class GoalRunner(
             return false;
         }
 
-        if (goal.CollectablesNeeded <= 0)
+        // 上限なしのときは個数を決めない。鞄の空き枠いっぱいまで作る。
+        if (!goal.Endless && goal.CollectablesNeeded <= 0)
         {
             reason = "作る個数を計算できません";
             return false;
@@ -401,7 +432,7 @@ public sealed class GoalRunner(
         var plan = this.craftPlans.BuildPlan(
             preset.CraftCollectableItemId,
             Math.Max(0, preset.CraftKeepFreeSlots),
-            goal.CollectablesNeeded);
+            goal.Endless ? 0 : goal.CollectablesNeeded);
 
         if (plan is null)
         {
@@ -490,7 +521,7 @@ public sealed class GoalRunner(
         var plan = this.craftPlans.BuildPlan(
             preset.CraftCollectableItemId,
             Math.Max(0, preset.CraftKeepFreeSlots),
-            goal.CollectablesNeeded,
+            goal.Endless ? 0 : goal.CollectablesNeeded,
             requireMaterials: true);
 
         if (plan is null || plan.Crafts == 0)
@@ -502,7 +533,9 @@ public sealed class GoalRunner(
             return false;
         }
 
-        this.Note($"素材が足りるぶんまで減らします（{goal.CollectablesNeeded} 個 → {plan.Crafts} 個）");
+        this.Note(goal.Endless
+            ? $"素材が足りるぶんまで減らします（{plan.Crafts} 個）"
+            : $"素材が足りるぶんまで減らします（{goal.CollectablesNeeded} 個 → {plan.Crafts} 個）");
         return this.StartCraft(plan, goal, out reason);
     }
 
@@ -518,7 +551,9 @@ public sealed class GoalRunner(
 
         this.BeginWaiting(
             GoalStep.Crafting,
-            $"{plan.Target.Name} を {plan.Crafts} 個作ります（目標まであと {goal.CollectablesNeeded} 個）");
+            goal.Endless
+                ? $"{plan.Target.Name} を {plan.Crafts} 個作ります"
+                : $"{plan.Target.Name} を {plan.Crafts} 個作ります（目標まであと {goal.CollectablesNeeded} 個）");
         return true;
     }
 
