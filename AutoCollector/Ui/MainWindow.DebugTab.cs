@@ -212,6 +212,52 @@ public sealed partial class MainWindow
         ImGui.Separator();
         ImGui.Spacing();
 
+        // 納品と交換を交互に回す。理想の流れの ③④⑤ に当たる。
+        ImGui.TextUnformatted("納品と交換を繰り返す");
+        ImGui.TextColored(
+            ImGuiColors.DalamudGrey,
+            "納品 → スクリップが上限 → 交換 → 納品へ戻る、を収集品が尽きるまで繰り返します。");
+
+        var cycle = this.plugin.CollectableCycle;
+
+        if (cycle.IsRunning)
+        {
+            ImGui.TextColored(
+                ImGuiColors.DalamudYellow,
+                $"実行中: {cycle.StatusDetail}（{cycle.Cycles} 周 / 納品 {cycle.Deliveries} 回 / 交換 {cycle.Exchanges} 回）");
+
+            if (ImGui.Button("中止する##stopcycle"))
+            {
+                cycle.Stop("ユーザー操作");
+            }
+        }
+        else
+        {
+            using (ImRaii.Disabled(this.plugin.ExchangeExecutor.IsBusy))
+            {
+                if (ImGui.Button("納品と交換の繰り返しを始める##startcycle"))
+                {
+                    if (!cycle.Start(out var cycleFailure))
+                    {
+                        this.plugin.AnomalyLog.Warn("Cycle", cycleFailure);
+                    }
+                }
+            }
+
+            if (!string.IsNullOrEmpty(cycle.StatusDetail))
+            {
+                ImGui.TextColored(ImGuiColors.DalamudGrey, $"  前回: {cycle.StatusDetail}");
+            }
+        }
+
+        ImGui.TextColored(
+            ImGuiColors.DalamudGrey,
+            "  交換の設定が無いスクリップしか生まない収集品は、納品しても上限で止まるため対象にしません");
+
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.Spacing();
+
         // スクリップ交換は系統と種別の 2 段で絞る。
         // どの組み合わせに何が並ぶのかは、画面を切り替えながら見ないと分からない。
         ImGui.TextUnformatted("アイテム交換画面の観測（読み取りのみ）");
