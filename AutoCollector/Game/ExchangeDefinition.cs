@@ -1,4 +1,4 @@
-using System.Numerics;
+﻿using System.Numerics;
 
 namespace AutoCollector.Game;
 
@@ -91,6 +91,40 @@ public sealed record ExchangeDefinition
 
     /// <summary>NPC の座標が解決できているか。false のものは自動実行の対象にしない。</summary>
     public bool HasLocation => this.NpcDataId != 0 && this.TerritoryId != 0;
+
+    /// <summary>
+    /// 収集品の納品のための移動か。
+    ///
+    /// true のとき交換は行わない。窓口に着いて画面が開いたら納品へ引き渡す。
+    /// 移動そのもの（テレポート・エーテライト・徒歩・話しかけ）は交換と同じ道具を使うため、
+    /// 行き先の入れ物としてこの型を借りている。
+    /// </summary>
+    public bool IsCollectableDelivery { get; init; }
+
+    /// <summary>納品窓口への移動を表す定義を作る。交換に関わる値はすべて空にする。</summary>
+    public static ExchangeDefinition ForCollectableDelivery(CollectablesNpc npc) => new()
+    {
+        ShopId = 0,
+        SheetEntryIndex = -1,
+        CurrencyItemId = 0,
+        CurrencyCost = 0,
+        RewardItemId = 0,
+        RewardQuantity = 0,
+        RewardHq = false,
+        CostType = 0,
+        SingleReward = true,
+        SingleCost = true,
+        NpcDataId = npc.NpcDataId,
+        NpcName = npc.NpcName,
+        TerritoryId = npc.TerritoryId,
+        NpcPosition = npc.Position,
+        // 会話メニューが出た場合にどれを選ぶかの手がかり。
+        // シート上の名前（例: 収集品納品）がそのまま選択肢に並ぶ。
+        ShopName = npc.ShopName,
+        // 窓口は CustomTalk 経由。話しかけると会話を挟んでから画面が開く。
+        Path = HandlerPath.CustomTalk,
+        IsCollectableDelivery = true,
+    };
 }
 
 /// <summary>

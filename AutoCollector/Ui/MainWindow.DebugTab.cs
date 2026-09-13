@@ -1,8 +1,10 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using AutoCollector.Automation;
 using AutoCollector.Diagnostics;
+using AutoCollector.Game;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Colors;
 using Dalamud.Interface.Utility.Raii;
@@ -350,13 +352,19 @@ public sealed partial class MainWindow
         ImGui.Separator();
         ImGui.Spacing();
 
-        ImGui.TextUnformatted("納品できる品（動作確認用）");
+        ImGui.TextUnformatted("収集品の納品");
+
+        // 窓口までの移動。画面が開いていなくても押せる必要があるため、
+        // 開いているかの判定より前に置く。
+        this.DrawDeliveryTrip();
+
+        ImGui.Spacing();
 
         var service = this.plugin.CollectablesShopService;
 
         if (!service.IsOpen())
         {
-            ImGui.TextColored(ImGuiColors.DalamudGrey, "納品画面が開いていません。窓口に話しかけてください。");
+            ImGui.TextColored(ImGuiColors.DalamudGrey, "納品画面が開いていません。上のボタンで向かうか、窓口に話しかけてください。");
             return;
         }
 
@@ -575,6 +583,96 @@ public sealed partial class MainWindow
                         $"納品の結果を確認できませんでした: {offer.ItemName} {ownedBefore} → {ownedAfter} / 通貨の増加 {(string.IsNullOrEmpty(gained) ? "なし" : gained)}");
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// 納品窓口へ向かう。
+    ///
+    /// 窓口はゲームデータから探す。ENpcData の CustomTalk を辿り、
+    /// その SpecialLinks が CollectablesShop を指している NPC が窓口になる。
+    /// ID は埋め込まない。
+    /// </summary>
+    private void DrawDeliveryTrip()
+    {
+        var npcService = this.plugin.CollectablesNpcService;
+        var executor = this.plugin.ExchangeExecutor;
+
+        if (!npcService.IsBuilt)
+        {
+            if (ImGui.Button("納品窓口を探す##findcollectnpc"))
+            {
+                // 走査はここで初めて行う。有効化の直後を重くしないため。
+                var list = npcService.List();
+                this.plugin.AnomalyLog.Info("Collectables", $"納品窓口を {list.Count} 件見つけました");
+            }
+
+            ImGui.SameLine();
+            ImGui.TextColored(ImGuiColors.DalamudGrey, "まだ探していません");
+            return;
+        }
+
+        var npcs = npcService.List();
+        var withLocation = npcs.Where(x => x.HasLocation).ToList();
+
+        ImGui.TextColored(
+            ImGuiColors.DalamudGrey,
+            $"窓口 {npcs.Count} 件 / 場所が分かるもの {withLocation.Count} 件");
+
+        if (withLocation.Count == 0)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudRed, "場所の分かる窓口がありません。");
+            return;
+        }
+
+        var destination = npcService.ChooseDestination(Plugin.C.PreferredCollectablesNpcDataId);
+
+        if (destination is not null)
+        {
+            ImGui.TextColored(
+                ImGuiColors.DalamudGrey,
+                $"行き先: {destination.NpcName} — {NpcLocationService.GetTerritoryName(destination.TerritoryId)}");
+        }
+
+        // 行き先を選べるようにしておく。都市によって混み具合が違う。
+        var names = withLocation
+            .Select(x => $"{x.NpcName} — {NpcLocationService.GetTerritoryName(x.TerritoryId)}")
+            .ToArray();
+        var index = withLocation.FindIndex(x => x.NpcDataId == Plugin.C.PreferredCollectablesNpcDataId);
+        var comboIndex = index < 0 ? 0 : index;
+
+        ImGui.SetNextItemWidth(360f);
+        if (ImGui.Combo("行き先を固定##collectnpc", ref comboIndex, names, names.Length))
+        {
+            Plugin.C.PreferredCollectablesNpcDataId = withLocation[comboIndex].NpcDataId;
+            EzConfig.Save();
+        }
+
+        if (index >= 0)
+        {
+            ImGui.SameLine();
+            if (ImGui.Button("固定を解除##clearcollectnpc"))
+            {
+                Plugin.C.PreferredCollectablesNpcDataId = 0;
+                EzConfig.Save();
+            }
+        }
+
+        using (ImRaii.Disabled(destination is null || executor.IsBusy))
+        {
+            if (ImGui.Button("窓口へ移動してまとめて納品する##deliverytrip") && destination is not null)
+            {
+                if (!executor.RequestDeliveryTrip(destination, out var reason))
+                {
+                    this.plugin.AnomalyLog.Warn("Collectables", reason);
+                }
+            }
+        }
+
+        if (executor.IsBusy)
+        {
+            ImGui.SameLine();
+            ImGui.TextColored(ImGuiColors.DalamudYellow, "実行中です");
         }
     }
 }

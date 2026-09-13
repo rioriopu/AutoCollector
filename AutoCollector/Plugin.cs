@@ -43,6 +43,8 @@ public sealed class Plugin : IDalamudPlugin
 
     internal CurrencyCatalog CurrencyCatalog { get; private set; } = null!;
 
+    internal CollectablesNpcService CollectablesNpcService { get; private set; } = null!;
+
     internal ShopService ShopService { get; private set; } = null!;
 
     internal InclusionShopService InclusionShopService { get; private set; } = null!;
@@ -137,6 +139,7 @@ public sealed class Plugin : IDalamudPlugin
         this.CallbackRecorder = new CallbackRecorder(this.AnomalyLog);
         this.CollectablesShopReader = new CollectablesShopReader();
         this.CollectablesShopService = new CollectablesShopService(this.AnomalyLog);
+        this.CollectablesNpcService = new CollectablesNpcService(this.AnomalyLog, this.NpcLocationService);
         this.CollectableDelivery = new CollectableDeliveryRunner(
             this.AnomalyLog, this.CollectablesShopService, this.CurrencyService, this.SpecialCurrencyMap);
 
@@ -166,7 +169,9 @@ public sealed class Plugin : IDalamudPlugin
             this.AutoDuty,
             this.AutoRetainer,
             this.Artisan,
-            this.InclusionShopService);
+            this.InclusionShopService,
+            this.CollectablesShopService,
+            this.CollectableDelivery);
         this.MonitorService = new MonitorService(
             this.AnomalyLog,
             this.CurrencyService,
