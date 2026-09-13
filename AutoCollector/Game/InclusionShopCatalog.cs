@@ -23,12 +23,16 @@ public sealed record InclusionSeries(
 public sealed record InclusionCategory(string Name, string DisplayName, IReadOnlyList<InclusionSeries> Series);
 
 /// <summary>種別の中に並ぶ品 1 件。</summary>
+/// <param name="ClassJobCategory">画面の並べ替えに使う。職ごとにまとまる。</param>
+/// <param name="EquipSlotCategory">画面の並べ替えに使う。職の中で部位順になる。</param>
 public sealed record InclusionOffer(
     uint RewardItemId,
     string RewardName,
     uint RewardQuantity,
     uint CurrencyItemId,
-    uint CurrencyCost);
+    uint CurrencyCost,
+    uint ClassJobCategory,
+    uint EquipSlotCategory);
 
 /// <summary>
 /// アイテム交換画面の中身を、ゲーム内と同じ形で引く。
@@ -385,9 +389,17 @@ public sealed class InclusionShopCatalog(
                     continue;
                 }
 
-                var name = items?.GetRowOrDefault(rewardItemId)?.Name.ExtractText() ?? $"<{rewardItemId}>";
+                var row = items?.GetRowOrDefault(rewardItemId);
+                var name = row?.Name.ExtractText() ?? $"<{rewardItemId}>";
 
-                offers.Add(new InclusionOffer(rewardItemId, name, rewardQuantity, costItemId, costAmount));
+                offers.Add(new InclusionOffer(
+                    rewardItemId,
+                    name,
+                    rewardQuantity,
+                    costItemId,
+                    costAmount,
+                    row?.ClassJobCategory.RowId ?? 0,
+                    row?.EquipSlotCategory.RowId ?? 0));
             }
         }
         catch (Exception ex)
@@ -395,7 +407,21 @@ public sealed class InclusionShopCatalog(
             this.anomalyLog.Warn("Inclusion", $"品を読めませんでした（SpecialShop {specialShopId}）: {ex.Message}");
         }
 
-        return offers;
+        // シートの並びは画面の並びと違う。
+        //
+        // 実測（【ILv55】職人向け装備・48 件）で確かめた。
+        //   シート: 頭(8 職分) → 胴(8 職分) → 脚(8 職分) …  部位ごと
+        //   画面  : 木工[道具・頭・胴・手・脚・足] → 鍛冶[…] …  職ごと
+        //
+        // 職（ClassJobCategory）→ 部位（EquipSlotCategory）の安定ソートで
+        // 48 件すべてが観測と一致した。
+        //
+        // 秘伝書のように職も部位も持たないものは値が揃うため、
+        // 安定ソートによりシートの並びがそのまま残る。こちらも観測と合う。
+        return offers
+            .OrderBy(x => x.ClassJobCategory)
+            .ThenBy(x => x.EquipSlotCategory)
+            .ToList();
     }
 
     /// <summary>
