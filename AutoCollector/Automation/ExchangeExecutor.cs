@@ -67,6 +67,9 @@ public enum ExchangeStep
     /// <summary>収集品を納品している。交換ではなく納品のための移動だった場合に入る。</summary>
     DeliverCollectables,
 
+    /// <summary>納品画面を閉じている。閉じたことを確認してから次へ進む。</summary>
+    CloseDeliveryWindow,
+
     /// <summary>AutoDuty を再開している。</summary>
     ResumeAutoDuty,
 
@@ -260,6 +263,12 @@ public sealed unsafe class ExchangeExecutor(
 
     /// <summary>納品を始められなかった理由。空なら問題なく走った。</summary>
     private string deliveryFailure = string.Empty;
+
+    /// <summary>納品の結果。閉じる段階を挟むため、表示用に持ち越す。</summary>
+    private string deliverySummary = string.Empty;
+
+    /// <summary>納品画面を閉じようとした回数。どの手で閉じたかを記録するために数える。</summary>
+    private int closeAttempts;
 
     private int teleportAttempts;
     private bool aethernetTried;
@@ -738,6 +747,8 @@ public sealed unsafe class ExchangeExecutor(
         this.sawAutoDutyRunning = false;
         this.deliveryStarted = false;
         this.deliveryFailure = string.Empty;
+        this.deliverySummary = string.Empty;
+        this.closeAttempts = 0;
         this.ownership.Clear();
         this.ownership.IsClaiming = true;
 
@@ -778,6 +789,10 @@ public sealed unsafe class ExchangeExecutor(
 
             case ExchangeStep.DeliverCollectables:
                 this.TickDeliverCollectables();
+                return;
+
+            case ExchangeStep.CloseDeliveryWindow:
+                this.TickCloseDeliveryWindow();
                 return;
 
             case ExchangeStep.ResumeAutoDuty:
@@ -1248,9 +1263,76 @@ public sealed unsafe class ExchangeExecutor(
             : this.deliveryFailure;
 
         this.anomalyLog.Info("Collectables", summary);
-        this.Step = ExchangeStep.ResumeAutoDuty;
-        this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(20);
+        this.deliverySummary = summary;
+        this.closeAttempts = 0;
+        this.Step = ExchangeStep.CloseDeliveryWindow;
+        this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(10);
         this.StatusDetail = summary;
+    }
+
+    /// <summary>
+    /// 納品画面を閉じる。
+    ///
+    /// 閉じ方の実測データが無いため、確実な手を 1 つ選べない。
+    /// そこで順に試し、**実際に閉じたことを確認してから**次へ進む。
+    /// どの手が効いたかを記録に残すので、分かった時点で 1 つに絞れる。
+    /// </summary>
+    private void TickCloseDeliveryWindow()
+    {
+        if (!this.collectablesShop.IsOpen())
+        {
+            if (this.closeAttempts > 0)
+            {
+                this.anomalyLog.Info("Cleanup", $"納品画面を閉じました（{this.closeAttempts} 手目）");
+            }
+
+            this.Step = ExchangeStep.ResumeAutoDuty;
+            this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(20);
+            return;
+        }
+
+        // 自分が開いたものでなければ触らない。
+        if (!this.ownership.TryGetOwned("CollectablesShop", out var addon))
+        {
+            this.anomalyLog.Info("Cleanup", "納品画面は自分が開いたものではないため閉じません");
+            this.Step = ExchangeStep.ResumeAutoDuty;
+            this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(20);
+            return;
+        }
+
+        // 押した結果が反映されるまで間を置く。連打しても閉じない。
+        if (!EzThrottler.Throttle("AutoCollector.CloseDelivery", 800))
+        {
+            return;
+        }
+
+        if (DateTime.UtcNow > this.stepDeadlineUtc)
+        {
+            this.anomalyLog.Error("Cleanup", "納品画面を閉じられませんでした。手動で閉じてください");
+            this.Step = ExchangeStep.ResumeAutoDuty;
+            this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(20);
+            return;
+        }
+
+        this.closeAttempts++;
+
+        try
+        {
+            switch (this.closeAttempts)
+            {
+                case 1:
+                    addon->Close(true);
+                    break;
+
+                default:
+                    Callback.Fire(addon, true, -1);
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Warn("Cleanup", $"納品画面を閉じる操作に失敗しました: {ex.Message}");
+        }
     }
 
     private void TickResumeAutoDuty()
@@ -1338,7 +1420,10 @@ public sealed unsafe class ExchangeExecutor(
 
         if (this.Failure == ExchangeFailure.None)
         {
-            this.StatusDetail = "完了しました";
+            // 納品だった場合は、何個納品したかを残す。「完了しました」だけでは分からない。
+            this.StatusDetail = string.IsNullOrEmpty(this.deliverySummary)
+                ? "完了しました"
+                : this.deliverySummary;
         }
     }
 
@@ -1597,6 +1682,15 @@ public sealed unsafe class ExchangeExecutor(
         switch (status)
         {
             case MoveStatus.Arrived:
+                this.navigation.Stop();
+                this.Step = ExchangeStep.Interact;
+                this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(30);
+                this.StatusDetail = $"{target.NpcName} に話しかけています";
+                return;
+
+            case MoveStatus.ShortOfTarget:
+                // 届いていなくても、話しかけられる距離なら用は足りる。
+                // 足りなければ Interact 側が近づき直しを試み、それでも駄目なら失敗する。
                 this.navigation.Stop();
                 this.Step = ExchangeStep.Interact;
                 this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(30);
