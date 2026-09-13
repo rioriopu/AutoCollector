@@ -268,6 +268,8 @@ public sealed partial class MainWindow
             {
                 restock.Stop("ユーザー操作");
             }
+
+            this.DrawRestockTrace(restock);
         }
         else
         {
@@ -315,6 +317,8 @@ public sealed partial class MainWindow
             {
                 ImGui.TextColored(ImGuiColors.DalamudGrey, $"  前回: {restock.StatusDetail}");
             }
+
+            this.DrawRestockTrace(restock);
         }
 
         ImGui.Spacing();
@@ -363,6 +367,40 @@ public sealed partial class MainWindow
 
             ImGui.TableNextColumn();
             ImGui.TextUnformatted(material.NewSlots.ToString());
+        }
+    }
+
+    /// <summary>
+    /// 取り出しの記録を出す。
+    ///
+    /// 押しても何も起きないとき、どこまで進んだのかが分からないと原因を追えない。
+    /// 詳細ログは既定で無効なので、画面にそのまま出す。
+    /// </summary>
+    private void DrawRestockTrace(AutoCollector.Automation.RetainerRestockRunner restock)
+    {
+        if (restock.Trace.Count == 0)
+        {
+            return;
+        }
+
+        ImGui.Spacing();
+        ImGui.TextColored(ImGuiColors.DalamudGrey, $"取り出しの記録（{restock.Trace.Count} 行）");
+
+        ImGui.SameLine();
+        if (ImGui.SmallButton("コピー##copytrace"))
+        {
+            ImGui.SetClipboardText(string.Join(Environment.NewLine, restock.Trace));
+        }
+
+        using var child = ImRaii.Child("##restocktrace", new Vector2(0, 120), true);
+        if (!child)
+        {
+            return;
+        }
+
+        foreach (var line in restock.Trace)
+        {
+            ImGui.TextUnformatted(line);
         }
     }
 }
