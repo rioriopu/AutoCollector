@@ -631,12 +631,12 @@ public sealed partial class MainWindow
         {
             ImGui.TextColored(
                 ImGuiColors.DalamudGrey,
-                $"行き先: {destination.NpcName} — {NpcLocationService.GetTerritoryName(destination.TerritoryId)}");
+                $"行き先: {destination.DisplayName} — {NpcLocationService.GetTerritoryName(destination.TerritoryId)}（{destination.NpcName}）");
         }
 
         // 行き先を選べるようにしておく。都市によって混み具合が違う。
         var names = withLocation
-            .Select(x => $"{x.NpcName} — {NpcLocationService.GetTerritoryName(x.TerritoryId)}")
+            .Select(x => $"{x.DisplayName} — {NpcLocationService.GetTerritoryName(x.TerritoryId)}（{x.NpcName}）")
             .ToArray();
         var index = withLocation.FindIndex(x => x.NpcDataId == Plugin.C.PreferredCollectablesNpcDataId);
         var comboIndex = index < 0 ? 0 : index;
