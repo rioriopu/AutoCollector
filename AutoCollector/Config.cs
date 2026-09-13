@@ -55,11 +55,19 @@ public sealed class ExchangeEntry
     public int Quantity { get; set; } = 1;
 
     /// <summary>
-    /// すでに持っている数がこの値に達していれば飛ばす。0 なら判定しない。
-    ///
-    /// 秘伝書のように 1 冊あれば足りるものを、毎回買い直さないための条件。
+    /// 旧設定。所持数がこの値に達していれば飛ばす、という二択だった。
+    /// <see cref="OwnedLimit"/> へ移すためだけに残す。
     /// </summary>
     public int StopAtOwned { get; set; } = 1;
+
+    /// <summary>
+    /// 所持数の上限。ここまで持つように交換する。0 なら上限なし。
+    ///
+    /// 「持っていたら飛ばす」という二択ではない。
+    /// 上限 5 で 3 個持っているなら、足りない 2 個だけを交換する。
+    /// 持ちすぎないための条件であり、飛ばすのはすでに上限に達している場合だけ。
+    /// </summary>
+    public int OwnedLimit { get; set; } = 1;
 }
 
 /// <summary>1 件の交換設定。</summary>

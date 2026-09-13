@@ -188,14 +188,31 @@ public sealed class Plugin : IDalamudPlugin
                         // 個数指定でなければ上限なしとして扱う。
                         Quantity = preset.Mode == ExchangeMode.FixedQuantity ? Math.Max(1, preset.Quantity) : 0,
 
-                        // 旧設定には「持っていたら飛ばす」に当たるものが無い。
-                        // 勝手に飛ばすと動きが変わるため、判定しない。
+                        // 旧設定には所持の上限に当たるものが無い。
+                        // 勝手に打ち切ると動きが変わるため、上限なしにする。
                         StopAtOwned = 0,
+                        OwnedLimit = 0,
                     });
                 }
             }
 
             C.ConfigVersion = 2;
+            changed = true;
+        }
+
+        if (C.ConfigVersion < 3)
+        {
+            // 「持っていたら飛ばす」を「所持の上限」に変えた。
+            // 飛ばすか否かの二択ではなく、足りないぶんだけ交換する。
+            foreach (var entry in C.Presets.SelectMany(x => x.Rewards))
+            {
+                if (entry.OwnedLimit == 0 && entry.StopAtOwned != 0)
+                {
+                    entry.OwnedLimit = entry.StopAtOwned;
+                }
+            }
+
+            C.ConfigVersion = 3;
             changed = true;
         }
 
