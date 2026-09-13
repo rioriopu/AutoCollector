@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 
 namespace AutoCollector;
@@ -184,6 +184,14 @@ public sealed class Config
 
     /// <summary>NPC へ近づく際の許容距離。</summary>
     public float NpcApproachRange { get; set; } = 3.0f;
+
+    /// <summary>
+    /// 収集品の納品窓口を固定する場合の ENpcBase.RowId。0 なら自動で選ぶ。
+    ///
+    /// 窓口は 9 都市にあり、どれを使っても納品できる。
+    /// 混み具合や周辺の動線の好みがあるため、選べるようにしておく。
+    /// </summary>
+    public uint PreferredCollectablesNpcDataId { get; set; }
 
     /// <summary>SelfCheck でゲームバージョン差分を検知するために、前回起動時のバージョンを保持する。</summary>
     public string? LastSeenGameVersion { get; set; }

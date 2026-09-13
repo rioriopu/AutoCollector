@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
@@ -63,6 +63,9 @@ public enum ExchangeStep
 
     /// <summary>アイテム交換画面の確認ダイアログに答えている。</summary>
     InclusionConfirm,
+
+    /// <summary>収集品を納品している。交換ではなく納品のための移動だった場合に入る。</summary>
+    DeliverCollectables,
 
     /// <summary>AutoDuty を再開している。</summary>
     ResumeAutoDuty,
@@ -201,7 +204,9 @@ public sealed unsafe class ExchangeExecutor(
     AutoDutyIpc autoDuty,
     AutoRetainerIpc autoRetainer,
     ArtisanIpc artisan,
-    InclusionShopService inclusionShop)
+    InclusionShopService inclusionShop,
+    CollectablesShopService collectablesShop,
+    CollectableDeliveryRunner collectableDelivery)
 {
     /// <summary>交換コマンド。0 が購入であることの根拠は実測のみ。他の用途に流用しない。</summary>
     private const int ExchangeCommand = 0;
@@ -247,6 +252,14 @@ public sealed unsafe class ExchangeExecutor(
     private readonly AutoRetainerIpc autoRetainer = autoRetainer;
     private readonly ArtisanIpc artisan = artisan;
     private readonly InclusionShopService inclusionShop = inclusionShop;
+    private readonly CollectablesShopService collectablesShop = collectablesShop;
+    private readonly CollectableDeliveryRunner collectableDelivery = collectableDelivery;
+
+    /// <summary>納品を開始済みか。開始と終了の区別に使う。</summary>
+    private bool deliveryStarted;
+
+    /// <summary>納品を始められなかった理由。空なら問題なく走った。</summary>
+    private string deliveryFailure = string.Empty;
 
     private int teleportAttempts;
     private bool aethernetTried;
@@ -292,6 +305,9 @@ public sealed unsafe class ExchangeExecutor(
     /// 代入箇所が多く、どこで何に移ったかを追うのが難しい。
     /// 遷移のたびに詳細ログへ残し、そのときの外部プラグインの状態も一緒に記録する。
     /// </summary>
+    /// <summary>いま動いているか。UI でボタンを塞ぐために使う。</summary>
+    public bool IsBusy => this.Step is not (ExchangeStep.Idle or ExchangeStep.Done or ExchangeStep.Error);
+
     public ExchangeStep Step
     {
         get => this.step;
@@ -553,6 +569,7 @@ public sealed unsafe class ExchangeExecutor(
             // 4. ショップ本体
             this.CloseOwned("ShopExchangeCurrency", useCloseFirst: true);
         this.CloseOwned("InclusionShop", useCloseFirst: true);
+        this.CloseOwned("CollectablesShop", useCloseFirst: true);
 
             // 5. 会話メニューの残骸
             this.CloseOwned("SelectString", useCloseFirst: false);
@@ -643,6 +660,23 @@ public sealed unsafe class ExchangeExecutor(
     public bool RequestWithTravel(ExchangeDefinition definition, out string reason)
         => this.RequestWithTravel(definition, new ExchangeSession { Mode = ExchangeMode.FixedQuantity, RemainingCount = 1 }, out reason);
 
+    /// <summary>
+    /// 収集品の納品窓口へ向かい、着いたらまとめて納品する。
+    ///
+    /// 移動の仕組みは交換と同じものを使う。安全な状態になるまで待ち、
+    /// 外部プラグインを抑制し、AutoDuty を止めてから動き出す点も同じ。
+    /// </summary>
+    public bool RequestDeliveryTrip(CollectablesNpc npc, out string reason)
+    {
+        var definition = ExchangeDefinition.ForCollectableDelivery(npc);
+
+        // 納品は交換ではないため、この値は使われない。Armed まで進まないため。
+        // 終わりは納品側が「納品できる品が無くなったか、スクリップが全部上限か」で決める。
+        var session = new ExchangeSession { Mode = ExchangeMode.MaxExchange };
+
+        return this.RequestWithTravel(definition, session, out reason);
+    }
+
     /// <summary>交換の回数や終了条件を指定して実行する。</summary>
     public bool RequestWithTravel(ExchangeDefinition definition, ExchangeSession session, out string reason)
     {
@@ -702,6 +736,8 @@ public sealed unsafe class ExchangeExecutor(
         this.nextArmedAllowedUtc = DateTime.MinValue;
         this.stopAttempts = 0;
         this.sawAutoDutyRunning = false;
+        this.deliveryStarted = false;
+        this.deliveryFailure = string.Empty;
         this.ownership.Clear();
         this.ownership.IsClaiming = true;
 
@@ -739,6 +775,10 @@ public sealed unsafe class ExchangeExecutor(
             case ExchangeStep.StopAutoDuty:
                 this.TickStopAutoDuty();
                 break;
+
+            case ExchangeStep.DeliverCollectables:
+                this.TickDeliverCollectables();
+                return;
 
             case ExchangeStep.ResumeAutoDuty:
                 this.TickResumeAutoDuty();
@@ -1149,6 +1189,70 @@ public sealed unsafe class ExchangeExecutor(
     /// 停止前に動いていた場合だけ再開する。ユーザー自身が止めていたものを勝手に開始しない。
     /// 周回カウンタは AutoDuty 側から復元する手段がないため 0 から数え直しになる。
     /// </summary>
+    /// <summary>
+    /// 収集品を納品する。
+    ///
+    /// 実際の納品は <see cref="CollectableDeliveryRunner"/> が行う。
+    /// ここは、窓口に着いて画面が開いたあとの引き渡しと、終わったかの見張りだけを持つ。
+    ///
+    /// 納品は品数ぶん繰り返すため時間がかかる。締切は移動より長く取ってある。
+    /// </summary>
+    private void TickDeliverCollectables()
+    {
+        // 走っている間は見張るだけ。
+        if (this.collectableDelivery.IsRunning)
+        {
+            this.StatusDetail = this.collectableDelivery.StatusDetail;
+
+            if (DateTime.UtcNow > this.stepDeadlineUtc)
+            {
+                this.anomalyLog.Error("Collectables", "納品が終わりませんでした");
+                this.Failure = ExchangeFailure.Aborted;
+                this.Step = ExchangeStep.ResumeAutoDuty;
+                this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(20);
+            }
+
+            return;
+        }
+
+        // まだ始めていなければ始める。
+        if (!this.deliveryStarted)
+        {
+            if (!this.collectablesShop.IsOpen())
+            {
+                if (DateTime.UtcNow > this.stepDeadlineUtc)
+                {
+                    this.Fail(ExchangeFailure.ShopNotOpen, "納品画面が開きませんでした");
+                }
+
+                return;
+            }
+
+            if (!this.collectableDelivery.Start(out var reason))
+            {
+                // 納品できる品が無い場合もここへ来る。異常ではないので止めずに終える。
+                this.anomalyLog.Info("Collectables", $"納品しませんでした: {reason}");
+                this.deliveryFailure = reason;
+                this.deliveryStarted = true;
+                return;
+            }
+
+            this.deliveryStarted = true;
+            this.anomalyLog.Info("Collectables", "納品を始めます");
+            return;
+        }
+
+        // 走り終わった。結果は納品側が記録している。
+        var summary = string.IsNullOrEmpty(this.deliveryFailure)
+            ? $"納品を終えました（{this.collectableDelivery.Delivered} 個）"
+            : this.deliveryFailure;
+
+        this.anomalyLog.Info("Collectables", summary);
+        this.Step = ExchangeStep.ResumeAutoDuty;
+        this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(20);
+        this.StatusDetail = summary;
+    }
+
     private void TickResumeAutoDuty()
     {
         var context = this.returnContext;
@@ -1528,8 +1632,20 @@ public sealed unsafe class ExchangeExecutor(
             return;
         }
 
-        // アイテム交換画面（スクリップ等）は系統と種別を選んでから中身が入る。
-        if (target.UsesInclusionShop)
+        // 納品のための移動なら、収集品の画面が開いた時点で納品へ渡す。
+        // 交換用の判定より先に見る。納品画面はショップ扱いではないため、
+        // 後ろに置くと会話の処理へ落ちてしまう。
+        if (target.IsCollectableDelivery)
+        {
+            if (this.collectablesShop.IsOpen())
+            {
+                this.Step = ExchangeStep.DeliverCollectables;
+                this.stepDeadlineUtc = DateTime.UtcNow.AddMinutes(10);
+                this.StatusDetail = "収集品を納品しています";
+                return;
+            }
+        }
+        else if (target.UsesInclusionShop)
         {
             if (this.inclusionShop.IsOpen())
             {
@@ -1624,7 +1740,20 @@ public sealed unsafe class ExchangeExecutor(
             return;
         }
 
-        if (this.shopService.IsShopOpen())
+        // 納品のための移動なら、交換の発火段階（Armed）へ入れてはいけない。
+        // 納品の定義は交換に関わる値をすべて空にしてあるため、
+        // そこへ入ると中身の無い交換を撃とうとする。
+        if (target.IsCollectableDelivery)
+        {
+            if (this.collectablesShop.IsOpen())
+            {
+                this.Step = ExchangeStep.DeliverCollectables;
+                this.stepDeadlineUtc = DateTime.UtcNow.AddMinutes(10);
+                this.StatusDetail = "収集品を納品しています";
+                return;
+            }
+        }
+        else if (this.shopService.IsShopOpen())
         {
             this.pendingRequest = target;
             this.Step = ExchangeStep.Armed;
@@ -1714,6 +1843,17 @@ public sealed unsafe class ExchangeExecutor(
     /// </summary>
     private void TickArmed()
     {
+        // 納品の定義がここへ来ることは無いはずだが、来たら撃たずに止める。
+        // 交換に関わる値をすべて空にしてあるため、進むと中身の無い交換を撃つことになる。
+        if (this.travelTarget?.IsCollectableDelivery == true ||
+            this.pendingRequest?.IsCollectableDelivery == true)
+        {
+            this.anomalyLog.Error("Exchange", "納品の行き先で交換を撃とうとしました。中止します");
+            this.pendingRequest = null;
+            this.Fail(ExchangeFailure.Aborted, "納品の行き先では交換できません");
+            return;
+        }
+
         // 前回の交換の反映が終わるまで待つ。
         // ここで待たないと、前回分がまだ届いていない所持数で検証してしまう。
         if (DateTime.UtcNow < this.nextArmedAllowedUtc)
