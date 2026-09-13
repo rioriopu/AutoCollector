@@ -51,6 +51,10 @@ public sealed class Plugin : IDalamudPlugin
 
     internal InclusionShopOrderStore InclusionShopOrderStore { get; private set; } = null!;
 
+    internal CollectableRewardService CollectableRewardService { get; private set; } = null!;
+
+    internal CollectableCycleRunner CollectableCycle { get; private set; } = null!;
+
     internal ShopService ShopService { get; private set; } = null!;
 
     internal InclusionShopService InclusionShopService { get; private set; } = null!;
@@ -244,6 +248,7 @@ public sealed class Plugin : IDalamudPlugin
         this.CollectablesShopService = new CollectablesShopService(this.AnomalyLog);
         this.CollectablesNpcService = new CollectablesNpcService(this.AnomalyLog, this.NpcLocationService);
         this.InclusionShopOrderStore = new InclusionShopOrderStore(this.AnomalyLog);
+        this.CollectableRewardService = new CollectableRewardService(this.AnomalyLog, this.SpecialCurrencyMap);
         this.InclusionShopCatalog = new InclusionShopCatalog(
             this.AnomalyLog, this.TomestoneService, this.SpecialCurrencyMap, this.InclusionShopOrderStore);
         this.CollectableDelivery = new CollectableDeliveryRunner(
@@ -286,6 +291,14 @@ public sealed class Plugin : IDalamudPlugin
             this.ExchangeResolver,
             this.ExchangeExecutor,
             this.AutomationGate);
+        this.CollectableCycle = new CollectableCycleRunner(
+            this.AnomalyLog,
+            this.ExchangeExecutor,
+            this.MonitorService,
+            this.CollectablesNpcService,
+            this.CollectableRewardService,
+            this.CurrencyService,
+            this.SpecialCurrencyMap);
         this.AutoDutySetup = new AutoDutySetup(this.AutoDuty, this.AnomalyLog);
         this.AutoDutyKeeper = new AutoDutyKeeper(
             this.AnomalyLog,
@@ -407,6 +420,7 @@ public sealed class Plugin : IDalamudPlugin
             this.MonitorService.Tick();
             this.AutoDutyKeeper.Tick();
             this.CollectableDelivery.Tick();
+            this.CollectableCycle.Tick();
 
             // 納品画面が開いた瞬間を捉えて自動でダンプする。読み取りのみ。
             this.CollectablesShopReader.Tick(ResolveLogDirectory());
