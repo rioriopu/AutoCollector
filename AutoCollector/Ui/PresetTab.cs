@@ -606,20 +606,20 @@ public sealed class PresetTab(Plugin plugin)
 
                     ImGui.SameLine();
 
-                    var stopAt = entry.StopAtOwned;
+                    var limit = entry.OwnedLimit;
                     ImGui.SetNextItemWidth(90f);
-                    if (ImGui.InputInt("持っていたら飛ばす##own", ref stopAt))
+                    if (ImGui.InputInt("所持の上限##own", ref limit))
                     {
-                        entry.StopAtOwned = Math.Max(0, stopAt);
+                        entry.OwnedLimit = Math.Max(0, limit);
                         changed = true;
                     }
 
                     if (ImGui.IsItemHovered())
                     {
                         ImGui.SetTooltip(
-                            "いまの所持数がこの数以上なら、この品は交換しません。" +
-                            "0 にすると所持数を見ません。" +
-                            "秘伝書のように 1 つあれば足りるものに使います。");
+                            "この数まで持つように交換します。足りないぶんだけ交換します。" +
+                            "上限 5 で 3 個持っているなら 2 個だけ交換します。" +
+                            "0 にすると上限なし。");
                     }
 
                     ImGui.SameLine();
@@ -630,11 +630,21 @@ public sealed class PresetTab(Plugin plugin)
                         ? $"所持 {have}"
                         : "所持 ?";
 
-                    var skipped = entry.StopAtOwned > 0 && have >= entry.StopAtOwned;
+                    // 上限まで何個足りないかを出す。実行前に結果が分かるようにする。
+                    if (entry.OwnedLimit > 0)
+                    {
+                        var shortfall = entry.OwnedLimit - have;
 
-                    ImGui.TextColored(
-                        skipped ? ImGuiColors.DalamudYellow : ImGuiColors.DalamudGrey,
-                        skipped ? $"{ownedText} → 飛ばします" : ownedText);
+                        ImGui.TextColored(
+                            shortfall <= 0 ? ImGuiColors.DalamudYellow : ImGuiColors.DalamudGrey,
+                            shortfall <= 0
+                                ? $"{ownedText} / 上限 {entry.OwnedLimit} → 飛ばします"
+                                : $"{ownedText} / 上限 {entry.OwnedLimit} → あと {Math.Min(shortfall, entry.Quantity > 0 ? entry.Quantity : shortfall)} 個");
+                    }
+                    else
+                    {
+                        ImGui.TextColored(ImGuiColors.DalamudGrey, ownedText);
+                    }
 
                     if (entry.Quantity == 0)
                     {
@@ -645,8 +655,8 @@ public sealed class PresetTab(Plugin plugin)
             }
         }
 
-        ImGui.TextColored(ImGuiColors.DalamudGrey, "  交換する数　　  … 何個交換するか。0 で上限なし");
-        ImGui.TextColored(ImGuiColors.DalamudGrey, "  持っていたら飛ばす … その数だけ持っていれば交換しない。0 で判定しない");
+        ImGui.TextColored(ImGuiColors.DalamudGrey, "  交換する数 … 1 回でこの数まで交換する。0 で上限なし");
+        ImGui.TextColored(ImGuiColors.DalamudGrey, "  所持の上限 … この数まで持つように交換する。足りないぶんだけ。0 で上限なし");
 
         if (remove is not null)
         {

@@ -182,8 +182,11 @@ public sealed class ExchangeTarget
     /// <summary>残りの交換回数。<see cref="Unlimited"/> が true のときは見ない。</summary>
     public int Remaining { get; set; }
 
-    /// <summary>所持数がこれに達していれば交換しない。0 なら判定しない。</summary>
-    public int StopAtOwned { get; init; }
+    /// <summary>
+    /// 所持数の上限。ここまで持つように交換する。0 なら上限なし。
+    /// 足りないぶんだけ交換し、すでに達していれば飛ばす。
+    /// </summary>
+    public int OwnedLimit { get; init; }
 
     /// <summary>この品を交換した回数。</summary>
     public int Completed { get; set; }
@@ -2584,7 +2587,25 @@ public sealed unsafe class ExchangeExecutor(
 
         var rewardName = Svc.Data.GetExcelSheet<Item>()?.GetRowOrDefault(definition.RewardItemId)?.Name.ExtractText() ?? string.Empty;
 
-        var amount = this.DecideBatchAmount(definition, entry, currencyBefore, (int)freeSlots, keepFree);
+        var amount = this.DecideBatchAmount(definition, entry, currencyBefore, rewardBefore, (int)freeSlots, keepFree);
+
+        // 所持の上限に達している。この品は撃たずに次へ。
+        if (amount <= 0)
+        {
+            this.anomalyLog.Info(
+                "Exchange",
+                $"{rewardName} は所持の上限に達しているため交換しません（所持 {rewardBefore}）");
+
+            if (this.TryAdvanceToNextTarget("所持の上限に達しています"))
+            {
+                return;
+            }
+
+            this.Step = ExchangeStep.ResumeAutoDuty;
+            this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(20);
+            this.StatusDetail = "所持の上限に達しました";
+            return;
+        }
 
         // ここから先は不可逆。記録を先に立ててから撃つ。
         //
@@ -2983,9 +3004,25 @@ public sealed unsafe class ExchangeExecutor(
         ExchangeDefinition definition,
         InclusionShopEntry entry,
         int currencyBefore,
+        int rewardBefore,
         int freeSlots,
         int keepFree)
     {
+        // 所持の上限。足りないぶんだけ交換する。
+        // 画面が数量を選べない品でも、この判定だけは効かせる必要がある。
+        var room = int.MaxValue;
+        if (this.session?.Current is { OwnedLimit: > 0 } limited)
+        {
+            room = Math.Max(0, limited.OwnedLimit - rewardBefore);
+        }
+
+        // 上限に達している。撃ってはいけない。
+        if (room <= 0)
+        {
+            return 0;
+        }
+
+        // 数量を選べない品は 1 個ずつ。
         if (!entry.CanSelectAmount || definition.CurrencyCost == 0)
         {
             return 1;
@@ -3012,6 +3049,7 @@ public sealed unsafe class ExchangeExecutor(
         var bagRoom = Math.Max(1, freeSlots - keepFree);
 
         var amount = Math.Min(Math.Min(affordable, wanted), Math.Min(bagRoom, MaxBatchAmount));
+        amount = Math.Min(amount, room);
 
         return Math.Max(1, amount);
     }
@@ -3059,10 +3097,10 @@ public sealed unsafe class ExchangeExecutor(
                 continue;
             }
 
-            // すでに十分持っているものは飛ばす。装備はアーマリーに入るため、そちらも数える。
-            if (next.StopAtOwned > 0 &&
+            // すでに上限まで持っているものは飛ばす。装備はアーマリーに入るため、そちらも数える。
+            if (next.OwnedLimit > 0 &&
                 this.currencyService.TryGetCount(next.Definition.RewardItemId, out var owned, false, true) &&
-                owned >= next.StopAtOwned)
+                owned >= next.OwnedLimit)
             {
                 this.anomalyLog.Info(
                     "Exchange",

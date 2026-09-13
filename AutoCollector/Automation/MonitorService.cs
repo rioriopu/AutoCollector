@@ -530,14 +530,14 @@ public sealed class MonitorService(
                 Definition = definition,
                 Unlimited = entry.Quantity <= 0,
                 Remaining = Math.Max(0, entry.Quantity),
-                StopAtOwned = entry.StopAtOwned,
+                OwnedLimit = entry.OwnedLimit,
             });
         }
 
         return targets;
     }
 
-    /// <summary>この品を飛ばすか。十分持っている、またはゲームに拒まれた品。</summary>
+    /// <summary>この品を飛ばすか。上限まで持っている、またはゲームに拒まれた品。</summary>
     private bool IsSatisfied(ExchangeEntry entry)
     {
         // ゲームが購入を拒む品（習得済みの秘伝書など）は毎回試さない。
@@ -546,12 +546,12 @@ public sealed class MonitorService(
             return true;
         }
 
-        if (entry.StopAtOwned <= 0)
+        if (entry.OwnedLimit <= 0)
         {
             return false;
         }
 
         return this.currencyService.TryGetCount(entry.RewardItemId, out var owned, false, true) &&
-               owned >= entry.StopAtOwned;
+               owned >= entry.OwnedLimit;
     }
 }
