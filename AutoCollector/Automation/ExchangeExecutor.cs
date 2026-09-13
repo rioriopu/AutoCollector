@@ -168,6 +168,24 @@ public sealed class PurchaseAttempt
 /// 一度ショップを開いたら、条件を満たす限り続けて交換する。
 /// 交換のたびに移動し直すのは無駄が大きい。
 /// </summary>
+/// <summary>1 回の移動で交換する品の 1 件分。</summary>
+public sealed class ExchangeTarget
+{
+    public required ExchangeDefinition Definition { get; init; }
+
+    /// <summary>上限を設けないか。true なら回数では止めない。</summary>
+    public bool Unlimited { get; init; }
+
+    /// <summary>残りの交換回数。<see cref="Unlimited"/> が true のときは見ない。</summary>
+    public int Remaining { get; set; }
+
+    /// <summary>所持数がこれに達していれば交換しない。0 なら判定しない。</summary>
+    public int StopAtOwned { get; init; }
+
+    /// <summary>この品を交換した回数。</summary>
+    public int Completed { get; set; }
+}
+
 public sealed class ExchangeSession
 {
     /// <summary>暴走への歯止め。この回数を超えたら理由に関わらず打ち切る。</summary>
@@ -189,6 +207,20 @@ public sealed class ExchangeSession
 
     /// <summary>このセッションを開始したプリセット。監視からの実行時のみ設定される。</summary>
     public Guid PresetId { get; init; }
+
+    /// <summary>
+    /// この移動で交換する品の並び。上から順に進める。
+    ///
+    /// 空なら従来どおり 1 品だけを扱う（手動実行など）。
+    /// </summary>
+    public List<ExchangeTarget> Targets { get; init; } = [];
+
+    /// <summary>いま扱っている品の位置。</summary>
+    public int TargetIndex { get; set; }
+
+    /// <summary>いま扱っている品。並びが空なら null。</summary>
+    public ExchangeTarget? Current
+        => this.TargetIndex >= 0 && this.TargetIndex < this.Targets.Count ? this.Targets[this.TargetIndex] : null;
 }
 
 /// <summary>
@@ -2818,6 +2850,15 @@ public sealed unsafe class ExchangeExecutor(
                 {
                     current.RemainingCount--;
                 }
+
+                if (current.Current is { } finishedTarget)
+                {
+                    finishedTarget.Completed++;
+                    if (!finishedTarget.Unlimited && finishedTarget.Remaining > 0)
+                    {
+                        finishedTarget.Remaining--;
+                    }
+                }
             }
 
             // まだ交換を続ける条件を満たしているなら、同じショップでもう一度行う。
@@ -2828,6 +2869,12 @@ public sealed unsafe class ExchangeExecutor(
                 this.Step = ExchangeStep.Armed;
                 this.nextArmedAllowedUtc = DateTime.UtcNow.Add(SettleBetweenExchanges);
                 this.StatusDetail = $"{this.session?.Completed ?? 0} 回交換しました。続けます";
+                return true;
+            }
+
+            // この品は終わり。交換リストに次があれば、同じ窓口で続ける。
+            if (this.TryAdvanceToNextTarget(stopReason))
+            {
                 return true;
             }
 
@@ -2858,6 +2905,81 @@ public sealed unsafe class ExchangeExecutor(
     /// 判断材料が足りない場合は「続けない」に倒す。
     /// 買いすぎは取り返しがつかないため、迷ったら止める。
     /// </summary>
+    /// <summary>
+    /// 交換リストの次の品へ進む。
+    ///
+    /// **いま行っている窓口で扱えるものだけを続ける。**
+    /// 別の窓口の品まで追いかけると、移動を繰り返して手に負えなくなる。
+    /// 扱えなかったものは次回の判定で拾う。
+    ///
+    /// 交換画面は開いたままなので、品を探し直すところから再開する。
+    /// </summary>
+    private bool TryAdvanceToNextTarget(string previousStopReason)
+    {
+        var current = this.session;
+
+        if (current is null || current.Targets.Count == 0)
+        {
+            return false;
+        }
+
+        var currentNpc = this.travelTarget?.NpcDataId ?? 0;
+
+        while (current.TargetIndex + 1 < current.Targets.Count)
+        {
+            current.TargetIndex++;
+
+            var next = current.Current;
+            if (next is null)
+            {
+                break;
+            }
+
+            if (currentNpc != 0 && next.Definition.NpcDataId != currentNpc)
+            {
+                this.anomalyLog.Info(
+                    "Exchange",
+                    $"{next.Definition.RewardItemId} は別の窓口のため、この移動では交換しません");
+                continue;
+            }
+
+            // すでに十分持っているものは飛ばす。装備はアーマリーに入るため、そちらも数える。
+            if (next.StopAtOwned > 0 &&
+                this.currencyService.TryGetCount(next.Definition.RewardItemId, out var owned, false, true) &&
+                owned >= next.StopAtOwned)
+            {
+                this.anomalyLog.Info(
+                    "Exchange",
+                    $"{next.Definition.RewardItemId} は すでに {owned} 個あるため飛ばします");
+                continue;
+            }
+
+            this.anomalyLog.Info("Exchange", $"次の品へ進みます（前の品: {previousStopReason}）");
+
+            this.travelTarget = next.Definition;
+            this.nextArmedAllowedUtc = DateTime.UtcNow.Add(SettleBetweenExchanges);
+            this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(30);
+
+            if (next.Definition.UsesInclusionShop)
+            {
+                // 種別が違うかもしれない。探し直すところから。
+                this.pendingRequest = null;
+                this.Step = ExchangeStep.SelectInclusionCategory;
+                this.StatusDetail = "次の品の種別を選んでいます";
+            }
+            else
+            {
+                this.pendingRequest = next.Definition;
+                this.Step = ExchangeStep.Armed;
+                this.StatusDetail = "次の品の交換を確認しています";
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
     private bool ShouldContinueSession(int currencyAfter, int rewardAfter, out string stopReason)
     {
         stopReason = string.Empty;
@@ -2870,6 +2992,9 @@ public sealed unsafe class ExchangeExecutor(
             stopReason = "セッションが設定されていません";
             return false;
         }
+
+        // 交換リストを使っている場合、回数はその品ごとに数える。
+        var target = current.Current;
 
         if (current.Completed >= ExchangeSession.HardLimit)
         {
@@ -2896,6 +3021,26 @@ public sealed unsafe class ExchangeExecutor(
         {
             stopReason = $"所持枠の空きが {freeSlots} になりました（{keepFree} 枠を残す設定）";
             return false;
+        }
+
+        // 交換リストを使っている場合、回数はその品ごとに数える。
+        // プリセット全体のモードは「残す通貨量」の歯止めとしてだけ効かせる。
+        if (target is not null)
+        {
+            if (!target.Unlimited && target.Remaining <= 0)
+            {
+                stopReason = "この品は指定した数だけ交換しました";
+                return false;
+            }
+
+            if (current.Mode == ExchangeMode.UntilCurrencyReserve &&
+                currencyAfter - definition.CurrencyCost < current.CurrencyReserve)
+            {
+                stopReason = $"残す通貨量 {current.CurrencyReserve} に達しました";
+                return false;
+            }
+
+            return true;
         }
 
         switch (current.Mode)
