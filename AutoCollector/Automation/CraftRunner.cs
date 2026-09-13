@@ -60,6 +60,9 @@ public sealed class CraftRunner(
     private readonly List<CraftStep> steps = [];
     private readonly List<string> trace = [];
 
+    /// <summary>数え方の食い違いを記録した品。同じことを何度も書かないため。</summary>
+    private readonly HashSet<uint> notedMismatch = [];
+
     private int index;
     private DateTime deadlineUtc = DateTime.MinValue;
 
@@ -112,12 +115,17 @@ public sealed class CraftRunner(
 
         if (plan.Crafts > 0)
         {
+            // 回数 × 1 回でできる数。そこへすでに持っているぶんを足す。
+            // 足さないと、作る前から持っていたぶんだけ足りない扱いになり、
+            // 作り終えても終わったと分からない。
+            var perCraft = Math.Max(1, plan.Target.AmountResult);
+
             list.Add(new CraftStep(
                 plan.Target.RecipeId,
                 plan.Crafts,
                 plan.Target.Name,
                 plan.Target.ItemId,
-                plan.Crafts));
+                plan.TargetHeld + (plan.Crafts * perCraft)));
         }
 
         return list;
@@ -128,6 +136,7 @@ public sealed class CraftRunner(
     {
         this.LastFailure = string.Empty;
         this.trace.Clear();
+        this.notedMismatch.Clear();
 
         if (this.IsRunning)
         {
@@ -201,9 +210,7 @@ public sealed class CraftRunner(
             return;
         }
 
-        var have = this.currency.TryGetCount(step.ResultItemId, out var count, includeEquipped: true, includeArmory: true)
-            ? count
-            : 0;
+        var have = this.Held(step.ResultItemId);
 
         // 目標に届いたら次へ。Artisan の状態ではなく所持数で見る。
         if (have >= step.ExpectedCount)
@@ -275,9 +282,7 @@ public sealed class CraftRunner(
         }
 
         // すでに足りているなら頼まない。
-        var have = this.currency.TryGetCount(step.ResultItemId, out var count, includeEquipped: true, includeArmory: true)
-            ? count
-            : 0;
+        var have = this.Held(step.ResultItemId);
 
         if (have >= step.ExpectedCount)
         {
@@ -304,6 +309,34 @@ public sealed class CraftRunner(
         this.Step = CraftRunStep.Starting;
         this.StatusDetail = $"{step.Name} の製作を始めています";
         this.deadlineUtc = DateTime.UtcNow.Add(StartLimit);
+    }
+
+    /// <summary>
+    /// 所持数。**鞄の枠を直接見る。**
+    ///
+    /// 収集品は <c>GetInventoryItemCount</c> では数えられない（2026-09-13 実測）。
+    /// 終わりを所持数で判定する以上、ここを間違えると作り終えても気づけず、
+    /// 「素材が足りない」と誤って止まる。
+    ///
+    /// 食い違ったときは記録に残す。理由を後から追えるようにしておく。
+    /// </summary>
+    private int Held(uint itemId)
+    {
+        var bag = this.currency.TryGetBagCount(itemId, out var count) ? count : 0;
+
+        // 一度書いたら以後は数えない。毎フレーム 2 回数える必要はない。
+        if (!this.notedMismatch.Contains(itemId))
+        {
+            var legacy = this.currency.TryGetCount(itemId, out var old) ? old : 0;
+
+            if (bag != legacy)
+            {
+                this.notedMismatch.Add(itemId);
+                this.Note($"所持数の数え方が食い違います（枠を数えて {bag} 個 / 従来の方法で {legacy} 個）");
+            }
+        }
+
+        return bag;
     }
 
     private void Note(string text)

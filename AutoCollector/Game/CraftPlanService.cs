@@ -20,7 +20,8 @@ public sealed record CraftableCollectable(
     int ClassJobLevel,
     long NotebookOrder,
     uint CurrencyItemId,
-    ushort HighReward);
+    ushort HighReward,
+    int AmountResult);
 
 /// <summary>選べるジョブ 1 件。</summary>
 public sealed record CraftJob(uint CraftType, string Name);
@@ -52,19 +53,25 @@ public sealed record PlanMaterial(
     IReadOnlyList<PlanMaterial> SubMaterials);
 
 /// <summary>作る計画。</summary>
+/// <param name="TargetHeld">
+/// 計画を立てた時点で、作る物をすでに何個持っているか。
+/// 終わりの判定は所持数で行うため、これを足さないと最初から達成済みに見えたり、
+/// いつまでも届かなかったりする。
+/// </param>
 public sealed record CraftPlan(
     CraftableCollectable Target,
     int Crafts,
     int FreeSlots,
     int KeepFree,
     IReadOnlyList<PlanMaterial> Materials,
-    IReadOnlyList<string> Notes);
+    IReadOnlyList<string> Notes,
+    int TargetHeld = 0);
 
 /// <summary>製作の 1 手順。</summary>
 /// <param name="RecipeId">作らせるレシピ。</param>
 /// <param name="Crafts">何回作らせるか。個数ではない。</param>
 /// <param name="ResultItemId">できあがる品。所持数で終わりを確かめる。</param>
-/// <param name="ExpectedCount">終わったときに持っているはずの数。</param>
+/// <param name="ExpectedCount">終わったときに持っているはずの数。すでに持っているぶんを含む。</param>
 public sealed record CraftStep(uint RecipeId, int Crafts, string Name, uint ResultItemId, int ExpectedCount);
 
 /// <summary>
@@ -223,7 +230,8 @@ public sealed class CraftPlanService(
                     level,
                     notebookOrder.TryGetValue(recipe.RowId, out var order) ? order : long.MaxValue,
                     reward.CurrencyItemId,
-                    reward.HighReward));
+                    reward.HighReward,
+                    Math.Max(1, (int)recipe.AmountResult)));
             }
 
             this.anomalyLog.Info("Craft", $"作れる収集品を求めました（{result.Count} 件）");
@@ -414,7 +422,11 @@ public sealed class CraftPlanService(
                     notes.Add("足りない素材はリテイナーから引き出します");
                 }
 
-                return new CraftPlan(target, crafts, freeSlots, keepFreeSlots, materials, notes);
+                // 作る物をすでに持っているぶん。収集品は GetInventoryItemCount では
+                // 数えられないため、鞄の枠を直接見る。
+                var held = this.currency.TryGetBagCount(target.ItemId, out var heldCount) ? heldCount : 0;
+
+                return new CraftPlan(target, crafts, freeSlots, keepFreeSlots, materials, notes, held);
             }
         }
 
