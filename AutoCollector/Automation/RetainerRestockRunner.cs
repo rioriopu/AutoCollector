@@ -104,7 +104,8 @@ public sealed unsafe class RetainerRestockRunner(
     AnomalyLog anomalyLog,
     CurrencyService currency,
     MenuService menu,
-    AutoRetainerIpc autoRetainer)
+    AutoRetainerIpc autoRetainer,
+    RetainerInventoryStore inventoryStore)
 {
     /// <summary>リテイナーの持ち物が入る入れ物。クリスタルは扱わない。</summary>
     private static readonly InventoryType[] RetainerPages =
@@ -125,6 +126,7 @@ public sealed unsafe class RetainerRestockRunner(
     private readonly CurrencyService currency = currency;
     private readonly MenuService menu = menu;
     private readonly AutoRetainerIpc autoRetainer = autoRetainer;
+    private readonly RetainerInventoryStore inventoryStore = inventoryStore;
 
     private readonly List<RestockRequest> requests = [];
 
@@ -383,8 +385,10 @@ public sealed unsafe class RetainerRestockRunner(
                 this.pendingRetainers.Add(retainer->NameString);
             }
 
+            this.NarrowByKnownContents();
+
             this.anomalyLog.Info("Restock", $"リテイナー {this.pendingRetainers.Count} 人を順に見ます");
-            this.Note($"リテイナー {this.pendingRetainers.Count} 人: {string.Join(" / ", this.pendingRetainers)}");
+            this.Note($"回るリテイナー {this.pendingRetainers.Count} 人: {string.Join(" / ", this.pendingRetainers)}");
         }
 
         this.Move(RestockStep.SelectRetainer, "リテイナーを選んでいます", 30);
@@ -455,6 +459,55 @@ public sealed unsafe class RetainerRestockRunner(
     }
 
     /// <summary>
+    /// 覚えている持ち物から、回る相手と順番を絞る。
+    ///
+    /// **総当たりをやめるための要。**
+    /// 実測では黒麦 1 種類のために 4 人を開閉して 14 秒かかっていた。
+    ///
+    /// 覚えていない場合や記録が古い場合は絞らない。
+    /// 当てにならない記録で飛ばすと、あるはずのものを取り逃す。
+    /// </summary>
+    private void NarrowByKnownContents()
+    {
+        if (!this.inventoryStore.IsUsable(out var reason))
+        {
+            this.Note($"{reason}。全員を順に見ます");
+            return;
+        }
+
+        var wanted = this.requests.Where(x => x.Remaining > 0).Select(x => x.ItemId).ToHashSet();
+
+        // 欲しい品を持っている人だけを、持っている数の多い順に。
+        var scored = new List<(string Name, int Score)>();
+
+        foreach (var name in this.pendingRetainers)
+        {
+            var score = 0;
+
+            foreach (var itemId in wanted)
+            {
+                score += this.inventoryStore.WhoHas(itemId).FirstOrDefault(x => x.Name == name).Quantity;
+            }
+
+            if (score > 0)
+            {
+                scored.Add((name, score));
+            }
+        }
+
+        if (scored.Count == 0)
+        {
+            this.Note("覚えている持ち物の中に目的の素材がありません。全員を順に見ます");
+            return;
+        }
+
+        this.pendingRetainers.Clear();
+        this.pendingRetainers.AddRange(scored.OrderByDescending(x => x.Score).Select(x => x.Name));
+
+        this.Note($"持っている人だけを回ります: {string.Join(" / ", scored.OrderByDescending(x => x.Score).Select(x => $"{x.Name}({x.Score})"))}");
+    }
+
+    /// <summary>
     /// 手に入らなかった「作れる素材」を、その素材に置き換える。
     ///
     /// 黒麦粉がリテイナーに無ければ、黒麦を取りに行く。
@@ -521,6 +574,7 @@ public sealed unsafe class RetainerRestockRunner(
             this.pendingRetainers.Add(retainer->NameString);
         }
 
+        this.NarrowByKnownContents();
         return true;
     }
 
@@ -566,6 +620,17 @@ public sealed unsafe class RetainerRestockRunner(
 
     private void TickWithdraw()
     {
+        // 開いたついでに持ち物を控える。次からは総当たりせずに済む。
+        if (IsRetainerInventoryReady() && !string.IsNullOrEmpty(this.currentRetainer))
+        {
+            var contents = ReadOpenRetainerItems();
+
+            if (contents.Count > 0)
+            {
+                this.inventoryStore.Remember(this.currentRetainer, contents);
+            }
+        }
+
         if (!IsRetainerInventoryReady())
         {
             if (this.Expired())
@@ -914,6 +979,91 @@ public sealed unsafe class RetainerRestockRunner(
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// いま開いているリテイナーの名前。呼び鈴の前にいるときだけ取れる。
+    ///
+    /// 開いているリテイナーは自分のすぐそばに立っている。Artisan も同じやり方で見ている。
+    /// </summary>
+    public static bool TryGetOpenRetainerName(out string name)
+    {
+        name = string.Empty;
+
+        try
+        {
+            if (!Svc.Condition[ConditionFlag.OccupiedSummoningBell] || !Player.Available)
+            {
+                return false;
+            }
+
+            var nearest = Svc.Objects
+                .Where(x => x.ObjectKind == ObjectKind.Retainer)
+                .OrderBy(x => Vector3.Distance(x.Position, Player.Position))
+                .FirstOrDefault();
+
+            if (nearest is null)
+            {
+                return false;
+            }
+
+            name = nearest.Name.ToString();
+            return !string.IsNullOrEmpty(name);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 開いているリテイナーの持ち物を全部読む。
+    ///
+    /// 取り出しのついでに控えておけば、次からは総当たりせずに済む。
+    /// 読み取りだけで、状態は変えない。
+    /// </summary>
+    public static Dictionary<uint, int> ReadOpenRetainerItems()
+    {
+        var totals = new Dictionary<uint, int>();
+
+        try
+        {
+            var manager = InventoryManager.Instance();
+
+            if (manager is null)
+            {
+                return totals;
+            }
+
+            foreach (var page in RetainerPages)
+            {
+                var container = manager->GetInventoryContainer(page);
+
+                if (container is null || !container->IsLoaded)
+                {
+                    continue;
+                }
+
+                for (var i = 0; i < container->Size; i++)
+                {
+                    var item = container->GetInventorySlot(i);
+
+                    if (item is null || item->ItemId == 0 || item->Quantity <= 0)
+                    {
+                        continue;
+                    }
+
+                    var id = item->GetBaseItemId();
+                    totals[id] = totals.GetValueOrDefault(id) + item->Quantity;
+                }
+            }
+        }
+        catch
+        {
+            return totals;
+        }
+
+        return totals;
     }
 
     /// <summary>

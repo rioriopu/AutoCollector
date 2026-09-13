@@ -404,9 +404,32 @@ public sealed partial class MainWindow
         }
 
         ImGui.Spacing();
+
+        // --- リテイナーの持ち物を覚えているか ---
+        //
+        // 覚えていれば、当たりのリテイナーへ直接行ける。
+        // 覚えていないと総当たりになるため、その旨をここで知らせる。
+        var inventory = this.plugin.RetainerInventory;
+
+        if (inventory.IsUsable(out var inventoryReason))
+        {
+            ImGui.TextColored(
+                ImGuiColors.HealerGreen,
+                $"リテイナーの持ち物: {inventory.Count} 人分を覚えています" +
+                (inventory.OldestSeenAt is { } oldest ? $"（最も古い記録 {oldest:MM/dd HH:mm}）" : string.Empty));
+        }
+        else
+        {
+            ImGui.TextColored(ImGuiColors.DalamudYellow, $"リテイナーの持ち物: {inventoryReason}");
+            ImGui.TextColored(
+                ImGuiColors.DalamudGrey,
+                "  呼び鈴からリテイナーを開くと自動で覚えます。覚えるまでは全員を順に開いて探します");
+        }
+
+        ImGui.Spacing();
         ImGui.TextUnformatted("要る素材");
 
-        using var table = ImRaii.Table("##materials", 6, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp);
+        using var table = ImRaii.Table("##materials", 7, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp);
         if (!table)
         {
             return;
@@ -417,6 +440,7 @@ public sealed partial class MainWindow
         ImGui.TableSetupColumn("全部で", ImGuiTableColumnFlags.WidthFixed, 60f);
         ImGui.TableSetupColumn("鞄にある", ImGuiTableColumnFlags.WidthFixed, 70f);
         ImGui.TableSetupColumn("引き出す", ImGuiTableColumnFlags.WidthFixed, 70f);
+        ImGui.TableSetupColumn("リテイナー", ImGuiTableColumnFlags.WidthFixed, 110f);
         ImGui.TableSetupColumn("要る枠", ImGuiTableColumnFlags.WidthFixed, 55f);
         ImGui.TableHeadersRow();
 
@@ -448,6 +472,9 @@ public sealed partial class MainWindow
                 material.Shortfall > 0 ? material.Shortfall.ToString() : "足りています");
 
             ImGui.TableNextColumn();
+            DrawRetainerHolding(inventory, material.ItemId, material.Shortfall);
+
+            ImGui.TableNextColumn();
             ImGui.TextUnformatted(material.NewSlots.ToString());
 
             // 作れる素材が足りないなら、その素材も出す。
@@ -472,6 +499,9 @@ public sealed partial class MainWindow
                 ImGui.TextColored(
                     sub.Shortfall > 0 ? ImGuiColors.DalamudYellow : ImGuiColors.HealerGreen,
                     sub.Shortfall > 0 ? sub.Shortfall.ToString() : "足りています");
+
+                ImGui.TableNextColumn();
+                DrawRetainerHolding(inventory, sub.ItemId, sub.Shortfall);
 
                 ImGui.TableNextColumn();
                 ImGui.TextColored(ImGuiColors.DalamudGrey, "-");
@@ -510,6 +540,42 @@ public sealed partial class MainWindow
         foreach (var line in restock.Trace)
         {
             ImGui.TextUnformatted(line);
+        }
+    }
+
+    /// <summary>
+    /// リテイナーが持っている数を出す。
+    ///
+    /// 覚えていない場合は「不明」と出す。取り出す前に、足りるかどうかが分かる。
+    /// </summary>
+    private static void DrawRetainerHolding(RetainerInventoryStore inventory, uint itemId, int shortfall)
+    {
+        if (!inventory.IsUsable(out _))
+        {
+            ImGui.TextColored(ImGuiColors.DalamudGrey, "不明");
+            return;
+        }
+
+        var holders = inventory.WhoHas(itemId);
+        var total = holders.Sum(x => x.Quantity);
+
+        if (total == 0)
+        {
+            ImGui.TextColored(
+                shortfall > 0 ? ImGuiColors.DalamudRed : ImGuiColors.DalamudGrey,
+                "持っていません");
+            return;
+        }
+
+        ImGui.TextColored(
+            shortfall > 0 && total < shortfall ? ImGuiColors.DalamudRed : ImGuiColors.HealerGreen,
+            $"{total}（{holders.Count} 人）");
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(string.Join(
+                Environment.NewLine,
+                holders.Select(x => $"{x.Name}: {x.Quantity}（{x.SeenAt:MM/dd HH:mm}）")));
         }
     }
 }
