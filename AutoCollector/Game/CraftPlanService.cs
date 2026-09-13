@@ -102,6 +102,24 @@ public sealed class CraftPlanService(
     private readonly CollectableRewardService rewards = rewards;
     private readonly CurrencyService currency = currency;
 
+    /// <summary>
+    /// 製作手帳の「RECIPE LEVEL」と同じ区切り。
+    ///
+    /// **50-60 は Lv60 を含む。** 10 で割った刻みではない。
+    /// 実際の手帳（木工 50-60）には Lv50・52・54・56・58・60 の 6 件が並ぶ。
+    ///
+    /// 製作計画タブとプリセットタブの両方が使う。区切りを 2 か所に持つと、
+    /// 片方だけ直したときに同じ収集品が別の帯に出る。
+    /// </summary>
+    public static readonly (int Min, int Max)[] LevelBands =
+    [
+        (50, 60),
+        (61, 70),
+        (71, 80),
+        (81, 90),
+        (91, 100),
+    ];
+
     private List<CraftableCollectable>? craftables;
     private List<CraftJob>? jobs;
     private uint crystalCategoryRowId;
@@ -372,7 +390,23 @@ public sealed class CraftPlanService(
     /// 素材も枠を使うため、作る個数と素材の枠は互いに影響する。
     /// 多い方から順に試して、収まる個数を採る。
     /// </summary>
-    public CraftPlan? BuildPlan(uint collectableItemId, int keepFreeSlots)
+    /// <param name="maxCrafts">
+    /// 作る個数の上限。0 なら空き枠いっぱいまで。
+    ///
+    /// 目標から逆算して回すときに使う。あと 3 個ぶんのスクリップしか要らないのに
+    /// 空き枠いっぱいの 40 個を作っても、素材と時間を捨てるだけになる。
+    /// </param>
+    /// <param name="requireMaterials">
+    /// いま鞄にある素材だけで作れる個数に抑える。
+    ///
+    /// リテイナーから取り出しても足りなかったときに使う。
+    /// 足りないまま Artisan へ頼んでも、途中で止まるだけで何も進まない。
+    /// </param>
+    public CraftPlan? BuildPlan(
+        uint collectableItemId,
+        int keepFreeSlots,
+        int maxCrafts = 0,
+        bool requireMaterials = false)
     {
         var target = this.Build().FirstOrDefault(x => x.ItemId == collectableItemId);
 
@@ -398,8 +432,17 @@ public sealed class CraftPlanService(
             return new CraftPlan(target, 0, freeSlots, keepFreeSlots, [], notes);
         }
 
+        // 要るぶんより多く作らない。
+        var ceiling = maxCrafts > 0 ? Math.Min(usable, maxCrafts) : usable;
+
+        if (ceiling == 0)
+        {
+            notes.Add("これ以上は作る必要がありません");
+            return new CraftPlan(target, 0, freeSlots, keepFreeSlots, [], notes);
+        }
+
         // 多い方から試して、素材の枠まで含めて収まる個数を採る。
-        for (var crafts = usable; crafts >= 1; crafts--)
+        for (var crafts = ceiling; crafts >= 1; crafts--)
         {
             var materials = this.BuildMaterials(target, crafts, out var materialSlots);
 
@@ -412,6 +455,13 @@ public sealed class CraftPlanService(
             // 収集品は 1 個 1 枠。素材の枠と合わせて収まるか。
             if (crafts + materialSlots <= usable)
             {
+                // 手持ちの素材だけで作れる個数まで落とす指定なら、
+                // 足りないものが 1 つでもあるあいだは個数を減らし続ける。
+                if (requireMaterials && materials.Any(x => x.Shortfall > 0))
+                {
+                    continue;
+                }
+
                 if (materials.Any(x => x.IsIntermediate && x.Shortfall > 0))
                 {
                     notes.Add("自分で作る素材が足りません。先にそちらを作る必要があります");
@@ -430,7 +480,10 @@ public sealed class CraftPlanService(
             }
         }
 
-        notes.Add("素材の置き場も要るため、1 個も作れません");
+        notes.Add(requireMaterials
+            ? "いま持っている素材では 1 個も作れません"
+            : "素材の置き場も要るため、1 個も作れません");
+
         return new CraftPlan(target, 0, freeSlots, keepFreeSlots, [], notes);
     }
 

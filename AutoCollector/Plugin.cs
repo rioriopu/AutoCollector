@@ -59,6 +59,10 @@ public sealed class Plugin : IDalamudPlugin
 
     internal CraftRunner CraftRunner { get; private set; } = null!;
 
+    internal ScripGoalService ScripGoalService { get; private set; } = null!;
+
+    internal GoalRunner GoalRunner { get; private set; } = null!;
+
     internal RetainerInventoryStore RetainerInventory { get; private set; } = null!;
 
     internal CollectableCycleRunner CollectableCycle { get; private set; } = null!;
@@ -355,6 +359,28 @@ public sealed class Plugin : IDalamudPlugin
         this.RetainerRestock = new RetainerRestockRunner(
             this.AnomalyLog, this.CurrencyService, this.MenuService, this.AutoRetainer, this.RetainerInventory);
         this.CraftRunner = new CraftRunner(this.AnomalyLog, this.CurrencyService, this.Artisan);
+
+        // 目標から逆算する側。交換費用の取得に交換画面の一覧が要る。
+        this.ScripGoalService = new ScripGoalService(
+            this.AnomalyLog,
+            this.CurrencyService,
+            this.InclusionShopCatalog,
+            this.CraftPlanService,
+            this.CurrencyCatalog);
+
+        // ①〜⑤ を 1 本に束ねる。ここより先に、束ねる相手が全部そろっている必要がある。
+        this.GoalRunner = new GoalRunner(
+            this.AnomalyLog,
+            this.ScripGoalService,
+            this.CraftPlanService,
+            this.RetainerRestock,
+            this.CraftRunner,
+            this.CollectableCycle,
+            this.MonitorService,
+            this.ExchangeExecutor,
+            this.CurrencyService,
+            this.CollectableRewardService);
+
         this.AutoDutySetup = new AutoDutySetup(this.AutoDuty, this.AnomalyLog);
         this.AutoDutyKeeper = new AutoDutyKeeper(
             this.AnomalyLog,
@@ -479,6 +505,10 @@ public sealed class Plugin : IDalamudPlugin
             this.CollectableCycle.Tick();
             this.RetainerRestock.Tick();
             this.CraftRunner.Tick();
+
+            // 束ねる側は、束ねられる側を全部動かしたあとに見る。
+            // 先に見ると、いま終わったばかりの処理を「まだ動いている」と数える。
+            this.GoalRunner.Tick();
             this.LearnRetainerInventory();
 
             // 納品画面が開いた瞬間を捉えて自動でダンプする。読み取りのみ。

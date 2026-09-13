@@ -34,6 +34,7 @@ public sealed partial class MainWindow
         var snap = this.plugin.MonitorService.Snapshot;
 
         this.DrawHeadline(snap);
+        this.DrawGoalRun();
         this.DrawAttention(snap);
         this.DrawPresetProgress(snap);
 
@@ -53,6 +54,67 @@ public sealed partial class MainWindow
         ImGui.Spacing();
         this.DrawInternals(snap);
     }
+
+    /// <summary>
+    /// 目標つきの周回。走っているあいだだけ出す。
+    ///
+    /// 素材の取り出し・製作・納品・交換を行き来するため、いまどの段にいるのかが
+    /// 分からないと、止まっているのか進んでいるのか判断できない。
+    /// 記録をそのまま出す。これまで不具合が見つかったのは、いつもこの記録からだった。
+    /// </summary>
+    private void DrawGoalRun()
+    {
+        var runner = this.plugin.GoalRunner;
+
+        if (!runner.IsRunning)
+        {
+            return;
+        }
+
+        ImGui.Separator();
+        ImGui.TextColored(
+            ImGuiColors.HealerGreen,
+            $"目標つきの周回: {runner.Preset?.Name ?? "?"}（{Describe(runner.Step)} / {runner.Rounds} 回目）");
+        ImGui.TextColored(ImGuiColors.DalamudGrey, $"  {runner.StatusDetail}");
+
+        if (ImGui.Button("止める##stopgoalstatus"))
+        {
+            runner.Stop("ユーザー操作");
+        }
+
+        if (runner.Trace.Count == 0)
+        {
+            return;
+        }
+
+        using var node = ImRaii.TreeNode($"進行の記録（{runner.Trace.Count} 行）##goaltrace");
+        if (!node)
+        {
+            return;
+        }
+
+        using var child = ImRaii.Child("##goaltracelist", new Vector2(0, 180), true);
+        if (!child)
+        {
+            return;
+        }
+
+        foreach (var line in runner.Trace)
+        {
+            ImGui.TextUnformatted(line);
+        }
+    }
+
+    private static string Describe(GoalStep step) => step switch
+    {
+        GoalStep.Restocking => "素材の取り出し",
+        GoalStep.Crafting => "製作",
+        GoalStep.Cycling => "納品と交換",
+        GoalStep.Exchanging => "交換",
+        GoalStep.Done => "終了",
+        GoalStep.Error => "失敗",
+        _ => "待機",
+    };
 
     // ------------------------------------------------------------------
     // ① いまの状態

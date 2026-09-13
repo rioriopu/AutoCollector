@@ -43,6 +43,11 @@ public sealed class PresetTab(Plugin plugin)
     /// <summary>名前で探した結果。入力が変わるまで使い回す。</summary>
     private IReadOnlyList<(InclusionCategory Category, InclusionSeries Series, InclusionOffer Offer)>? searchResults;
 
+    /// <summary>逆算した結果の控え。計算は重いので 1 秒は使い回す。</summary>
+    private ScripGoal? goalCache;
+    private Guid goalCachePresetId;
+    private DateTime goalCacheUntilUtc;
+
     public void Draw(ref bool select)
     {
         var flags = select ? ImGuiTabItemFlags.SetSelected : ImGuiTabItemFlags.None;
@@ -190,6 +195,9 @@ public sealed class PresetTab(Plugin plugin)
                             preset.Rewards.Clear();
                             preset.RewardItemId = 0;
                             preset.PreferredNpcDataId = 0;
+
+                            // 作る収集品も通貨ごとに違う。橙貨用の物で紫貨は貯まらない。
+                            ClearCraftChoice(preset);
                             changed = true;
                         }
 
@@ -348,6 +356,7 @@ public sealed class PresetTab(Plugin plugin)
         }
 
         this.DrawRewardList(preset, ref changed);
+        this.DrawGoalSummary(preset, ref changed);
 
         var catalog = this.plugin.InclusionShopCatalog;
         // 選んでいる通貨で買えるものだけを出す。
@@ -410,11 +419,26 @@ public sealed class PresetTab(Plugin plugin)
         {
             // 系統が変われば種別の並びも変わる。選び直しになる。
             this.seriesIndex = 0;
+
+            // 系統を選び直すのは、欲しいアイテムを選び直す場面。
+            // 表を装備品へ戻すため、製作するジョブは未選択にする。
+            ClearCraftChoice(preset);
+            changed = true;
         }
 
-        var selectedCategory = categories[this.categoryIndex];
+        // --- 製作するジョブ（系統の右） ---
+        ImGui.SameLine();
+        this.DrawCraftJobCombo(preset, ref changed);
+
+        // ジョブを選んでいるあいだは、表を製作リストに差し替える。
+        if (preset.CraftJob != 0)
+        {
+            this.DrawCraftPicker(preset, currencyItemId, ref changed);
+            return;
+        }
 
         // --- 種別 ---
+        var selectedCategory = categories[this.categoryIndex];
         var seriesNames = selectedCategory.Series.Select(x => x.DisplayName).ToArray();
         if (this.seriesIndex >= seriesNames.Length)
         {
@@ -533,6 +557,358 @@ public sealed class PresetTab(Plugin plugin)
             preset.PreferredNpcDataId = index == 0 ? 0 : npcs[index - 1].NpcDataId;
             changed = true;
         }
+    }
+
+    /// <summary>
+    /// 欲しいアイテムから逆算した結果を出す。
+    ///
+    /// <code>
+    /// 欲しいアイテムと個数
+    ///   → 残りぶんに要るスクリップ
+    ///     → 手持ちを引いて、あと稼ぐスクリップ
+    ///       → 作る収集品の個数
+    /// </code>
+    ///
+    /// **計算は毎フレーム行わない。** 所持数をひととおり数えるため重い。
+    /// </summary>
+    private void DrawGoalSummary(ExchangePreset preset, ref bool changed)
+    {
+        if (preset.Rewards.Count == 0)
+        {
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+
+        if (this.goalCachePresetId != preset.Id || now > this.goalCacheUntilUtc || changed)
+        {
+            this.goalCache = this.plugin.ScripGoalService.Build(preset);
+            this.goalCachePresetId = preset.Id;
+            this.goalCacheUntilUtc = now.AddSeconds(1);
+        }
+
+        var goal = this.goalCache;
+
+        if (goal is null)
+        {
+            return;
+        }
+
+        ImGui.Separator();
+
+        if (goal.Achieved)
+        {
+            ImGui.TextColored(ImGuiColors.HealerGreen, "目標に届いています");
+        }
+
+        // 要るスクリップ。届いていない品だけを並べる。
+        foreach (var item in goal.Items.Where(x => !x.Unlimited && x.Remaining > 0))
+        {
+            ImGui.TextColored(
+                ImGuiColors.DalamudGrey,
+                $"  {item.Name}: {item.Want} 個まで（いま {item.Held} 個）" +
+                $" → あと {item.Remaining} 個 × {item.Cost:N0} = {item.Subtotal:N0}");
+        }
+
+        ImGui.TextUnformatted($"要る{goal.CurrencyName}: {goal.RequiredScrips:N0}");
+        ImGui.SameLine();
+        ImGui.TextColored(ImGuiColors.DalamudGrey, $"  いま {goal.HeldScrips:N0}");
+        ImGui.SameLine();
+        ImGui.TextColored(
+            goal.MissingScrips > 0 ? ImGuiColors.DalamudYellow : ImGuiColors.HealerGreen,
+            goal.MissingScrips > 0 ? $"  あと {goal.MissingScrips:N0}" : "  足りています");
+
+        if (goal.MissingScrips > 0)
+        {
+            if (goal.Collectable is null)
+            {
+                ImGui.TextColored(
+                    ImGuiColors.DalamudYellow,
+                    "  作る収集品が選ばれていません。下の「製作するジョブ」から選んでください");
+            }
+            else
+            {
+                ImGui.TextColored(
+                    ImGuiColors.HealerGreen,
+                    $"  作る収集品: {goal.Collectable.Name} を {goal.CollectablesNeeded} 個" +
+                    $"（1 個あたり最大 {goal.Collectable.HighReward}）");
+            }
+        }
+
+        foreach (var note in goal.Notes)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudYellow, $"  {note}");
+        }
+
+        // 目標を立てたら、終了条件は「所持の上限」だけで決まる。
+        // ほかの終了条件が残っていると、目標ぶんが貯まっても最後まで交換できない。
+        if (preset.CraftCollectableItemId != 0)
+        {
+            if (preset.Mode != ExchangeMode.MaxExchange)
+            {
+                ImGui.TextColored(
+                    ImGuiColors.DalamudYellow,
+                    "  「どこまで交換するか」を『交換できる限り』に戻してください。" +
+                    "ほかの条件だと、目標ぶんが貯まっても最後まで交換できません");
+            }
+
+            if (preset.Rewards.Any(x => x.Quantity > 0))
+            {
+                ImGui.TextColored(
+                    ImGuiColors.DalamudYellow,
+                    "  「交換する数」を 0 にしてください。個数は「所持の上限」で決まります");
+            }
+        }
+
+        // 製作に使う設定。作った物と交換した物の両方が鞄に入る。
+        if (preset.CraftCollectableItemId != 0)
+        {
+            var keep = preset.CraftKeepFreeSlots;
+            ImGui.SetNextItemWidth(160f);
+
+            if (ImGui.InputInt("残す空き枠", ref keep))
+            {
+                preset.CraftKeepFreeSlots = Math.Max(0, keep);
+                changed = true;
+            }
+
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip("製作のときに空けておく鞄の枠。交換で受け取る品の置き場になります。");
+            }
+        }
+
+        this.DrawGoalRunState(preset);
+
+        ImGui.Separator();
+    }
+
+    /// <summary>いま回っているかどうかを出す。止める手段も一緒に置く。</summary>
+    private void DrawGoalRunState(ExchangePreset preset)
+    {
+        var runner = this.plugin.GoalRunner;
+
+        if (runner.IsRunning && runner.Preset?.Id == preset.Id)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudYellow, $"回しています: {runner.StatusDetail}");
+
+            if (ImGui.Button("止める##stopgoal"))
+            {
+                runner.Stop("ユーザー操作");
+            }
+
+            return;
+        }
+
+        if (preset.CraftCollectableItemId == 0)
+        {
+            return;
+        }
+
+        if (!preset.Enabled)
+        {
+            ImGui.TextColored(
+                ImGuiColors.DalamudGrey,
+                "このプリセットを有効にすると、素材の取り出しから交換までを通しで回します");
+            return;
+        }
+
+        // 届かずに止まったなら、理由を出す。出さないと、有効なのに動かない理由が分からない。
+        var stopped = runner.BlockedReason(preset.Id);
+
+        if (!string.IsNullOrEmpty(stopped))
+        {
+            ImGui.TextColored(ImGuiColors.DalamudYellow, $"止まっています: {stopped}");
+
+            if (ImGui.Button("もう一度試す##retrygoal"))
+            {
+                runner.ClearBlock(preset.Id);
+            }
+
+            ImGui.SameLine();
+            ImGui.TextColored(ImGuiColors.DalamudGrey, "（プリセットを入れ直しても同じです）");
+            return;
+        }
+
+        // 呼び鈴が要るのは素材を取り出すときだけ。押す前に分かるようにしておく。
+        var bell = this.plugin.RetainerRestock.DescribeBell();
+        ImGui.TextColored(
+            bell.StartsWith("呼び鈴が見つかりました", StringComparison.Ordinal)
+                ? ImGuiColors.DalamudGrey
+                : ImGuiColors.DalamudYellow,
+            $"  {bell}");
+    }
+
+    /// <summary>
+    /// 製作するジョブを選ぶ。系統の右に置く。
+    ///
+    /// 「未選択」のあいだは、表には交換で手に入る装備品が並ぶ。
+    /// ジョブを選ぶと、表はそのジョブで作れる収集品に切り替わる。
+    /// 欲しいアイテムを選ぶ場面と、その元手を作る場面は別なので、表も分ける。
+    /// </summary>
+    private void DrawCraftJobCombo(ExchangePreset preset, ref bool changed)
+    {
+        var jobs = this.plugin.CraftPlanService.ListJobs();
+
+        if (jobs.Count == 0)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudRed, "ジョブの一覧を作れませんでした");
+            return;
+        }
+
+        var current = jobs.FirstOrDefault(x => x.CraftType == preset.CraftJob);
+        var label = current?.Name ?? "未選択";
+
+        ImGui.SetNextItemWidth(180f);
+
+        using var combo = ImRaii.Combo("製作するジョブ", label);
+        if (!combo)
+        {
+            return;
+        }
+
+        if (ImGui.Selectable("未選択##job0", preset.CraftJob == 0))
+        {
+            ClearCraftChoice(preset);
+            changed = true;
+        }
+
+        foreach (var job in jobs)
+        {
+            if (!ImGui.Selectable($"{job.Name}##job{job.CraftType}", job.CraftType == preset.CraftJob))
+            {
+                continue;
+            }
+
+            preset.CraftJob = job.CraftType;
+
+            // ジョブが変われば作れる物も変わる。選び直しになる。
+            preset.CraftCollectableItemId = 0;
+            preset.CraftLevelBand = 0;
+            preset.CraftToEarn = false;
+            changed = true;
+        }
+    }
+
+    /// <summary>
+    /// 作る収集品を選ぶ。製作計画タブと同じ構造にしてある。
+    ///
+    /// **レベルのボタンは、帯が 2 つ以上あるときだけ出す。**
+    /// 橙貨はジョブごとに 1 件しかないため、絞る意味がない。
+    /// 紫貨はレベル帯ごとに複数あり、生むスクリップの量も違うため、選ぶ必要がある。
+    /// </summary>
+    private void DrawCraftPicker(ExchangePreset preset, uint currencyItemId, ref bool changed)
+    {
+        var craftable = this.plugin.CraftPlanService.ListCraftable(currencyItemId)
+            .Where(x => x.CraftType == preset.CraftJob)
+            .ToList();
+
+        if (craftable.Count == 0)
+        {
+            ImGui.TextColored(
+                ImGuiColors.DalamudYellow,
+                "このジョブで作れる、この通貨を生む収集品が見つかりません");
+            return;
+        }
+
+        // --- レベル帯 ---
+        var available = CraftPlanService.LevelBands
+            .Where(band => craftable.Any(x => x.ClassJobLevel >= band.Min && x.ClassJobLevel <= band.Max))
+            .ToList();
+
+        if (available.Count > 1)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudGrey, "レベル:");
+
+            foreach (var band in available)
+            {
+                ImGui.SameLine();
+
+                var selected = preset.CraftLevelBand == band.Min;
+                using var color = ImRaii.PushColor(ImGuiCol.Button, ImGuiColors.ParsedBlue, selected);
+
+                if (ImGui.SmallButton($"{band.Min}-{band.Max}##pband{band.Min}"))
+                {
+                    preset.CraftLevelBand = band.Min;
+                    preset.CraftCollectableItemId = 0;
+                    preset.CraftToEarn = false;
+                    changed = true;
+                }
+            }
+        }
+
+        // 帯が選ばれていなければ、いちばん上の帯にしておく。
+        if (available.Count > 0 && !available.Any(x => x.Min == preset.CraftLevelBand))
+        {
+            preset.CraftLevelBand = available[^1].Min;
+        }
+
+        var filtered = craftable;
+
+        if (available.Count > 1)
+        {
+            var band = CraftPlanService.LevelBands.FirstOrDefault(x => x.Min == preset.CraftLevelBand);
+
+            if (band.Max > 0)
+            {
+                filtered = craftable
+                    .Where(x => x.ClassJobLevel >= band.Min && x.ClassJobLevel <= band.Max)
+                    .ToList();
+            }
+        }
+
+        ImGui.TextColored(
+            ImGuiColors.DalamudGrey,
+            $"  作れる収集品 {filtered.Count} 件（製作手帳と同じ並び）");
+
+        using (var child = ImRaii.Child("##presetcraftlist", new Vector2(0, 150), true))
+        {
+            if (child)
+            {
+                foreach (var item in filtered)
+                {
+                    if (ImGui.Selectable($"{item.Name}##pc{item.ItemId}", preset.CraftCollectableItemId == item.ItemId))
+                    {
+                        preset.CraftCollectableItemId = item.ItemId;
+                        preset.CraftToEarn = true;
+
+                        // 終了条件は「所持の上限」に一本化する。
+                        //
+                        // 「指定量の通貨を残すまで」のままだと、目標ぶんのスクリップが
+                        // 貯まっても残す設定にひっかかって最後の 1 個を交換できず、
+                        // 目標に届かないまま進まなくなる。
+                        preset.Mode = ExchangeMode.MaxExchange;
+
+                        // 「交換する数」は 1 回の移動で何個買うかの上限。
+                        // 既定の 1 のままだと、1 個買うたびに窓口へ往復することになる。
+                        // 個数は「所持の上限」で決まるので、こちらは外す。
+                        foreach (var reward in preset.Rewards)
+                        {
+                            reward.Quantity = 0;
+                        }
+
+                        changed = true;
+                    }
+
+                    ImGui.SameLine();
+                    ImGui.TextColored(ImGuiColors.DalamudGrey, $"  Lv{item.ClassJobLevel}  最大 {item.HighReward}");
+                }
+            }
+        }
+
+        if (preset.CraftCollectableItemId == 0)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudGrey, "作る収集品を選ぶと、必要な個数を計算します");
+        }
+    }
+
+    /// <summary>作る物の選択を解く。表を装備品へ戻すときに通す。</summary>
+    private static void ClearCraftChoice(ExchangePreset preset)
+    {
+        preset.CraftJob = 0;
+        preset.CraftCollectableItemId = 0;
+        preset.CraftLevelBand = 0;
+        preset.CraftToEarn = false;
     }
 
     /// <summary>系統名は長いので、検索結果では後半だけを出す。</summary>
