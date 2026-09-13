@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Numerics;
 using AutoCollector.Diagnostics;
@@ -38,30 +38,32 @@ public sealed class NpcLocationService(AnomalyLog anomalyLog)
     /// <summary>
     /// 読む配置ファイル。
     ///
-    /// planner.lgb も読むべきという指摘があったが、実測したところ
-    /// 30 エリアで 170 秒（全 589 エリア換算で約 56 分）かかった。
+    /// **planner.lgb を足してはいけない。**
+    /// 30 エリアで 170 秒（全 589 エリア換算で約 56 分）かかる。
     /// planevent.lgb は同じ 30 エリアで 82 ms なので 2000 倍以上遅い。
     /// しかも planner.lgb は 30 件中 13 件しか存在せず、オブジェクト数も 1/9 しかない。
     /// 存在しないファイルの探索コストが極端に高いためと考えられる。
     ///
-    /// 起動が実用に耐えなくなるため読まない。
-    /// planevent に無い NPC は、そのエリアにいるときに実際のオブジェクトから解決する。
-    /// </summary>
-    /// <summary>
-    /// 読む配置ファイル。
+    /// 2026-09-13 に「リムサとグリダニアの窓口が出ない」（F-30）を理由に足してしまい、
+    /// 起動時に操作不能になった。**この注意書きを読まずに覆した。**
+    /// 実測し直したところ、全エリアの走査は 10 分でも終わらなかった。
     ///
-    /// planevent だけでは足りない。スクリップ取引窓口の場合、
-    /// リムサ・ロミンサ（ENpc 1003633）とグリダニア（ENpc 1003077）の 2 体は
-    /// planner にしか置かれておらず、planevent だけを読むと座標が取れない。
-    /// 座標が無い NPC は移動先を決められないため、候補から無言で消えていた。
+    /// planner にしかいない NPC の扱いは別の手段で解決すること。
+    /// 全エリアを舐める方法は使えない。
     /// </summary>
-    private static readonly string[] LayerFileNames = ["planevent.lgb", "planner.lgb"];
+    private static readonly string[] LayerFileNames = ["planevent.lgb"];
 
     private readonly AnomalyLog anomalyLog = anomalyLog;
     private readonly Dictionary<uint, List<NpcLocation>> index = [];
 
     private List<string>? pendingBgPaths;
     private Dictionary<string, uint>? bgToTerritory;
+
+    /// <summary>保存済みの索引を確認したか。起動ごとに 1 度だけ見る。</summary>
+    private bool cacheChecked;
+
+    /// <summary>索引を作ったときのゲームの版。保存と照合に使う。</summary>
+    private string gameVersion = string.Empty;
     private int bgCursor;
     private bool levelScanDone;
 
@@ -71,8 +73,17 @@ public sealed class NpcLocationService(AnomalyLog anomalyLog)
 
     public int KnownNpcCount => this.index.Count;
 
-    /// <summary>索引構築を 1 フレーム分進める。true を返したら完了。</summary>
-    public bool TickBuild(int lgbBudgetPerFrame = 60)
+    /// <summary>
+    /// 索引構築を 1 フレーム分進める。true を返したら完了。
+    ///
+    /// 配置ファイルは数が多く、1 つ 1 つの大きさもばらつく。
+    /// 件数で区切ると、たまたま大きいファイルが並んだフレームだけが極端に遅くなる。
+    /// そのため**時間で区切る**。指定したミリ秒を超えたらそのフレームは打ち切る。
+    ///
+    /// 索引の中身はゲームが更新されるまで変わらないため、
+    /// 一度作ったらファイルへ保存し、次回からは読むだけにする。
+    /// </summary>
+    public bool TickBuild(int frameBudgetMilliseconds = 6)
     {
         if (this.IsReady)
         {
@@ -81,6 +92,28 @@ public sealed class NpcLocationService(AnomalyLog anomalyLog)
 
         try
         {
+            // 保存済みのものがあればそれを使う。走査そのものを行わない。
+            if (!this.cacheChecked)
+            {
+                this.cacheChecked = true;
+                this.gameVersion = NpcLocationCache.ResolveGameVersion();
+
+                if (NpcLocationCache.TryLoad(this.gameVersion, this.index, out var loadFailure))
+                {
+                    this.IsReady = true;
+                    this.BuildProgress = 1f;
+                    this.anomalyLog.Info(
+                        "NpcLocation",
+                        $"保存済みの NPC 配置を読み込みました（{this.index.Count} 体）");
+                    return true;
+                }
+
+                // 読めなかった場合は、途中まで入った可能性があるので捨ててから作り直す。
+                this.index.Clear();
+                this.anomalyLog.Info("NpcLocation", $"{loadFailure}。作り直します");
+                return false;
+            }
+
             if (!this.levelScanDone)
             {
                 this.ScanLevelSheet();
@@ -90,7 +123,7 @@ public sealed class NpcLocationService(AnomalyLog anomalyLog)
                 return false;
             }
 
-            return this.ScanLayerFiles(lgbBudgetPerFrame);
+            return this.ScanLayerFiles(frameBudgetMilliseconds);
         }
         catch (Exception ex)
         {
@@ -154,7 +187,7 @@ public sealed class NpcLocationService(AnomalyLog anomalyLog)
         this.bgCursor = 0;
     }
 
-    private bool ScanLayerFiles(int budget)
+    private bool ScanLayerFiles(int frameBudgetMilliseconds)
     {
         if (this.pendingBgPaths is null || this.bgToTerritory is null)
         {
@@ -162,10 +195,18 @@ public sealed class NpcLocationService(AnomalyLog anomalyLog)
             return true;
         }
 
-        var processed = 0;
-        while (this.bgCursor < this.pendingBgPaths.Count && processed < budget)
+        // 1 フレームで使ってよい時間。超えたら途中で抜けて次のフレームへ回す。
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+
+        while (this.bgCursor < this.pendingBgPaths.Count)
         {
-            processed++;
+            // 1 件も処理せずに抜けると先へ進まないため、判定はループの先頭ではなく
+            // 1 件処理したあとに行う。
+            if (watch.ElapsedMilliseconds >= frameBudgetMilliseconds && this.bgCursor > 0)
+            {
+                break;
+            }
+
             var bg = this.pendingBgPaths[this.bgCursor++];
 
             if (!this.bgToTerritory.TryGetValue(bg, out var territoryId))
@@ -215,6 +256,17 @@ public sealed class NpcLocationService(AnomalyLog anomalyLog)
         this.pendingBgPaths = null;
         this.bgToTerritory = null;
         this.anomalyLog.Info("NpcLocation", $"NPC 配置の索引を構築しました（{this.index.Count} 体）");
+
+        // 次回は走査せずに済むよう残す。失敗しても動作には影響しない。
+        if (NpcLocationCache.TrySave(this.gameVersion, this.index, out var saveFailure))
+        {
+            this.anomalyLog.Info("NpcLocation", "次回のために NPC 配置を保存しました");
+        }
+        else
+        {
+            this.anomalyLog.Warn("NpcLocation", saveFailure);
+        }
+
         return true;
     }
 
