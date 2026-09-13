@@ -559,7 +559,7 @@ public sealed class PresetTab(Plugin plugin)
         ExchangeEntry? remove = null;
         var moveUp = -1;
 
-        using (var child = ImRaii.Child("##rewardlist_selected", new Vector2(0, Math.Min(160f, 30f + (preset.Rewards.Count * 26f))), true))
+        using (var child = ImRaii.Child("##rewardlist_selected", new Vector2(0, Math.Min(200f, 34f + (preset.Rewards.Count * 28f))), true))
         {
             if (child)
             {
@@ -589,23 +589,52 @@ public sealed class PresetTab(Plugin plugin)
                     ImGui.SameLine();
                     ImGui.SetCursorPosX(ImGui.GetCursorPosX() + 8f);
 
+                    // 2 つの数値は役割が違う。ラベルだけでは取り違えるため、
+                    // それぞれに説明を付ける。
                     var quantity = entry.Quantity;
                     ImGui.SetNextItemWidth(90f);
-                    if (ImGui.InputInt("個##qty", ref quantity))
+                    if (ImGui.InputInt("交換する数##qty", ref quantity))
                     {
                         entry.Quantity = Math.Max(0, quantity);
                         changed = true;
+                    }
+
+                    if (ImGui.IsItemHovered())
+                    {
+                        ImGui.SetTooltip("これから何個交換するか。0 にすると上限なし（通貨か所持枠が尽きるまで）。");
                     }
 
                     ImGui.SameLine();
 
                     var stopAt = entry.StopAtOwned;
                     ImGui.SetNextItemWidth(90f);
-                    if (ImGui.InputInt("所持で止める##own", ref stopAt))
+                    if (ImGui.InputInt("持っていたら飛ばす##own", ref stopAt))
                     {
                         entry.StopAtOwned = Math.Max(0, stopAt);
                         changed = true;
                     }
+
+                    if (ImGui.IsItemHovered())
+                    {
+                        ImGui.SetTooltip(
+                            "いまの所持数がこの数以上なら、この品は交換しません。" +
+                            "0 にすると所持数を見ません。" +
+                            "秘伝書のように 1 つあれば足りるものに使います。");
+                    }
+
+                    ImGui.SameLine();
+
+                    // いま何個持っているかを添える。飛ばされる理由が見えるようにする。
+                    var ownedText = this.plugin.CurrencyService.TryGetCount(
+                        entry.RewardItemId, out var have, includeEquipped: true, includeArmory: true)
+                        ? $"所持 {have}"
+                        : "所持 ?";
+
+                    var skipped = entry.StopAtOwned > 0 && have >= entry.StopAtOwned;
+
+                    ImGui.TextColored(
+                        skipped ? ImGuiColors.DalamudYellow : ImGuiColors.DalamudGrey,
+                        skipped ? $"{ownedText} → 飛ばします" : ownedText);
 
                     if (entry.Quantity == 0)
                     {
@@ -616,9 +645,8 @@ public sealed class PresetTab(Plugin plugin)
             }
         }
 
-        ImGui.TextColored(
-            ImGuiColors.DalamudGrey,
-            "  個数 0 は上限なし。所持で止める は、その数だけ持っていれば飛ばします（0 で判定しない）");
+        ImGui.TextColored(ImGuiColors.DalamudGrey, "  交換する数　　  … 何個交換するか。0 で上限なし");
+        ImGui.TextColored(ImGuiColors.DalamudGrey, "  持っていたら飛ばす … その数だけ持っていれば交換しない。0 で判定しない");
 
         if (remove is not null)
         {
