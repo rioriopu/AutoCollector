@@ -240,6 +240,41 @@ public sealed partial class MainWindow
         ImGui.Separator();
         ImGui.Spacing();
 
+        // 並び順はシートから再現できなかったため、実際の画面から覚えている。
+        // 覚えたかどうかが画面から分からないと、確認のしようがない。
+        ImGui.TextUnformatted("アイテム交換画面の並び順（自動で覚えます）");
+        ImGui.TextColored(
+            ImGuiColors.DalamudGrey,
+            "交換窓口を開いて種別を切り替えるだけで、その並びを覚えます。操作は行いません。");
+
+        var orderStore = this.plugin.InclusionShopOrderStore;
+        var learned = orderStore.Count;
+
+        ImGui.TextColored(
+            learned > 0 ? ImGuiColors.HealerGreen : ImGuiColors.DalamudGrey,
+            learned > 0
+                ? $"  覚えた種別: {learned} 件"
+                : "  まだ覚えていません。交換窓口を開いて種別を順に切り替えてください");
+
+        if (this.plugin.InclusionShopService.IsOpen())
+        {
+            ImGui.SameLine();
+            ImGui.TextColored(ImGuiColors.DalamudYellow, "（交換画面を検出しています）");
+        }
+
+        if (ImGui.Button("覚えた並びを消す##clearorder"))
+        {
+            orderStore.Clear();
+            this.plugin.AnomalyLog.Info("Inclusion", "覚えていた並び順を消しました");
+        }
+
+        ImGui.SameLine();
+        ImGui.TextColored(ImGuiColors.DalamudGrey, "並びがおかしいときに押して、もう一度窓口を回ってください");
+
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.Spacing();
+
         // 発火手段を実測するための 3 手順。押す順に上から並べる。
         //
         // 納品だけでなく交換の確認にも使う。見出しを納品に限ると
