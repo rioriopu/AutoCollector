@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Numerics;
 using AutoCollector.Diagnostics;
 using AutoCollector.Ipc;
@@ -17,6 +17,16 @@ public enum MoveStatus
 
     /// <summary>同じ場所から動いていない。</summary>
     Stuck,
+
+    /// <summary>
+    /// vnavmesh は走り終わったが、目的地まで届いていない。
+    ///
+    /// NPC がカウンターの内側に立っている場合など、目的地そのものが
+    /// ナビメッシュの外にあると、近づけるところまで行って終わる。
+    /// この状態から放置しても二度と動かない。
+    /// ただし話しかけられる距離には入っていることが多いため、失敗ではない。
+    /// </summary>
+    ShortOfTarget,
 
     /// <summary>失敗した。エリアが変わった、vnavmesh が使えない等。</summary>
     Failed,
@@ -49,6 +59,7 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
 
     private bool moveIssued;
     private int stableFrames;
+    private int idleShortFrames;
     private uint startTerritory;
     private Vector3 lastPosition;
     private DateTime lastMovementUtc;
@@ -125,6 +136,7 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
     {
         this.moveIssued = false;
         this.stableFrames = 0;
+        this.idleShortFrames = 0;
         this.retriedAfterStuck = false;
         this.startTerritory = Svc.ClientState.TerritoryType;
         this.lastPosition = Player.Available ? Player.Position : default;
@@ -210,6 +222,30 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
         }
 
         this.stableFrames = 0;
+
+        // vnavmesh が走り終わったのに届いていない。
+        //
+        // この状態から放置しても二度と動かない。以前はスタック判定（15 秒）が
+        // 拾うまで棒立ちになっていた。走り終わったことはその場で分かるので待つ必要がない。
+        //
+        // 目的地に届かない理由の多くは、NPC がカウンターの内側など
+        // ナビメッシュの外に立っていること。近づけるところまでは行けているので、
+        // 話しかけられるかどうかは呼び出し側に判断させる。
+        if (idle)
+        {
+            this.idleShortFrames++;
+            if (this.idleShortFrames >= RequiredStableFrames)
+            {
+                this.anomalyLog.Info(
+                    "Navigation",
+                    $"経路の終点に着きましたが目的地まで {distance:F1} ヤルム残っています");
+                return MoveStatus.ShortOfTarget;
+            }
+
+            return MoveStatus.Moving;
+        }
+
+        this.idleShortFrames = 0;
 
         // スタック判定。座標がほとんど動いていない状態が続いたら 1 度だけ再発行する。
         if (Vector3.DistanceSquared(position, this.lastPosition) > 0.01f)
