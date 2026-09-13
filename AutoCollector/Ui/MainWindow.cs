@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using AutoCollector.Automation;
@@ -52,6 +52,7 @@ public sealed partial class MainWindow(Plugin plugin)
 
         this.DrawDiagnosticsTab();
         this.DrawSettingsTab();
+        this.DrawCraftPlanTab();
         this.DrawDebugTab();
         this.DrawDonationTab();
     }
