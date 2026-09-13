@@ -287,6 +287,15 @@ public sealed unsafe class ExchangeExecutor(
     /// </summary>
     private int menuBounces;
 
+    /// <summary>会話メニューで選択肢を選んだ回数。多段のメニューがあるため 1 回とは限らない。</summary>
+    private int menuSelections;
+
+    /// <summary>直前に選んだ選択肢の文字列。同じものを選び続けていないかを見る。</summary>
+    private string lastMenuSelection = string.Empty;
+
+    /// <summary>同じ選択肢を続けて選んだ回数。</summary>
+    private int sameMenuSelections;
+
     /// <summary>納品を開始済みか。開始と終了の区別に使う。</summary>
     private bool deliveryStarted;
 
@@ -790,6 +799,9 @@ public sealed unsafe class ExchangeExecutor(
         this.deliveryStarted = false;
         this.aethernetTransferAttempts = 0;
         this.menuBounces = 0;
+        this.menuSelections = 0;
+        this.sameMenuSelections = 0;
+        this.lastMenuSelection = string.Empty;
 
         // 納品は品数ぶん繰り返すため長くかかる。移動と会話を含めても
         // 15 分あれば足りる。これを超えるのは何かが噛み合っていないとき。
@@ -2082,7 +2094,37 @@ public sealed unsafe class ExchangeExecutor(
         {
             if (this.menu.TrySelectByText(hint, out var failure))
             {
-                this.StatusDetail = $"「{hint}」を選びました";
+                // 選んでも画面が進まないことがある。
+                //
+                // 道具強化の窓口のように、選択肢の先がさらに会話メニューだったり、
+                // 条件を満たしていなくて元の一覧へ戻される場合、
+                // 同じ選択肢を延々と選び直すことになる。メニューは開いたままなので
+                // 「閉じたらやり直す」側の上限には掛からない。
+                //
+                // 実測では 2 秒おきに同じ選択肢を撃ち続けていた。
+                if (hint == this.lastMenuSelection)
+                {
+                    this.sameMenuSelections++;
+                }
+                else
+                {
+                    this.lastMenuSelection = hint;
+                    this.sameMenuSelections = 1;
+                }
+
+                this.menuSelections++;
+
+                if (this.sameMenuSelections > 3 || this.menuSelections > 8)
+                {
+                    this.Fail(
+                        ExchangeFailure.MenuResolutionFailed,
+                        $"「{hint}」を選んでも先へ進みませんでした" +
+                        $"（同じ選択 {this.sameMenuSelections} 回 / 合計 {this.menuSelections} 回）。" +
+                        $"選択肢: {string.Join(" / ", this.menu.ListEntries())}");
+                    return;
+                }
+
+                this.StatusDetail = $"「{hint}」を選びました（{this.menuSelections} 回目）";
                 return;
             }
 
