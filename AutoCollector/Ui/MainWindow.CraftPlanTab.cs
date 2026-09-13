@@ -1,6 +1,7 @@
-using System;
+﻿using System;
 using System.Linq;
 using System.Numerics;
+using AutoCollector.Automation;
 using AutoCollector.Game;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Colors;
@@ -39,8 +40,8 @@ public sealed partial class MainWindow
             ImGuiColors.DalamudGrey,
             "欲しいスクリップ → それを生む収集品 → 作る個数 → 要る素材、の順に決まります。");
         ImGui.TextColored(
-            ImGuiColors.DalamudYellow,
-            "いまは計算して出すだけです。リテイナーからの引き出しはまだ行いません。");
+            ImGuiColors.DalamudGrey,
+            "足りない素材はリテイナーから取り出せます。呼び鈴の近くで実行してください。");
 
         ImGui.Separator();
 
@@ -162,6 +163,55 @@ public sealed partial class MainWindow
         if (plan.Materials.Count == 0)
         {
             return;
+        }
+
+        ImGui.Spacing();
+
+        // --- リテイナーから取り出す ---
+        var restock = this.plugin.RetainerRestock;
+
+        if (restock.IsRunning)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudYellow, $"取り出し中: {restock.StatusDetail}（{restock.Withdrawn} 個）");
+
+            if (ImGui.Button("中止する##stoprestock"))
+            {
+                restock.Stop("ユーザー操作");
+            }
+        }
+        else
+        {
+            var shortfalls = plan.Materials.Where(x => x.Shortfall > 0).ToList();
+
+            using (ImRaii.Disabled(shortfalls.Count == 0))
+            {
+                if (ImGui.Button("足りない素材をリテイナーから取り出す##restock"))
+                {
+                    var requests = shortfalls
+                        .Select(x => new RestockRequest
+                        {
+                            ItemId = x.ItemId,
+                            Name = x.Name,
+                            Remaining = x.Shortfall,
+                        })
+                        .ToList();
+
+                    if (!restock.Start(requests, out var restockFailure))
+                    {
+                        this.plugin.AnomalyLog.Warn("Restock", restockFailure);
+                    }
+                }
+            }
+
+            ImGui.SameLine();
+            ImGui.TextColored(
+                ImGuiColors.DalamudGrey,
+                shortfalls.Count == 0 ? "足りない素材はありません" : "呼び鈴の近くで押してください");
+
+            if (!string.IsNullOrEmpty(restock.StatusDetail))
+            {
+                ImGui.TextColored(ImGuiColors.DalamudGrey, $"  前回: {restock.StatusDetail}");
+            }
         }
 
         ImGui.Spacing();
