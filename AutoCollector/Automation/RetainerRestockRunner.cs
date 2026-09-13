@@ -65,6 +65,14 @@ public sealed class RestockRequest
 
     /// <summary>まだ取り出す必要がある数。</summary>
     public int Remaining { get; set; }
+
+    /// <summary>
+    /// これが手に入らなかったときに代わりに取り出すもの。
+    ///
+    /// 黒麦粉のように自分で作る素材は、リテイナーに完成品が無いことがある。
+    /// その場合は素材（黒麦）を取り出して自分で作ることになる。
+    /// </summary>
+    public IReadOnlyList<RestockRequest> Fallback { get; init; } = [];
 }
 
 /// <summary>
@@ -141,6 +149,9 @@ public sealed unsafe class RetainerRestockRunner(
     /// 同じ品を探し続けて進まなくなるのを防ぐ。リテイナーを移るたびに空にする。
     /// </summary>
     private readonly HashSet<uint> skippedHere = [];
+
+    /// <summary>代わりの素材へ切り替えたか。1 段だけにして、際限なく辿らないようにする。</summary>
+    private bool expandedFallback;
 
     public RestockStep Step { get; private set; } = RestockStep.Idle;
 
@@ -222,6 +233,7 @@ public sealed unsafe class RetainerRestockRunner(
         this.Withdrawn = 0;
         this.pendingQuantity = 0;
         this.activeRequest = null;
+        this.expandedFallback = false;
         this.skippedHere.Clear();
 
         this.deadlineUtc = DateTime.UtcNow.Add(OverallLimit);
@@ -389,6 +401,12 @@ public sealed unsafe class RetainerRestockRunner(
 
         if (this.pendingRetainers.Count == 0)
         {
+            // 作れる素材が手に入らなかったなら、その素材を取りに行く。
+            if (this.TryExpandFallback())
+            {
+                return;
+            }
+
             this.Move(RestockStep.CloseList, "すべてのリテイナーを見終えました", 30);
             return;
         }
@@ -434,6 +452,76 @@ public sealed unsafe class RetainerRestockRunner(
         // 一覧に見当たらない。次へ。
         this.anomalyLog.Warn("Restock", $"{name} が一覧に見つかりません。飛ばします");
         this.pendingRetainers.RemoveAt(0);
+    }
+
+    /// <summary>
+    /// 手に入らなかった「作れる素材」を、その素材に置き換える。
+    ///
+    /// 黒麦粉がリテイナーに無ければ、黒麦を取りに行く。
+    /// 1 段だけ。何段も辿ると取り出す量が読めなくなる。
+    /// </summary>
+    private bool TryExpandFallback()
+    {
+        if (this.expandedFallback)
+        {
+            return false;
+        }
+
+        var replacements = new List<RestockRequest>();
+
+        foreach (var request in this.requests)
+        {
+            if (request.Remaining <= 0 || request.Fallback.Count == 0)
+            {
+                continue;
+            }
+
+            foreach (var fallback in request.Fallback)
+            {
+                if (fallback.Remaining > 0)
+                {
+                    replacements.Add(new RestockRequest
+                    {
+                        ItemId = fallback.ItemId,
+                        Name = fallback.Name,
+                        Remaining = fallback.Remaining,
+                    });
+                }
+            }
+
+            this.Note($"{request.Name} が {request.Remaining} 個足りません。素材を取りに行きます");
+        }
+
+        if (replacements.Count == 0)
+        {
+            return false;
+        }
+
+        this.expandedFallback = true;
+
+        this.requests.Clear();
+        this.requests.AddRange(replacements);
+
+        this.Note($"取り出す対象を替えます: {string.Join(" / ", replacements.Select(x => $"{x.Name}×{x.Remaining}"))}");
+
+        // もう一度すべてのリテイナーを回る。
+        this.pendingRetainers.Clear();
+        this.currentRetainer = string.Empty;
+        this.skippedHere.Clear();
+
+        for (uint i = 0; i < 10; i++)
+        {
+            var retainer = RetainerManager.Instance()->GetRetainerBySortedIndex(i);
+
+            if (retainer is null || retainer->RetainerId == 0)
+            {
+                continue;
+            }
+
+            this.pendingRetainers.Add(retainer->NameString);
+        }
+
+        return true;
     }
 
     private void TickSelectEntrust()

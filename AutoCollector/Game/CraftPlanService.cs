@@ -32,6 +32,10 @@ public sealed record CraftJob(uint CraftType, string Name);
 /// <param name="Shortfall">足りない数。これをリテイナーから引き出す。</param>
 /// <param name="NewSlots">引き出したときに新たに要る枠。</param>
 /// <param name="IsIntermediate">自分で作れる素材か。無ければ先に作る必要がある。</param>
+/// <param name="SubMaterials">
+/// 作れる素材の、さらにその素材。
+/// リテイナーに完成品が無い場合、こちらを取り出して自分で作ることになる。
+/// </param>
 public sealed record PlanMaterial(
     uint ItemId,
     string Name,
@@ -40,7 +44,8 @@ public sealed record PlanMaterial(
     int Held,
     int Shortfall,
     int NewSlots,
-    bool IsIntermediate);
+    bool IsIntermediate,
+    IReadOnlyList<PlanMaterial> SubMaterials);
 
 /// <summary>作る計画。</summary>
 public sealed record CraftPlan(
@@ -221,6 +226,83 @@ public sealed class CraftPlanService(
     }
 
     /// <summary>
+    /// 作れる素材を、その素材まで辿る。
+    ///
+    /// 1 段だけ辿る。何段も辿ると話が大きくなりすぎるうえ、
+    /// 実際に必要になるのはたいてい 1 段。
+    ///
+    /// 実測: 黒麦粉は 1 回で 3 個できて、黒麦を 6 個使う。
+    /// 162 個要るなら 54 回で、黒麦が 324 個いる。
+    /// </summary>
+    private List<PlanMaterial> BuildSubMaterials(uint intermediateItemId, int shortfall)
+    {
+        var list = new List<PlanMaterial>();
+
+        try
+        {
+            var recipes = Svc.Data.GetExcelSheet<Recipe>();
+            var items = Svc.Data.GetExcelSheet<Item>();
+
+            if (recipes is null || items is null)
+            {
+                return list;
+            }
+
+            var recipe = recipes.FirstOrDefault(x => x.ItemResult.RowId == intermediateItemId);
+
+            if (recipe.RowId == 0)
+            {
+                return list;
+            }
+
+            var perCraftResult = Math.Max(1, (int)recipe.AmountResult);
+            var crafts = (shortfall + perCraftResult - 1) / perCraftResult;
+
+            for (var i = 0; i < recipe.Ingredient.Count; i++)
+            {
+                var ingredient = recipe.Ingredient[i];
+                var perCraft = (int)recipe.AmountIngredient[i];
+
+                if (ingredient.RowId == 0 || perCraft == 0)
+                {
+                    continue;
+                }
+
+                if (!items.TryGetRow(ingredient.RowId, out var item))
+                {
+                    continue;
+                }
+
+                // クリスタルは鞄を使わない。
+                if (this.crystalCategoryRowId != 0 && item.ItemUICategory.RowId == this.crystalCategoryRowId)
+                {
+                    continue;
+                }
+
+                var needed = perCraft * crafts;
+                var held = this.currency.TryGetCount(ingredient.RowId, out var have) ? have : 0;
+
+                list.Add(new PlanMaterial(
+                    ingredient.RowId,
+                    item.Name.ExtractText(),
+                    perCraft,
+                    needed,
+                    held,
+                    Math.Max(0, needed - held),
+                    0,
+                    false,
+                    []));
+            }
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Warn("Craft", $"素材の素材を辿れませんでした: {ex.Message}");
+        }
+
+        return list;
+    }
+
+    /// <summary>
     /// レシピ → 製作手帳での並び順。
     ///
     /// 手帳は行ごとにレシピが並んでいる。行の番号と、その行の中の位置で順が決まる。
@@ -378,6 +460,12 @@ public sealed class CraftPlanService(
 
             var isIntermediate = recipes.Any(x => x.ItemResult.RowId == ingredient.RowId);
 
+            // 作れる素材が足りないなら、その素材を作るのに要るものまで辿る。
+            // リテイナーに完成品が無いとき、これが無いと手が止まる。
+            var subMaterials = isIntermediate && shortfall > 0
+                ? this.BuildSubMaterials(ingredient.RowId, shortfall)
+                : [];
+
             list.Add(new PlanMaterial(
                 ingredient.RowId,
                 item.Name.ExtractText(),
@@ -386,7 +474,8 @@ public sealed class CraftPlanService(
                 held,
                 shortfall,
                 newSlots,
-                isIntermediate));
+                isIntermediate,
+                subMaterials));
         }
 
         return list;
