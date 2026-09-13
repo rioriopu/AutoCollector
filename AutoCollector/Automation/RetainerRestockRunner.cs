@@ -151,6 +151,27 @@ public sealed unsafe class RetainerRestockRunner(
     /// <summary>始められなかった理由。押しても動かないときに画面へ出す。</summary>
     public string LastFailure { get; private set; } = string.Empty;
 
+    /// <summary>
+    /// どこまで進んだかの記録。
+    ///
+    /// 詳細ログは既定で無効なうえ、押しても何も起きないときは
+    /// そもそも何が起きたのかが分からない。画面にそのまま出す。
+    /// </summary>
+    public IReadOnlyList<string> Trace => this.trace;
+
+    private readonly List<string> trace = [];
+
+    /// <summary>記録に 1 行足す。古いものから捨てる。</summary>
+    private void Note(string text)
+    {
+        this.trace.Add($"{DateTime.Now:HH:mm:ss.fff}  {text}");
+
+        if (this.trace.Count > 40)
+        {
+            this.trace.RemoveAt(0);
+        }
+    }
+
     public bool IsRunning => this.Step is not (RestockStep.Idle or RestockStep.Done or RestockStep.Error);
 
     /// <summary>いま取り出そうとしているもの。表示用。</summary>
@@ -160,10 +181,13 @@ public sealed unsafe class RetainerRestockRunner(
     public bool Start(IReadOnlyList<RestockRequest> wanted, out string reason)
     {
         this.LastFailure = string.Empty;
+        this.trace.Clear();
+        this.Note($"開始を要求されました（{wanted.Count} 種）");
 
         if (this.IsRunning)
         {
             reason = this.LastFailure = "すでに動いています";
+            this.Note(reason);
             return false;
         }
 
@@ -172,18 +196,21 @@ public sealed unsafe class RetainerRestockRunner(
         if (targets.Count == 0)
         {
             reason = this.LastFailure = "取り出すものがありません";
+            this.Note(reason);
             return false;
         }
 
         if (!Player.Available)
         {
             reason = this.LastFailure = "プレイヤーの状態を読み取れません";
+            this.Note(reason);
             return false;
         }
 
         if (FindBell() is null)
         {
             reason = this.LastFailure = $"近くに呼び鈴がありません（{DescribeNearby()}）";
+            this.Note(reason);
             return false;
         }
 
@@ -203,6 +230,7 @@ public sealed unsafe class RetainerRestockRunner(
         this.autoRetainer.Suppress();
 
         this.anomalyLog.Info("Restock", $"リテイナーから取り出します（{targets.Count} 種）");
+        this.Note($"AutoRetainer を抑制しました。{string.Join(" / ", targets.Select(x => $"{x.Name}×{x.Remaining}"))}");
 
         this.Move(RestockStep.InteractBell, "呼び鈴に話しかけています", 30);
         reason = string.Empty;
@@ -310,6 +338,7 @@ public sealed unsafe class RetainerRestockRunner(
             return;
         }
 
+        this.Note($"呼び鈴に話しかけます（{bell.Name}）");
         Svc.Targets.Target = bell;
         TargetSystem.Instance()->InteractWithObject((GameObjectStruct*)bell.Address, false);
     }
@@ -343,6 +372,7 @@ public sealed unsafe class RetainerRestockRunner(
             }
 
             this.anomalyLog.Info("Restock", $"リテイナー {this.pendingRetainers.Count} 人を順に見ます");
+            this.Note($"リテイナー {this.pendingRetainers.Count} 人: {string.Join(" / ", this.pendingRetainers)}");
         }
 
         this.Move(RestockStep.SelectRetainer, "リテイナーを選んでいます", 30);
@@ -393,6 +423,7 @@ public sealed unsafe class RetainerRestockRunner(
             this.currentRetainer = name;
             this.pendingRetainers.RemoveAt(0);
 
+            this.Note($"{name} を選びます");
             this.anomalyLog.Info("Restock", $"{name} を開きます");
             retainer.Select();
 
@@ -436,7 +467,12 @@ public sealed unsafe class RetainerRestockRunner(
 
         if (!this.menu.TrySelectByText(text, out var failure))
         {
+            this.Note($"「{text}」を選べません: {failure} / 選択肢: {string.Join(" / ", this.menu.ListEntries())}");
             this.anomalyLog.Warn("Restock", $"アイテムの受け渡しを選べませんでした: {failure}");
+        }
+        else
+        {
+            this.Note($"「{text}」を選びました");
         }
     }
 
@@ -499,10 +535,12 @@ public sealed unsafe class RetainerRestockRunner(
         this.bagBefore = this.currency.TryGetCount(request.ItemId, out var before) ? before : 0;
         this.activeRequest = request;
 
+        this.Note($"{request.Name} を {take} 個取り出します（このリテイナーに {available} 個）");
         this.anomalyLog.Info("Restock", $"{request.Name} を {take} 個取り出します（{this.currentRetainer}）");
 
         if (!this.OpenContextAndRetrieve(inventory, slot, take, available, out var contextFailure))
         {
+            this.Note($"取り出しの操作に失敗: {contextFailure}");
             this.anomalyLog.Warn("Restock", $"取り出しの操作に失敗しました: {contextFailure}");
             this.skippedHere.Add(request.ItemId);
             this.activeRequest = null;
@@ -903,6 +941,11 @@ public sealed unsafe class RetainerRestockRunner(
 
     private void Move(RestockStep step, string detail, int seconds)
     {
+        if (this.Step != step)
+        {
+            this.Note($"{step}: {detail}");
+        }
+
         this.Step = step;
         this.StatusDetail = detail;
         this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(seconds);
@@ -913,6 +956,8 @@ public sealed unsafe class RetainerRestockRunner(
     /// <summary>終わる。抑制の解除はここでしか行わないので、必ず通す。</summary>
     private void Finish(RestockStep step, string detail)
     {
+        this.Note($"終了: {detail}");
+
         this.Step = step;
         this.StatusDetail = detail;
 
