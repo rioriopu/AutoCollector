@@ -142,7 +142,7 @@ public sealed class Plugin : IDalamudPlugin
         this.CollectablesShopReader = new CollectablesShopReader();
         this.CollectablesShopService = new CollectablesShopService(this.AnomalyLog);
         this.CollectablesNpcService = new CollectablesNpcService(this.AnomalyLog, this.NpcLocationService);
-        this.InclusionShopCatalog = new InclusionShopCatalog(this.AnomalyLog);
+        this.InclusionShopCatalog = new InclusionShopCatalog(this.AnomalyLog, this.TomestoneService, this.SpecialCurrencyMap);
         this.CollectableDelivery = new CollectableDeliveryRunner(
             this.AnomalyLog, this.CollectablesShopService, this.CurrencyService, this.SpecialCurrencyMap);
 
