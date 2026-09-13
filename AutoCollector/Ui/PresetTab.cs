@@ -421,7 +421,7 @@ public sealed class PresetTab(Plugin plugin)
             this.seriesIndex = 0;
 
             // 系統を選び直すのは、欲しいアイテムを選び直す場面。
-            // 表を装備品へ戻すため、製作するジョブは未選択にする。
+            // 表を装備品へ戻すため、製作するジョブは未設定に戻す。
             ClearCraftChoice(preset);
             changed = true;
         }
@@ -596,6 +596,16 @@ public sealed class PresetTab(Plugin plugin)
 
         ImGui.Separator();
 
+        // 上限なしは目標が無い。素材が尽きるまで回る形なので、書き方も変える。
+        if (goal.Endless)
+        {
+            this.DrawEndlessSummary(preset, goal);
+            this.DrawKeepFreeSlots(preset, ref changed);
+            this.DrawGoalRunState(preset);
+            ImGui.Separator();
+            return;
+        }
+
         if (goal.Achieved)
         {
             ImGui.TextColored(ImGuiColors.HealerGreen, "目標に届いています");
@@ -640,7 +650,7 @@ public sealed class PresetTab(Plugin plugin)
             ImGui.TextColored(ImGuiColors.DalamudYellow, $"  {note}");
         }
 
-        // 目標を立てたら、終了条件は「所持の上限」だけで決まる。
+        // 所持の上限で目標を立てたら、終了条件はそれだけで決まる。
         // ほかの終了条件が残っていると、目標ぶんが貯まっても最後まで交換できない。
         if (preset.CraftCollectableItemId != 0)
         {
@@ -656,31 +666,76 @@ public sealed class PresetTab(Plugin plugin)
             {
                 ImGui.TextColored(
                     ImGuiColors.DalamudYellow,
-                    "  「交換する数」を 0 にしてください。個数は「所持の上限」で決まります");
+                    "  「一括交換する個数」を 0 にしてください。個数は「所持の上限」で決まります");
             }
         }
 
-        // 製作に使う設定。作った物と交換した物の両方が鞄に入る。
-        if (preset.CraftCollectableItemId != 0)
-        {
-            var keep = preset.CraftKeepFreeSlots;
-            ImGui.SetNextItemWidth(160f);
-
-            if (ImGui.InputInt("残す空き枠", ref keep))
-            {
-                preset.CraftKeepFreeSlots = Math.Max(0, keep);
-                changed = true;
-            }
-
-            if (ImGui.IsItemHovered())
-            {
-                ImGui.SetTooltip("製作のときに空けておく鞄の枠。交換で受け取る品の置き場になります。");
-            }
-        }
-
+        this.DrawKeepFreeSlots(preset, ref changed);
         this.DrawGoalRunState(preset);
 
         ImGui.Separator();
+    }
+
+    /// <summary>
+    /// 所持の上限を入れていないときの書き方。
+    ///
+    /// **終わりが無い。** 素材が尽きるまで、作って納品して交換し続ける。
+    /// 目標が無いので「あと何個」も「要るスクリップ」も出せない。
+    /// 代わりに、何を何個ずつ交換し続けるのかを出す。
+    /// </summary>
+    private void DrawEndlessSummary(ExchangePreset preset, ScripGoal goal)
+    {
+        ImGui.TextColored(ImGuiColors.HealerGreen, "上限なし: 素材が尽きるまで作って納品し、交換し続けます");
+
+        foreach (var item in goal.Items)
+        {
+            var entry = preset.Rewards.FirstOrDefault(x => x.RewardItemId == item.RewardItemId);
+            var batch = entry is null || entry.Quantity <= 0
+                ? "交換できる限り"
+                : $"1 回の移動で {entry.Quantity} 個ずつ";
+
+            ImGui.TextColored(
+                ImGuiColors.DalamudGrey,
+                $"  {item.Name}: {batch}（1 個 {item.Cost:N0} / いま {item.Held} 個）");
+        }
+
+        ImGui.TextUnformatted($"いまの{goal.CurrencyName}: {goal.HeldScrips:N0}");
+
+        if (goal.Collectable is null)
+        {
+            ImGui.TextColored(
+                ImGuiColors.DalamudYellow,
+                "  作る収集品が選ばれていません。下の「製作するジョブ」から選んでください");
+            return;
+        }
+
+        ImGui.TextColored(
+            ImGuiColors.HealerGreen,
+            $"  作る収集品: {goal.Collectable.Name}（1 個あたり最大 {goal.Collectable.HighReward}）" +
+            $" … 鞄の空き枠いっぱいまで作ります");
+    }
+
+    /// <summary>製作のときに空けておく枠。作った物と交換した物の両方が鞄に入る。</summary>
+    private void DrawKeepFreeSlots(ExchangePreset preset, ref bool changed)
+    {
+        if (preset.CraftCollectableItemId == 0)
+        {
+            return;
+        }
+
+        var keep = preset.CraftKeepFreeSlots;
+        ImGui.SetNextItemWidth(160f);
+
+        if (ImGui.InputInt("残す空き枠", ref keep))
+        {
+            preset.CraftKeepFreeSlots = Math.Max(0, keep);
+            changed = true;
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("製作のときに空けておく鞄の枠。交換で受け取る品の置き場になります。");
+        }
     }
 
     /// <summary>いま回っているかどうかを出す。止める手段も一緒に置く。</summary>
@@ -742,7 +797,7 @@ public sealed class PresetTab(Plugin plugin)
     /// <summary>
     /// 製作するジョブを選ぶ。系統の右に置く。
     ///
-    /// 「未選択」のあいだは、表には交換で手に入る装備品が並ぶ。
+    /// 「未設定」のあいだは、表には交換で手に入る装備品が並ぶ。
     /// ジョブを選ぶと、表はそのジョブで作れる収集品に切り替わる。
     /// 欲しいアイテムを選ぶ場面と、その元手を作る場面は別なので、表も分ける。
     /// </summary>
@@ -757,7 +812,7 @@ public sealed class PresetTab(Plugin plugin)
         }
 
         var current = jobs.FirstOrDefault(x => x.CraftType == preset.CraftJob);
-        var label = current?.Name ?? "未選択";
+        var label = current?.Name ?? "未設定";
 
         ImGui.SetNextItemWidth(180f);
 
@@ -767,7 +822,7 @@ public sealed class PresetTab(Plugin plugin)
             return;
         }
 
-        if (ImGui.Selectable("未選択##job0", preset.CraftJob == 0))
+        if (ImGui.Selectable("未設定##job0", preset.CraftJob == 0))
         {
             ClearCraftChoice(preset);
             changed = true;
@@ -1025,7 +1080,7 @@ public sealed class PresetTab(Plugin plugin)
                     // それぞれに説明を付ける。
                     var quantity = entry.Quantity;
                     ImGui.SetNextItemWidth(90f);
-                    if (ImGui.InputInt("交換する数##qty", ref quantity))
+                    if (ImGui.InputInt("一括交換する個数##qty", ref quantity))
                     {
                         entry.Quantity = Math.Max(0, quantity);
                         changed = true;
@@ -1033,7 +1088,9 @@ public sealed class PresetTab(Plugin plugin)
 
                     if (ImGui.IsItemHovered())
                     {
-                        ImGui.SetTooltip("これから何個交換するか。0 にすると上限なし（通貨か所持枠が尽きるまで）。");
+                        ImGui.SetTooltip(
+                            "1 回の移動でこの数まで交換します。0 にすると上限なし（通貨か所持枠が尽きるまで）。\n" +
+                            "所持の上限が 0 なら、交換所へ行くたびにこの数ずつ交換し続けます。");
                     }
 
                     ImGui.SameLine();
@@ -1075,19 +1132,26 @@ public sealed class PresetTab(Plugin plugin)
                     }
                     else
                     {
-                        ImGui.TextColored(ImGuiColors.DalamudGrey, ownedText);
+                        // 上限 0 は「終わりを決めない」。素材が尽きるまで繰り返す。
+                        // ここを「所持 0」とだけ出していたため、1 回で止まるのか
+                        // 繰り返すのかが読み取れなかった。
+                        ImGui.TextColored(
+                            ImGuiColors.DalamudGrey,
+                            $"{ownedText} / 上限なし → 素材が尽きるまで繰り返します");
                     }
 
                     if (entry.Quantity == 0)
                     {
                         ImGui.SameLine();
-                        ImGui.TextColored(ImGuiColors.DalamudYellow, "上限なし");
+                        ImGui.TextColored(ImGuiColors.DalamudYellow, "1 回で交換できる限り");
                     }
                 }
             }
         }
 
-        ImGui.TextColored(ImGuiColors.DalamudGrey, "  交換する数 … 1 回でこの数まで交換する。0 で上限なし");
+        ImGui.TextColored(
+            ImGuiColors.DalamudGrey,
+            "  一括交換する個数 … 1 回の移動でこの数まで交換する。0 で上限なし");
         ImGui.TextColored(ImGuiColors.DalamudGrey, "  所持の上限 … この数まで持つように交換する。足りないぶんだけ。0 で上限なし");
 
         if (remove is not null)

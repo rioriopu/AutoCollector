@@ -27,8 +27,15 @@ public sealed record GoalItem(
 /// <param name="RequiredScrips">残りを全部交換するのに要るスクリップ。</param>
 /// <param name="HeldScrips">いま持っているスクリップ。</param>
 /// <param name="MissingScrips">あと稼ぐ必要があるスクリップ。</param>
-/// <param name="CollectablesNeeded">そのために作る収集品の個数。</param>
+/// <param name="CollectablesNeeded">そのために作る収集品の個数。上限なしなら 0（空き枠いっぱい）。</param>
 /// <param name="Achieved">欲しいアイテムが全部そろっているか。</param>
+/// <param name="Endless">
+/// 所持の上限がどれにも入っていない。**終わりを決めずに回す。**
+///
+/// 素材が尽きるまで作って納品し、交換し続ける遊び方。
+/// 目標が無いので「届いた」は永遠に来ない。素材が尽きたときに止まる。
+/// </param>
+/// <param name="CheapestCost">まだ買う必要がある品のうち、いちばん安い費用。0 なら買えるものが無い。</param>
 public sealed record ScripGoal(
     uint CurrencyItemId,
     string CurrencyName,
@@ -39,6 +46,8 @@ public sealed record ScripGoal(
     CraftableCollectable? Collectable,
     int CollectablesNeeded,
     bool Achieved,
+    bool Endless,
+    uint CheapestCost,
     IReadOnlyList<string> Notes);
 
 /// <summary>
@@ -105,11 +114,10 @@ public sealed class ScripGoalService(
 
             var cost = this.FindCost(entry.RewardItemId, currencyItemId);
 
-            // 上限なしは「いくつ欲しいか」が決まらない。目標にはできない。
+            // 上限なしは「いくつ欲しいか」が決まらない。終わりを決めずに回す。
             if (entry.OwnedLimit <= 0)
             {
                 items.Add(new GoalItem(entry.RewardItemId, name, 0, held, 0, cost, 0, true));
-                notes.Add($"{name} は所持の上限が未設定のため、目標の計算に入れていません");
                 continue;
             }
 
@@ -141,13 +149,23 @@ public sealed class ScripGoalService(
             needed = (int)((missing + collectable.HighReward - 1) / collectable.HighReward);
         }
 
-        // 目標が 1 件も立っていないなら達成扱いにしない。何もせず終わったように見える。
+        // 所持の上限がどれにも入っていなければ、終わりを決めずに回す。
         var hasGoal = items.Any(x => !x.Unlimited);
+        var endless = !hasGoal && preset.Rewards.Count > 0;
         var achieved = hasGoal && items.Where(x => !x.Unlimited).All(x => x.Remaining == 0);
 
-        if (!hasGoal && preset.Rewards.Count > 0)
+        // まだ買う必要がある品のうち、いちばん安い費用。
+        // これだけ持っていれば 1 個は交換できる、という判断に使う。
+        var buyable = items
+            .Where(x => x.Cost > 0 && (x.Unlimited || x.Remaining > 0))
+            .Select(x => x.Cost)
+            .ToList();
+
+        var cheapest = buyable.Count > 0 ? buyable.Min() : 0u;
+
+        if (endless)
         {
-            notes.Add("所持の上限を入れると、その数に届くまで自動で作って納品します");
+            notes.Add("所持の上限が 0 のため、終わりを決めずに回します（素材が尽きるまで）");
         }
 
         return new ScripGoal(
@@ -160,6 +178,8 @@ public sealed class ScripGoalService(
             collectable,
             needed,
             achieved,
+            endless,
+            cheapest,
             notes);
     }
 
