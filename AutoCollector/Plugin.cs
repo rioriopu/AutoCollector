@@ -442,6 +442,16 @@ public sealed class Plugin : IDalamudPlugin
             Svc.Log.Error($"[Auto Collector] AutoRetainer の抑制解除に失敗しました: {ex}");
         }
 
+        // 背景で配置ファイルを読んでいる場合は打ち切る。
+        try
+        {
+            this.NpcLocationService?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            Svc.Log.Error($"[Auto Collector] NPC 配置の背景走査を止められませんでした: {ex}");
+        }
+
         try
         {
             this.AddonOwnership?.Dispose();
