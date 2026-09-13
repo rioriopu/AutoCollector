@@ -15,6 +15,15 @@ namespace AutoCollector.Game;
 /// </summary>
 public sealed class CurrencyService(AnomalyLog anomalyLog)
 {
+    /// <summary>鞄の入れ物。収集品も素材もここに入る。</summary>
+    private static readonly InventoryType[] BagTypes =
+    [
+        InventoryType.Inventory1,
+        InventoryType.Inventory2,
+        InventoryType.Inventory3,
+        InventoryType.Inventory4,
+    ];
+
     private readonly AnomalyLog anomalyLog = anomalyLog;
 
     /// <summary>
@@ -54,6 +63,86 @@ public sealed class CurrencyService(AnomalyLog anomalyLog)
 
     /// <summary>読み取れなかった場合は 0 を返す。表示専用。判定には TryGetCount を使うこと。</summary>
     public int GetCountOrZero(uint itemId) => this.TryGetCount(itemId, out var count) ? count : 0;
+
+    /// <summary>
+    /// 鞄の枠を直接見て所持数を数える。**収集品もここで数えられる。**
+    ///
+    /// 2026-09-13 の実測。収集用のタコス・カルネ・アサーダを 12 個作り終えた時点でも
+    /// <c>GetInventoryItemCount</c> は 0 を返した。製作の完了を所持数で見ていたため、
+    /// 作り終えているのに「素材が足りない」と誤って止まった。
+    /// 理由（収集価値による絞り込みの既定値か、別の条件か）は確かめきれていない。
+    ///
+    /// 納品側（<c>CollectablesShopReader.ListHeldCollectables</c>）は枠を直接見ており、
+    /// そちらは実機で正しく数えられている。**作った物を数えるときはこちらを使う。**
+    ///
+    /// 鞄（Inventory1..4）だけを見る。装備・アーマリーは見ない。
+    /// 作った物も素材もいったん鞄に入るため、製作の判定にはこれで足りる。
+    /// </summary>
+    public bool TryGetBagCount(uint itemId, out int count)
+    {
+        count = 0;
+
+        if (itemId == 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            unsafe
+            {
+                var manager = InventoryManager.Instance();
+
+                if (manager is null)
+                {
+                    return false;
+                }
+
+                var total = 0;
+                var readAny = false;
+
+                foreach (var type in BagTypes)
+                {
+                    var container = manager->GetInventoryContainer(type);
+
+                    if (container is null || !container->IsLoaded)
+                    {
+                        continue;
+                    }
+
+                    readAny = true;
+
+                    for (var i = 0; i < container->Size; i++)
+                    {
+                        var slot = container->GetInventorySlot(i);
+
+                        if (slot is null || slot->ItemId == 0)
+                        {
+                            continue;
+                        }
+
+                        if (slot->GetBaseItemId() == itemId)
+                        {
+                            total += slot->Quantity;
+                        }
+                    }
+                }
+
+                if (!readAny)
+                {
+                    return false;
+                }
+
+                count = total;
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Error("Currency", $"ItemId {itemId} の鞄の所持数を数えられませんでした: {ex.Message}");
+            return false;
+        }
+    }
 
     /// <summary>Item.StackSize を所持上限として使う。行が引けなければ null。</summary>
     public uint? GetStackCap(uint itemId)

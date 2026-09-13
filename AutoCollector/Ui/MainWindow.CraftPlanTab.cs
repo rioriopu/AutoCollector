@@ -238,6 +238,15 @@ public sealed partial class MainWindow
             plan.Crafts > 0 ? ImGuiColors.HealerGreen : ImGuiColors.DalamudRed,
             $"  作る個数: {plan.Crafts} 個");
 
+        // 終わりは所持数で見る。すでに持っているぶんが目標に乗ることを示しておく。
+        if (plan.TargetHeld > 0)
+        {
+            ImGui.TextColored(
+                ImGuiColors.DalamudGrey,
+                $"  すでに {plan.TargetHeld} 個持っています" +
+                $"（作り終えると {plan.TargetHeld + (plan.Crafts * Math.Max(1, plan.Target.AmountResult))} 個）");
+        }
+
         if (plan.Crafts > 0)
         {
             ImGui.TextColored(
