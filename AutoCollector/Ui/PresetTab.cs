@@ -325,7 +325,8 @@ public sealed class PresetTab(Plugin plugin)
         ImGui.TextUnformatted($"交換対象: {(preset.RewardItemId == 0 ? "未設定" : ItemName(preset.RewardItemId))}");
 
         var catalog = this.plugin.InclusionShopCatalog;
-        var categories = catalog.ListCategories();
+        // 選んでいる通貨で買えるものだけを出す。
+        var categories = catalog.ListCategories(currencyItemId);
 
         if (categories.Count == 0)
         {
@@ -364,7 +365,7 @@ public sealed class PresetTab(Plugin plugin)
                     }
 
                     ImGui.SameLine();
-                    ImGui.TextColored(ImGuiColors.DalamudGrey, $"  {ShortCategory(category.Name)} / {series.Name}");
+                    ImGui.TextColored(ImGuiColors.DalamudGrey, $"  {category.DisplayName} / {series.DisplayName}");
                 }
             }
 
@@ -373,7 +374,7 @@ public sealed class PresetTab(Plugin plugin)
         }
 
         // --- 系統 ---
-        var categoryNames = categories.Select(x => x.Name).ToArray();
+        var categoryNames = categories.Select(x => x.DisplayName).ToArray();
         if (this.categoryIndex >= categoryNames.Length)
         {
             this.categoryIndex = 0;
@@ -389,7 +390,7 @@ public sealed class PresetTab(Plugin plugin)
         var selectedCategory = categories[this.categoryIndex];
 
         // --- 種別 ---
-        var seriesNames = selectedCategory.Series.Select(x => x.Name).ToArray();
+        var seriesNames = selectedCategory.Series.Select(x => x.DisplayName).ToArray();
         if (this.seriesIndex >= seriesNames.Length)
         {
             this.seriesIndex = 0;

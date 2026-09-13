@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using AutoCollector.Diagnostics;
@@ -8,10 +8,19 @@ using Lumina.Excel.Sheets;
 namespace AutoCollector.Game;
 
 /// <summary>交換画面の「種別」1 件。ゲーム内のタブに相当する。</summary>
-public sealed record InclusionSeries(uint SpecialShopId, string Name);
+/// <param name="Name">シート上の名前。例: 紫貨の取引：Lv58～向け【ILv130】</param>
+/// <param name="DisplayName">通貨名を落とした表示用。例: Lv58～向け【ILv130】</param>
+/// <param name="Currencies">この種別で使う通貨。絞り込みに使う。</param>
+public sealed record InclusionSeries(
+    uint SpecialShopId,
+    string Name,
+    string DisplayName,
+    IReadOnlyCollection<uint> Currencies);
 
 /// <summary>交換画面の「系統」1 件。ゲーム内のプルダウンに相当する。</summary>
-public sealed record InclusionCategory(string Name, IReadOnlyList<InclusionSeries> Series);
+/// <param name="Name">シート上の名前。例: クラフタースクリップの取引：装備品</param>
+/// <param name="DisplayName">通貨名を落とした表示用。例: 装備品</param>
+public sealed record InclusionCategory(string Name, string DisplayName, IReadOnlyList<InclusionSeries> Series);
 
 /// <summary>種別の中に並ぶ品 1 件。</summary>
 public sealed record InclusionOffer(
@@ -41,11 +50,25 @@ public sealed record InclusionOffer(
 /// 名前でまとめて全都市の和を取る。どの窓口へ行くかは
 /// <see cref="ExchangeResolver"/> が品から決めるため、ここでは気にしない。
 /// </summary>
-public sealed class InclusionShopCatalog(AnomalyLog anomalyLog)
+public sealed class InclusionShopCatalog(
+    AnomalyLog anomalyLog,
+    TomestoneService tomestoneService,
+    SpecialCurrencyMap specialCurrencyMap)
 {
     private readonly AnomalyLog anomalyLog = anomalyLog;
+    private readonly TomestoneService tomestoneService = tomestoneService;
+    private readonly SpecialCurrencyMap specialCurrencyMap = specialCurrencyMap;
 
     private List<InclusionCategory>? categories;
+
+    /// <summary>
+    /// 一覧を作ったとき、特殊通貨の対応表がクライアント由来だったか。
+    ///
+    /// スクリップのコストは特殊通貨の番号で入っており、実 ItemId への変換が要る。
+    /// その対応表は起動直後には同梱の控えしか無く、あとからクライアント由来に入れ替わる。
+    /// 控えで作った一覧をそのまま使い続けると、実際と食い違う可能性がある。
+    /// </summary>
+    private bool builtFromClientCurrencies;
 
     /// <summary>種別ごとの品。開いたものだけを覚える。</summary>
     private readonly Dictionary<uint, List<InclusionOffer>> offerCache = [];
@@ -53,9 +76,17 @@ public sealed class InclusionShopCatalog(AnomalyLog anomalyLog)
     /// <summary>系統と種別の一覧。初回の呼び出しで作る。</summary>
     public IReadOnlyList<InclusionCategory> ListCategories()
     {
-        if (this.categories is not null)
+        // 対応表がクライアント由来へ入れ替わっていたら作り直す。
+        if (this.categories is not null &&
+            (this.builtFromClientCurrencies || !this.specialCurrencyMap.ResolvedFromClient))
         {
             return this.categories;
+        }
+
+        if (this.categories is not null)
+        {
+            this.anomalyLog.Info("Inclusion", "特殊通貨の対応表が確定したため、交換の一覧を作り直します");
+            this.offerCache.Clear();
         }
 
         var result = new List<InclusionCategory>();
@@ -123,7 +154,24 @@ public sealed class InclusionShopCatalog(AnomalyLog anomalyLog)
                             continue;
                         }
 
-                        list.Add(new InclusionSeries(specialShopId, name));
+                        // どの通貨で買えるかを控える。プリセットで選んだ通貨に
+                        // 関係のない系統や種別を出さないために要る。
+                        // ここで読んだ品はそのまま覚えておくので、開いたときは読み直さない。
+                        var offers = this.ReadOffers(specialShopId);
+                        this.offerCache[specialShopId] = offers;
+
+                        var currencies = new HashSet<uint>();
+                        foreach (var offer in offers)
+                        {
+                            currencies.Add(offer.CurrencyItemId);
+                        }
+
+                        if (currencies.Count == 0)
+                        {
+                            continue;
+                        }
+
+                        list.Add(new InclusionSeries(specialShopId, name, Shorten(name), currencies));
                     }
                 }
             }
@@ -133,7 +181,7 @@ public sealed class InclusionShopCatalog(AnomalyLog anomalyLog)
                 var series = merged[name];
                 if (series.Count > 0)
                 {
-                    result.Add(new InclusionCategory(name, series));
+                    result.Add(new InclusionCategory(name, Shorten(name), series));
                 }
             }
 
@@ -146,7 +194,44 @@ public sealed class InclusionShopCatalog(AnomalyLog anomalyLog)
             this.anomalyLog.Error("Inclusion", $"交換の一覧を作れませんでした: {ex.Message}");
         }
 
+        // 何も作れなかった場合は覚えない。次の呼び出しでやり直す。
+        if (result.Count == 0)
+        {
+            return result;
+        }
+
+        this.builtFromClientCurrencies = this.specialCurrencyMap.ResolvedFromClient;
         return this.categories = result;
+    }
+
+    /// <summary>
+    /// 指定した通貨で買えるものだけに絞った一覧。
+    ///
+    /// クラフタースクリップを選んでいるのにギャザラーの系統が並ぶと選び違える。
+    /// 紫貨を選んでいるなら、橙貨の種別も出さない。
+    /// </summary>
+    public IReadOnlyList<InclusionCategory> ListCategories(uint currencyItemId)
+    {
+        var all = this.ListCategories();
+
+        if (currencyItemId == 0)
+        {
+            return all;
+        }
+
+        var result = new List<InclusionCategory>();
+
+        foreach (var category in all)
+        {
+            var series = category.Series.Where(x => x.Currencies.Contains(currencyItemId)).ToList();
+
+            if (series.Count > 0)
+            {
+                result.Add(category with { Series = series });
+            }
+        }
+
+        return result;
     }
 
     /// <summary>
@@ -169,6 +254,54 @@ public sealed class InclusionShopCatalog(AnomalyLog anomalyLog)
         }
 
         return all.Where(x => x.CurrencyItemId == currencyItemId).ToList();
+    }
+
+    /// <summary>
+    /// コストの表現を実 ItemId へ解決する。
+    /// <see cref="ExchangeResolver"/> と同じ判断でなければ、
+    /// 一覧と実際の交換で食い違いが出る。
+    /// </summary>
+    private bool TryResolveCostCurrency(byte costType, uint costRowId, out uint itemId)
+    {
+        itemId = 0;
+
+        switch (costType)
+        {
+            case SpecialShopCostType.DirectItem:
+            case SpecialShopCostType.DirectItemAlt:
+                // 8 未満は特殊表現の名残なので採用しない。
+                if (costRowId < 8)
+                {
+                    return false;
+                }
+
+                itemId = costRowId;
+                return true;
+
+            case SpecialShopCostType.TomestoneSlot:
+                return this.tomestoneService.TryResolveItemId(costRowId, out itemId);
+
+            case SpecialShopCostType.SpecialCurrencyBucket:
+                return this.specialCurrencyMap.TryResolve(costRowId, out itemId);
+
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// 表示用に通貨名を落とす。
+    ///
+    /// 「クラフタースクリップの取引：装備品」→「装備品」
+    /// 「紫貨の取引：Lv58～向け【ILv130】」→「Lv58～向け【ILv130】」
+    ///
+    /// どの通貨かはプリセット側で選んでいるため、繰り返す意味がない。
+    /// 長い接頭辞が付いたままだと、肝心の部分が読み取りにくい。
+    /// </summary>
+    private static string Shorten(string name)
+    {
+        var separator = name.LastIndexOf('：');
+        return separator >= 0 && separator + 1 < name.Length ? name[(separator + 1)..] : name;
     }
 
     private List<InclusionOffer> ReadOffers(uint specialShopId)
@@ -216,13 +349,17 @@ public sealed class InclusionShopCatalog(AnomalyLog anomalyLog)
                     continue;
                 }
 
+                // コストは ItemCost.RowId をそのまま ItemId として読んではいけない。
+                // スクリップは特殊通貨の番号が入っており、そのまま読むと
+                // 全く別のアイテム（ウィンドシャード等）になる。
+                // CostType を見て解決する。ExchangeResolver と同じ判断。
                 uint costItemId = 0;
                 uint costAmount = 0;
                 var costCount = 0;
 
                 foreach (var cost in entry.ItemCosts)
                 {
-                    if (cost.ItemCost.RowId == 0)
+                    if (cost.CurrencyCost == 0 || cost.ItemCost.RowId == 0)
                     {
                         continue;
                     }
@@ -233,7 +370,12 @@ public sealed class InclusionShopCatalog(AnomalyLog anomalyLog)
                         continue;
                     }
 
-                    costItemId = cost.ItemCost.RowId;
+                    if (!this.TryResolveCostCurrency(cost.CostType, cost.ItemCost.RowId, out var resolved))
+                    {
+                        continue;
+                    }
+
+                    costItemId = resolved;
                     costAmount = cost.CurrencyCost;
                 }
 
