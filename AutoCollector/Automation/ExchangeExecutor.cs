@@ -37,6 +37,14 @@ public enum ExchangeStep
     /// <summary>エーテライト網で都市内を短縮移動している。</summary>
     AethernetHop,
 
+    /// <summary>
+    /// エーテライト網で別のエリアへ移る。
+    ///
+    /// ウルダハ：ザル回廊のようにエーテライトが無いエリアは、
+    /// 同じ網の親エーテライトへ飛んでから、網で移動する必要がある。
+    /// </summary>
+    AethernetTransfer,
+
     /// <summary>NPC のいる場所へ移動している。</summary>
     Navigate,
 
@@ -257,6 +265,27 @@ public sealed unsafe class ExchangeExecutor(
     private readonly InclusionShopService inclusionShop = inclusionShop;
     private readonly CollectablesShopService collectablesShop = collectablesShop;
     private readonly CollectableDeliveryRunner collectableDelivery = collectableDelivery;
+
+    /// <summary>
+    /// 目的エリアへ直接飛べない場合の経路。null なら直接飛べる。
+    /// テレポートの到着判定を、最終目的地ではなく玄関口で行うために持つ。
+    /// </summary>
+    private AethernetRoute? aethernetRoute;
+
+    /// <summary>エーテライト網での転送を送った回数。</summary>
+    private int aethernetTransferAttempts;
+
+    /// <summary>
+    /// この 1 回ぶん全体の締切。段階ごとの締切とは別に持つ。
+    /// 安全な状態を待つ段階では見ない。
+    /// </summary>
+    private DateTime tripDeadlineUtc = DateTime.MinValue;
+
+    /// <summary>
+    /// 話しかけと会話メニューを往復した回数。
+    /// 会話メニューを閉じられると話しかけへ戻るため、放っておくと止まらない。
+    /// </summary>
+    private int menuBounces;
 
     /// <summary>納品を開始済みか。開始と終了の区別に使う。</summary>
     private bool deliveryStarted;
@@ -703,6 +732,7 @@ public sealed unsafe class ExchangeExecutor(
         }
 
         var needsTeleport = Svc.ClientState.TerritoryType != definition.TerritoryId;
+        AethernetRoute? plannedRoute = null;
 
         if (needsTeleport)
         {
@@ -716,14 +746,25 @@ public sealed unsafe class ExchangeExecutor(
                 return false;
             }
 
+            // エーテライトが無いエリアがある（例: ウルダハ：ザル回廊）。
+            // その場合は同じ網の親エーテライトへ飛び、そこから網で移動する。
             if (!this.aetheryte.TryFindTarget(definition.TerritoryId, out _))
             {
-                this.pendingRequest = null;
-                this.Fail(
-                    ExchangeFailure.AetheryteNotAttuned,
-                    $"{NpcLocationService.GetTerritoryName(definition.TerritoryId)} のエーテライトにアクセスしていないため、テレポートできません");
-                reason = this.StatusDetail;
-                return false;
+                if (!this.aetheryte.TryFindAethernetRoute(definition.TerritoryId, out plannedRoute) || plannedRoute is null)
+                {
+                    this.pendingRequest = null;
+                    this.Fail(
+                        ExchangeFailure.AetheryteNotAttuned,
+                        $"{NpcLocationService.GetTerritoryName(definition.TerritoryId)} へ行けません。" +
+                        "エーテライトが無く、エーテライト網の玄関口にもアクセスしていません");
+                    reason = this.StatusDetail;
+                    return false;
+                }
+
+                this.anomalyLog.Info(
+                    "Travel",
+                    $"{NpcLocationService.GetTerritoryName(definition.TerritoryId)} へは " +
+                    $"{plannedRoute.Hub.Name} からエーテライト網で向かいます");
             }
         }
 
@@ -745,7 +786,14 @@ public sealed unsafe class ExchangeExecutor(
         this.nextArmedAllowedUtc = DateTime.MinValue;
         this.stopAttempts = 0;
         this.sawAutoDutyRunning = false;
+        this.aethernetRoute = plannedRoute;
         this.deliveryStarted = false;
+        this.aethernetTransferAttempts = 0;
+        this.menuBounces = 0;
+
+        // 納品は品数ぶん繰り返すため長くかかる。移動と会話を含めても
+        // 15 分あれば足りる。これを超えるのは何かが噛み合っていないとき。
+        this.tripDeadlineUtc = DateTime.UtcNow.AddMinutes(15);
         this.deliveryFailure = string.Empty;
         this.deliverySummary = string.Empty;
         this.closeAttempts = 0;
@@ -771,6 +819,26 @@ public sealed unsafe class ExchangeExecutor(
         {
             this.nextContextLogUtc = DateTime.UtcNow.AddSeconds(5);
             this.anomalyLog.Trace("State", $"{this.Step} 継続中: {this.StatusDetail} / {this.DescribeContext()}");
+        }
+
+        // 全体の制限時間。
+        //
+        // 各段階はそれぞれ締切を持つが、段階を移るたびに引き直される。
+        // そのため 2 つの段階を往復し続けると永久に終わらない。
+        // 実際、話しかける → 会話メニュー → 閉じる → 話しかける、の往復で
+        // 操作不能になった。段階ごとの締切とは別に、全体の上限が要る。
+        //
+        // 安全な状態を待っている間は数えない。コンテンツが終わるのを待つのは正しい動作で、
+        // 時間切れで打ち切っても意味がない。
+        if (this.Step is not (ExchangeStep.Idle or ExchangeStep.Done or ExchangeStep.Error
+                or ExchangeStep.WaitingSafeWindow) &&
+            this.tripDeadlineUtc != DateTime.MinValue &&
+            DateTime.UtcNow > this.tripDeadlineUtc)
+        {
+            this.anomalyLog.Error("Executor", $"制限時間を超えました（{this.Step} で停止）");
+            this.navigation.Stop();
+            this.Fail(ExchangeFailure.Aborted, $"制限時間を超えたため中止しました（{this.Step} で停止）");
+            return;
         }
 
         switch (this.Step)
@@ -805,6 +873,10 @@ public sealed unsafe class ExchangeExecutor(
 
             case ExchangeStep.AethernetHop:
                 this.TickAethernetHop();
+                break;
+
+            case ExchangeStep.AethernetTransfer:
+                this.TickAethernetTransfer();
                 break;
 
             case ExchangeStep.Navigate:
@@ -1482,6 +1554,84 @@ public sealed unsafe class ExchangeExecutor(
     }
 
     /// <summary>エーテライト網の転送完了を待つ。</summary>
+    /// <summary>
+    /// エーテライト網で別のエリアへ移る。
+    ///
+    /// 目的エリアに着いたかどうかだけを見る。
+    /// 送った直後はまだ玄関口にいるため、エリアが変わるまで待つ。
+    /// </summary>
+    private void TickAethernetTransfer()
+    {
+        var target = this.travelTarget;
+        var route = this.aethernetRoute;
+
+        if (target is null || route is null)
+        {
+            this.Step = ExchangeStep.Idle;
+            return;
+        }
+
+        // 着いた。ここから先は通常の移動と同じ。
+        if (Svc.ClientState.TerritoryType == target.TerritoryId)
+        {
+            if (!GenericHelpers.IsScreenReady() || !Player.Available || !Player.Interactable)
+            {
+                return;
+            }
+
+            this.anomalyLog.Info("Travel", $"エーテライト網で {target.NpcName} のいるエリアへ移りました");
+
+            if (!this.BeginTravelToNpc(target, out var navFailure))
+            {
+                this.Fail(ExchangeFailure.NavigationFailed, navFailure);
+            }
+
+            return;
+        }
+
+        if (DateTime.UtcNow > this.stepDeadlineUtc)
+        {
+            this.Fail(
+                ExchangeFailure.TeleportFailed,
+                $"エーテライト網で「{route.ShardName}」へ移動できませんでした");
+            return;
+        }
+
+        // 送れる状態になるまで待つ。
+        if (!Player.Available || Player.IsCasting || GenericHelpers.IsOccupied() || !GenericHelpers.IsScreenReady() ||
+            Svc.Condition[ConditionFlag.BetweenAreas] || Svc.Condition[ConditionFlag.BetweenAreas51])
+        {
+            return;
+        }
+
+        if (this.lifestream.TryIsBusy(out var busy) && busy)
+        {
+            return;
+        }
+
+        if (!EzThrottler.Throttle("AutoCollector.AethernetTransfer", 3000))
+        {
+            return;
+        }
+
+        if (this.aethernetTransferAttempts >= 3)
+        {
+            this.Fail(
+                ExchangeFailure.TeleportFailed,
+                $"エーテライト網で「{route.ShardName}」へ移動できませんでした（3 回試行）");
+            return;
+        }
+
+        this.aethernetTransferAttempts++;
+
+        if (!this.lifestream.TryAethernetTeleportById(route.ShardAetheryteRowId, out var accepted) || !accepted)
+        {
+            this.anomalyLog.Warn(
+                "Travel",
+                $"エーテライト網への転送を受け付けてもらえませんでした（{this.aethernetTransferAttempts} 回目）");
+        }
+    }
+
     private void TickAethernetHop()
     {
         var target = this.travelTarget;
@@ -1532,10 +1682,24 @@ public sealed unsafe class ExchangeExecutor(
         }
 
         // 到着したかを見る。読み込み中の状態では判定しない。
-        if (Svc.ClientState.TerritoryType == target.TerritoryId)
+        //
+        // 直接飛べないエリアでは、いったん玄関口のエリアへ着く。
+        // そこからエーテライト網で目的エリアへ移るため、到着の基準が変わる。
+        var arrivalTerritory = this.aethernetRoute?.Hub.TerritoryId ?? target.TerritoryId;
+
+        if (Svc.ClientState.TerritoryType == arrivalTerritory)
         {
             if (!GenericHelpers.IsScreenReady() || !Player.Available || !Player.Interactable)
             {
+                return;
+            }
+
+            // 玄関口に着いただけなら、まだ目的エリアではない。網で移る。
+            if (this.aethernetRoute is { } route && Svc.ClientState.TerritoryType != target.TerritoryId)
+            {
+                this.Step = ExchangeStep.AethernetTransfer;
+                this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(60);
+                this.StatusDetail = $"エーテライト網で「{route.ShardName}」へ移動しています";
                 return;
             }
 
@@ -1600,7 +1764,10 @@ public sealed unsafe class ExchangeExecutor(
             return;
         }
 
-        if (!this.aetheryte.TryFindTarget(target.TerritoryId, out var destination) || destination is null)
+        // 直接飛べないエリアでは玄関口へ飛ぶ。目的エリアへは網で移る。
+        var destination = this.aethernetRoute?.Hub;
+
+        if (destination is null && (!this.aetheryte.TryFindTarget(target.TerritoryId, out destination) || destination is null))
         {
             this.Fail(ExchangeFailure.AetheryteNotAttuned, "テレポート先のエーテライトが見つかりません");
             return;
@@ -1864,6 +2031,21 @@ public sealed unsafe class ExchangeExecutor(
         if (!this.menu.IsMenuOpen())
         {
             // 閉じただけかもしれないので、対話からやり直す。
+            //
+            // ただし無制限に戻ってはいけない。人が手で閉じた場合や、
+            // 選ぶべき選択肢が無い場合、話しかけ直しても同じ画面に戻るだけで
+            // 永久に往復する。締切も毎回引き直されるため自力では抜けられない。
+            this.menuBounces++;
+
+            if (this.menuBounces > 3)
+            {
+                this.Fail(
+                    ExchangeFailure.MenuResolutionFailed,
+                    $"会話を抜けられませんでした（{this.menuBounces} 回やり直し）。" +
+                    $"選択肢: {string.Join(" / ", this.menu.ListEntries())}");
+                return;
+            }
+
             this.Step = ExchangeStep.Interact;
             this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(30);
             return;

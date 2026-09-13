@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
@@ -12,6 +12,22 @@ namespace AutoCollector.Game;
 
 /// <summary>テレポート先のエーテライト。</summary>
 public sealed record TeleportTarget(uint AetheryteId, byte SubIndex, uint TerritoryId, string Name);
+
+/// <summary>
+/// 目的エリアに直接飛べないときの、都市の玄関口を経由する経路。
+///
+/// ウルダハ：ザル回廊のように、エーテライトが無くエーテライト網でしか行けないエリアがある。
+/// そこへは「同じ網の親エーテライトへ飛び、そこから網で移動する」必要がある。
+/// </summary>
+/// <param name="Hub">親エーテライト。ここへテレポートする。</param>
+/// <param name="ShardAetheryteRowId">目的エリアにあるエーテライト網の出口。Lifestream へ渡す。</param>
+/// <param name="ShardName">出口の名前。表示とログに使う。</param>
+/// <param name="TargetTerritoryId">最終的に着きたいエリア。</param>
+public sealed record AethernetRoute(
+    TeleportTarget Hub,
+    uint ShardAetheryteRowId,
+    string ShardName,
+    uint TargetTerritoryId);
 
 /// <summary>
 /// テレポート先のエーテライトを決める。
@@ -190,5 +206,102 @@ public sealed class AetheryteService(AnomalyLog anomalyLog)
         var row = Svc.Data.GetExcelSheet<Aetheryte>()?.GetRowOrDefault(aetheryteId);
         var name = row?.PlaceName.ValueNullable?.Name.ExtractText();
         return string.IsNullOrEmpty(name) ? $"Aetheryte {aetheryteId}" : name;
+    }
+
+    /// <summary>
+    /// 目的エリアに直接飛べない場合の、エーテライト網を使う経路を探す。
+    ///
+    /// Aetheryte シートを使う。同じ都市のエーテライトは AethernetGroup が同じで、
+    /// そのうち IsAetheryte が立っている 1 件が親（テレポートで行ける方）になる。
+    ///
+    /// <code>
+    /// group 3 の親 = Aetheryte 9（ウルダハ：ナル回廊）
+    ///   └ Aetheryte 125（ウルダハ：ザル回廊）  ← エーテライト網でしか行けない
+    /// </code>
+    ///
+    /// 親エーテライトにアクセスしていなければ経路は成立しない。
+    /// </summary>
+    public bool TryFindAethernetRoute(uint targetTerritoryId, out AethernetRoute? route)
+    {
+        route = null;
+
+        if (targetTerritoryId == 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            var sheet = Svc.Data.GetExcelSheet<Aetheryte>();
+            if (sheet is null)
+            {
+                return false;
+            }
+
+            // 目的エリアにあるエーテライト網の出口を探す。
+            uint shardRowId = 0;
+            byte group = 0;
+
+            foreach (var row in sheet)
+            {
+                if (row.Territory.RowId != targetTerritoryId || row.AethernetGroup == 0)
+                {
+                    continue;
+                }
+
+                // 親そのものがここにあるなら、この関数の出番ではない。
+                if (row.IsAetheryte)
+                {
+                    return false;
+                }
+
+                shardRowId = row.RowId;
+                group = row.AethernetGroup;
+                break;
+            }
+
+            if (shardRowId == 0)
+            {
+                return false;
+            }
+
+            // 同じ網の親を探す。
+            foreach (var row in sheet)
+            {
+                if (row.AethernetGroup != group || !row.IsAetheryte)
+                {
+                    continue;
+                }
+
+                var hubTerritory = row.Territory.RowId;
+                if (hubTerritory == 0)
+                {
+                    continue;
+                }
+
+                // 親にアクセスしていなければ飛べない。
+                if (!this.TryFindTarget(hubTerritory, out var hub) || hub is null)
+                {
+                    this.anomalyLog.Warn(
+                        "Aetheryte",
+                        $"{NpcLocationService.GetTerritoryName(targetTerritoryId)} へはエーテライト網でしか行けませんが、" +
+                        $"玄関口の {NpcLocationService.GetTerritoryName(hubTerritory)} にアクセスしていません");
+                    return false;
+                }
+
+                var shardName = sheet.GetRowOrDefault(shardRowId)?.AethernetName.ValueNullable?.Name.ExtractText()
+                                ?? string.Empty;
+
+                route = new AethernetRoute(hub, shardRowId, shardName, targetTerritoryId);
+                return true;
+            }
+
+            return false;
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Warn("Aetheryte", $"エーテライト網の経路を探せませんでした: {ex.Message}");
+            return false;
+        }
     }
 }

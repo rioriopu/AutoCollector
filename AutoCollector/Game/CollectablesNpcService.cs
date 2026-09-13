@@ -9,13 +9,18 @@ using Lumina.Excel.Sheets;
 namespace AutoCollector.Game;
 
 /// <summary>収集品の納品窓口 1 件。</summary>
+/// <param name="ShopName">会話メニューの手がかり。シート上の名前をそのまま使う。</param>
+/// <param name="DisplayName">一覧に出す名前。何を扱う窓口かが分かるようにする。</param>
+/// <param name="IsGeneralDelivery">一般の収集品納品か。false は道具強化などの専用窓口。</param>
 public sealed record CollectablesNpc(
     uint NpcDataId,
     string NpcName,
     uint TerritoryId,
     Vector3 Position,
     bool HasLocation,
-    string ShopName);
+    string ShopName,
+    string DisplayName,
+    bool IsGeneralDelivery);
 
 /// <summary>
 /// 収集品の納品窓口（収集品納品窓口）をゲームデータから探す。
@@ -40,6 +45,31 @@ public sealed class CollectablesNpcService(AnomalyLog anomalyLog, NpcLocationSer
 {
     private readonly AnomalyLog anomalyLog = anomalyLog;
     private readonly NpcLocationService npcLocationService = npcLocationService;
+
+    /// <summary>一般の収集品納品を扱う CollectablesShop。シート上の名前は「収集品納品」。</summary>
+    private const uint GeneralDeliveryShopId = 3866626;
+
+    /// <summary>
+    /// 一覧に出さない窓口。
+    ///
+    /// 3866628「最終改良用部材の交換」（蒼天街・豪腕くん）は、
+    /// 座標はデータにあるが実際には NPC がいないため、行っても交換できない。
+    /// </summary>
+    private static readonly HashSet<uint> ExcludedShops = [3866628];
+
+    /// <summary>
+    /// 一覧に出す名前。
+    ///
+    /// シート上の名前（「改良用部材の交換：クラフター」など）では何の窓口か分からない。
+    /// 道具の名前で示したほうが選びやすい。CollectablesShop の行番号で対応づける。
+    /// </summary>
+    private static readonly Dictionary<uint, string> DisplayNames = new()
+    {
+        [GeneralDeliveryShopId] = "収集品納品",
+        [3866625] = "スカイスチールツール",
+        [3866630] = "リスプレンデントツール",
+        [3866631] = "モーエンツール",
+    };
 
     private List<CollectablesNpc>? cache;
 
@@ -87,7 +117,14 @@ public sealed class CollectablesNpcService(AnomalyLog anomalyLog, NpcLocationSer
                     name = $"ENpc {npc.RowId}";
                 }
 
+                // 実際に行っても NPC がいない窓口は一覧から外す。
+                if (ExcludedShops.Contains(shopHandlerId))
+                {
+                    continue;
+                }
+
                 var hasLocation = this.npcLocationService.TryGet(npc.RowId, out var location);
+                var general = shopHandlerId == GeneralDeliveryShopId;
 
                 found.Add(new CollectablesNpc(
                     npc.RowId,
@@ -95,7 +132,9 @@ public sealed class CollectablesNpcService(AnomalyLog anomalyLog, NpcLocationSer
                     hasLocation ? location.TerritoryId : 0,
                     hasLocation ? location.Position : default,
                     hasLocation,
-                    shopName));
+                    shopName,
+                    DisplayNames.TryGetValue(shopHandlerId, out var label) ? label : name,
+                    general));
             }
 
             this.anomalyLog.Info(
@@ -162,15 +201,23 @@ public sealed class CollectablesNpcService(AnomalyLog anomalyLog, NpcLocationSer
     /// </summary>
     public CollectablesNpc? ChooseDestination(uint preferredNpcDataId)
     {
-        var candidates = this.List().Where(x => x.HasLocation).ToList();
-        if (candidates.Count == 0)
+        var all = this.List().Where(x => x.HasLocation).ToList();
+        if (all.Count == 0)
         {
             return null;
         }
 
+        // 指定が無ければ一般の納品窓口から選ぶ。専用窓口を勝手に選ぶと目的が変わってしまう。
+        var candidates = all.Where(x => x.IsGeneralDelivery).ToList();
+        if (candidates.Count == 0)
+        {
+            candidates = all;
+        }
+
         if (preferredNpcDataId != 0)
         {
-            var preferred = candidates.FirstOrDefault(x => x.NpcDataId == preferredNpcDataId);
+            // 指定されたものは専用窓口でもそのまま使う。選んだのは本人なので尊重する。
+            var preferred = all.FirstOrDefault(x => x.NpcDataId == preferredNpcDataId);
             if (preferred is not null)
             {
                 return preferred;
