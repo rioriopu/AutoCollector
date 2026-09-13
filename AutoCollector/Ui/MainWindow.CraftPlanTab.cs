@@ -28,20 +28,8 @@ public sealed partial class MainWindow
     /// <summary>選んでいる Lv 帯の下限。</summary>
     private int craftPlanLevelBand;
 
-    /// <summary>
-    /// 製作手帳の「RECIPE LEVEL」と同じ区切り。
-    ///
-    /// **50-60 は Lv60 を含む。** 10 で割った刻みではない。
-    /// 実際の手帳（木工 50-60）には Lv50・52・54・56・58・60 の 6 件が並ぶ。
-    /// </summary>
-    private static readonly (int Min, int Max)[] LevelBands =
-    [
-        (50, 60),
-        (61, 70),
-        (71, 80),
-        (81, 90),
-        (91, 100),
-    ];
+    /// <summary>区切りは <see cref="CraftPlanService.LevelBands"/> に置いてある。</summary>
+    private static (int Min, int Max)[] LevelBands => CraftPlanService.LevelBands;
 
     private void DrawCraftPlanTab()
     {

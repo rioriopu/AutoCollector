@@ -128,6 +128,31 @@ public sealed class ExchangePreset
 
     /// <summary>連続失敗して自動的に無効化されたときの理由。UI に表示する。</summary>
     public string? DisabledReason { get; set; }
+
+    /// <summary>
+    /// スクリップが足りないぶんを、収集品を作って納品して賄うか。
+    ///
+    /// 入れると、このプリセットは「欲しいアイテムが揃うまで」を通しで回す。
+    /// 素材の取り出し → 製作 → 納品 → 交換 を、目標に届くまで繰り返す。
+    /// </summary>
+    public bool CraftToEarn { get; set; }
+
+    /// <summary>製作するジョブ。CraftType の行番号。0 は未選択。</summary>
+    public uint CraftJob { get; set; }
+
+    /// <summary>
+    /// 作る収集品の ItemId。0 は未選択。
+    ///
+    /// 橙貨はジョブごとに 1 件しかないため、ジョブを決めれば自動で決まる。
+    /// 紫貨はレベル帯ごとに複数あり、生むスクリップの量も違うため、選ぶ必要がある。
+    /// </summary>
+    public uint CraftCollectableItemId { get; set; }
+
+    /// <summary>選んでいるレベル帯の下限。0 は未選択。表示を戻すためだけに持つ。</summary>
+    public int CraftLevelBand { get; set; }
+
+    /// <summary>製作のときに残しておく鞄の空き枠。交換した品を入れる余地になる。</summary>
+    public int CraftKeepFreeSlots { get; set; } = 10;
 }
 
 public sealed class Config

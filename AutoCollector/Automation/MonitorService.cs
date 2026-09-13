@@ -120,6 +120,22 @@ public sealed class MonitorService(
 
     public string LastDecision { get; private set; } = string.Empty;
 
+    /// <summary>
+    /// 相手にするプリセットを 1 件へ絞る。<see cref="Guid.Empty"/> で解除。
+    ///
+    /// 目標つきの周回（<c>GoalRunner</c>）が走っているあいだに使う。
+    /// 絞らないと、納品で貯めたスクリップを別のプリセットが使ってしまう。
+    /// </summary>
+    public Guid PreferredPresetId { get; set; }
+
+    /// <summary>
+    /// 自動発火だけを止める。こちらから頼んだぶん（<see cref="RequestManualRun"/>）は通る。
+    ///
+    /// 目標つきの周回は、納品と交換の順番を自分で決めている。
+    /// 途中で勝手に交換へ出発されると、作りかけのまま交換所へ移動してしまう。
+    /// </summary>
+    public bool SuppressAutoStart { get; set; }
+
     /// <summary>UI 表示用のまとまり。1 秒ごとに更新する。</summary>
     public MonitorSnapshot Snapshot { get; private set; } = MonitorSnapshot.Empty;
 
@@ -187,6 +203,12 @@ public sealed class MonitorService(
         // 直前の実行結果を反映してから次を選ぶ
         this.TrackFailure();
 
+        // 目標つきの周回が順番を決めているあいだは、自分からは始めない。
+        if (this.SuppressAutoStart)
+        {
+            return;
+        }
+
         var preset = this.SelectPreset();
         if (preset is null)
         {
@@ -207,10 +229,37 @@ public sealed class MonitorService(
     {
         foreach (var progress in this.Snapshot.Presets)
         {
-            if (progress.Enabled && progress.Readiness == PresetReadiness.Reached)
+            if (!progress.Enabled)
             {
-                return Plugin.C.Presets.FirstOrDefault(x => x.Id == progress.Id);
+                continue;
             }
+
+            // 目標つきの周回が走っているあいだは、その 1 件だけを相手にする。
+            // 別のプリセットに乗り換えると、途中まで貯めたぶんが宙に浮く。
+            var preferred = this.PreferredPresetId != Guid.Empty;
+
+            if (preferred && progress.Id != this.PreferredPresetId)
+            {
+                continue;
+            }
+
+            // 名指しされた 1 件は、監視の閾値に届いていなくても相手にする。
+            //
+            // 目標つきの周回は「欲しいアイテムを買えるだけ貯まったか」で判断している。
+            // 上限まで貯めてから交換する設定だと、目標ぶんが貯まっても閾値に届かず、
+            // 納品で貯めたスクリップを使う先が無くなって進まなくなる。
+            //
+            // 迂回するのは閾値だけ。交換する物が無い・通貨が読めない、といった
+            // 本当に始められない理由は迂回しない。
+            var acceptable = progress.Readiness == PresetReadiness.Reached
+                || (preferred && progress.Readiness == PresetReadiness.Watching);
+
+            if (!acceptable)
+            {
+                continue;
+            }
+
+            return Plugin.C.Presets.FirstOrDefault(x => x.Id == progress.Id);
         }
 
         return null;
@@ -220,9 +269,19 @@ public sealed class MonitorService(
     /// 外部自動化が動いていない条件だけを迂回して 1 回実行する。
     /// 安全判定は迂回しない。押してもコンテンツ中なら待機に入る。
     /// </summary>
-    public bool RequestManualRun(out string reason)
+    public bool RequestManualRun(out string reason) => this.RequestManualRun(null, out reason);
+
+    /// <summary>
+    /// 走らせるプリセットを名指しする。
+    ///
+    /// **閾値は問わない。**
+    /// 目標つきの周回は「欲しいアイテムを買えるだけのスクリップが貯まったか」で判断する。
+    /// 監視の閾値はそれとは別の条件で、たとえば上限まで貯めてから交換する設定だと、
+    /// 目標ぶんが貯まっても閾値に届かず、いつまでも交換されない。
+    /// </summary>
+    public bool RequestManualRun(ExchangePreset? forced, out string reason)
     {
-        var preset = this.SelectPreset();
+        var preset = forced ?? this.SelectPreset();
         if (preset is null)
         {
             reason = "条件を満たしているプリセットがありません";

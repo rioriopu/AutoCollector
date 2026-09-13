@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace AutoCollector.Game;
 
@@ -70,6 +71,10 @@ public sealed class CurrencyCatalog(
 
         return list;
     }
+
+    /// <summary>通貨の名前。見つからなければ ItemId をそのまま返す。</summary>
+    public string NameOf(uint itemId)
+        => this.ListChoices().FirstOrDefault(x => x.ItemId == itemId)?.Name ?? $"ItemId {itemId}";
 
     /// <summary>
     /// いま交換に使える通貨。
