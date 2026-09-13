@@ -276,6 +276,10 @@ public sealed class Plugin : IDalamudPlugin
                 return;
             }
 
+            // 配置ファイルから引けない NPC を、実際に見かけたときに覚える。
+            // リムサとグリダニアの窓口はこれでしか位置を取れない。
+            this.NpcLocationService.LearnFromWorld();
+
             if (!this.ExchangeResolver.TickBuild())
             {
                 return;

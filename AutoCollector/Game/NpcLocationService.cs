@@ -1,9 +1,9 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Threading;
-using System.Threading.Tasks;
 using System.Numerics;
 using AutoCollector.Diagnostics;
+using Dalamud.Game.ClientState.Objects.Enums;
+using ECommons.GameHelpers;
 using ECommons.DalamudServices;
 using Lumina.Data.Files;
 using Lumina.Data.Parsing.Layer;
@@ -20,6 +20,9 @@ public enum NpcLocationSource
 
     /// <summary>マップ配置ファイル（planevent.lgb）由来。</summary>
     LayerFile,
+
+    /// <summary>実際にその場で見かけた NPC 由来。配置ファイルに無いものを補う。</summary>
+    World,
 }
 
 /// <summary>
@@ -67,16 +70,17 @@ public sealed class NpcLocationService(AnomalyLog anomalyLog)
     /// <summary>索引を作ったときのゲームの版。保存と照合に使う。</summary>
     private string gameVersion = string.Empty;
 
-    /// <summary>背景で planner.lgb を読む処理。読み終わるまで結果は取り込まない。</summary>
-    private Task<Dictionary<uint, List<NpcLocation>>>? plannerTask;
+    /// <summary>世界から覚えた件数。保存すべき変化があるかの判断に使う。</summary>
+    private int learnedCount;
 
-    private readonly CancellationTokenSource plannerCancel = new();
+    /// <summary>次に世界を見る時刻。毎フレーム見る必要はない。</summary>
+    private DateTime nextLearnUtc = DateTime.MinValue;
 
-    /// <summary>背景走査を始めたか。1 度だけ走らせる。</summary>
-    private bool plannerStarted;
+    /// <summary>保存すべき変化があるか。</summary>
+    private bool dirty;
 
-    /// <summary>背景走査の結果を取り込んだか。取り込んでから索引を保存する。</summary>
-    private bool plannerMerged;
+    /// <summary>次に保存してよい時刻。書き込みを続けざまに行わない。</summary>
+    private DateTime nextSaveUtc = DateTime.MinValue;
     private int bgCursor;
     private bool levelScanDone;
 
@@ -98,9 +102,6 @@ public sealed class NpcLocationService(AnomalyLog anomalyLog)
     /// </summary>
     public bool TickBuild(int frameBudgetMilliseconds = 6)
     {
-        // 背景で読み終わっていれば取り込む。ここだけがゲーム側のスレッド。
-        this.TryMergePlannerResults();
-
         if (this.IsReady)
         {
             return true;
@@ -273,9 +274,13 @@ public sealed class NpcLocationService(AnomalyLog anomalyLog)
         this.bgToTerritory = null;
         this.anomalyLog.Info("NpcLocation", $"NPC 配置の索引を構築しました（{this.index.Count} 体）");
 
-        // planner.lgb はここでは読まない。1 件で数秒かかることがあり、
-        // フレームを止めてしまう。背景で読み、読み終わってから保存する。
-        this.StartPlannerScan();
+        // planner.lgb は読まない。背景スレッドで読む案も試したが、
+        // ゲームデータの読み出しは内部で排他がかかるため本体スレッドと
+        // 取り合いになり、操作できないほどカクついた。
+        //
+        // 代わりに、実際にその場へ行ったときに世界から覚える。
+        // 詳しくは LearnFromWorld を見ること。
+        this.SaveIndex();
 
         return true;
     }
@@ -371,202 +376,7 @@ public sealed class NpcLocationService(AnomalyLog anomalyLog)
         return string.IsNullOrEmpty(placeName) ? $"Territory {territoryId}" : placeName;
     }
 
-    /// <summary>
-    /// planner.lgb を背景スレッドで読む。
-    ///
-    /// ここだけ Framework スレッドの外で動く。
-    /// ゲームの状態には触らず、ゲームデータの読み出しだけを行う。
-    /// vnavmesh も同じことをしている（NavmeshManager が Task.Run の中から
-    /// SceneExtractor を作り、その中で DataManager.GetFile を呼ぶ）。
-    ///
-    /// 取り出しに数秒かかるファイルがあるため、フレームの中では読めない。
-    /// 結果は自分の辞書に貯め、<see cref="TryMergePlannerResults"/> が
-    /// Framework スレッドで索引へ取り込む。
-    /// </summary>
-    private void StartPlannerScan()
-    {
-        if (this.plannerStarted)
-        {
-            return;
-        }
-
-        this.plannerStarted = true;
-
-        // 走査対象は planevent と同じ bg の一覧。ここで控えておく。
-        // 背景スレッドからシートを引き直さずに済ませる。
-        var targets = new List<(string Path, uint TerritoryId)>();
-
-        try
-        {
-            var territories = Svc.Data.GetExcelSheet<TerritoryType>();
-            if (territories is null)
-            {
-                return;
-            }
-
-            var seen = new HashSet<string>();
-
-            foreach (var territory in territories)
-            {
-                var bg = territory.Bg.ExtractText();
-                if (string.IsNullOrEmpty(bg) || !bg.Contains('/') || !seen.Add(bg))
-                {
-                    continue;
-                }
-
-                var separator = bg.LastIndexOf('/');
-                if (separator <= 0)
-                {
-                    continue;
-                }
-
-                var path = $"bg/{bg[..separator]}/planner.lgb";
-
-                // 無いファイルを取りに行かせない。存在確認はほぼ無料で、
-                // 596 件すべて確かめても 28 ms 程度だった。
-                if (!Svc.Data.FileExists(path))
-                {
-                    continue;
-                }
-
-                targets.Add((path, territory.RowId));
-            }
-        }
-        catch (Exception ex)
-        {
-            this.anomalyLog.Warn("NpcLocation", $"背景走査の対象を作れませんでした: {ex.Message}");
-            return;
-        }
-
-        if (targets.Count == 0)
-        {
-            this.plannerMerged = true;
-            this.SaveIndex();
-            return;
-        }
-
-        this.anomalyLog.Info("NpcLocation", $"追加の配置ファイル {targets.Count} 件を背景で読み込みます");
-
-        var token = this.plannerCancel.Token;
-
-        this.plannerTask = Task.Run(
-            () =>
-            {
-                var found = new Dictionary<uint, List<NpcLocation>>();
-
-                foreach (var (path, territoryId) in targets)
-                {
-                    if (token.IsCancellationRequested)
-                    {
-                        break;
-                    }
-
-                    LgbFile? lgb;
-                    try
-                    {
-                        lgb = Svc.Data.GetFile<LgbFile>(path);
-                    }
-                    catch
-                    {
-                        continue;
-                    }
-
-                    if (lgb is null)
-                    {
-                        continue;
-                    }
-
-                    foreach (var layer in lgb.Layers)
-                    {
-                        foreach (var instance in layer.InstanceObjects)
-                        {
-                            if (instance.AssetType != LayerEntryType.EventNPC ||
-                                instance.Object is not LayerCommon.ENPCInstanceObject npc)
-                            {
-                                continue;
-                            }
-
-                            var baseId = npc.ParentData.ParentData.BaseId;
-                            if (baseId == 0)
-                            {
-                                continue;
-                            }
-
-                            var position = new Vector3(
-                                instance.Transform.Translation.X,
-                                instance.Transform.Translation.Y,
-                                instance.Transform.Translation.Z);
-
-                            if (!found.TryGetValue(baseId, out var list))
-                            {
-                                found[baseId] = list = [];
-                            }
-
-                            list.Add(new NpcLocation(territoryId, position, NpcLocationSource.LayerFile));
-                        }
-                    }
-                }
-
-                return found;
-            },
-            token);
-    }
-
-    /// <summary>
-    /// 背景で読んだ結果を索引へ取り込む。
-    /// 索引そのものは Framework スレッドからしか触らない。
-    /// </summary>
-    private void TryMergePlannerResults()
-    {
-        if (this.plannerMerged || this.plannerTask is not { IsCompleted: true } task)
-        {
-            return;
-        }
-
-        this.plannerMerged = true;
-
-        try
-        {
-            if (task.IsFaulted)
-            {
-                this.anomalyLog.Warn(
-                    "NpcLocation",
-                    $"追加の配置ファイルを読めませんでした: {task.Exception?.GetBaseException().Message}");
-                return;
-            }
-
-            if (task.IsCanceled)
-            {
-                return;
-            }
-
-            var before = this.index.Count;
-
-            foreach (var (npcId, locations) in task.Result)
-            {
-                foreach (var location in locations)
-                {
-                    this.Add(npcId, location);
-                }
-            }
-
-            this.anomalyLog.Info(
-                "NpcLocation",
-                $"追加の配置を取り込みました（{before} → {this.index.Count} 体）");
-
-            this.SaveIndex();
-        }
-        catch (Exception ex)
-        {
-            this.anomalyLog.Warn("NpcLocation", $"追加の配置を取り込めませんでした: {ex.Message}");
-        }
-        finally
-        {
-            this.plannerTask = null;
-        }
-    }
-
-    /// <summary>索引を保存する。両方の走査が終わってから呼ぶ。</summary>
+    /// <summary>索引を保存する。</summary>
     private void SaveIndex()
     {
         if (NpcLocationCache.TrySave(this.gameVersion, this.index, out var saveFailure))
@@ -579,17 +389,104 @@ public sealed class NpcLocationService(AnomalyLog anomalyLog)
         }
     }
 
-    /// <summary>背景走査を打ち切る。プラグインの終了時に呼ぶ。</summary>
-    public void Dispose()
+    /// <summary>
+    /// いま見えている NPC の位置を覚える。
+    ///
+    /// 配置ファイルの planevent.lgb だけでは足りない。
+    /// リムサ・ロミンサとグリダニアの窓口は planner.lgb にしかおらず、
+    /// そちらは読み出しが重すぎてフレームの中でも背景スレッドでも扱えなかった。
+    ///
+    /// **ファイルから引けないなら、実際にその場へ行ったときに覚えればよい。**
+    /// 一度でもその街を通れば、以後はテレポート先として選べるようになる。
+    /// 座標は配置ファイルより正確で、パッチで NPC が動いても追従する。
+    ///
+    /// 見ているのは現在のエリアのオブジェクト表だけなので負荷は無い。
+    /// </summary>
+    public void LearnFromWorld()
     {
+        if (!this.IsReady)
+        {
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+
+        if (now < this.nextLearnUtc)
+        {
+            this.SaveIfDirty(now);
+            return;
+        }
+
+        this.nextLearnUtc = now.AddSeconds(2);
+
         try
         {
-            this.plannerCancel.Cancel();
-            this.plannerCancel.Dispose();
+            var territoryId = Svc.ClientState.TerritoryType;
+            if (territoryId == 0 || !Player.Available)
+            {
+                return;
+            }
+
+            foreach (var obj in Svc.Objects)
+            {
+                if (obj.ObjectKind != ObjectKind.EventNpc)
+                {
+                    continue;
+                }
+
+                var baseId = obj.DataId;
+                if (baseId == 0)
+                {
+                    continue;
+                }
+
+                // すでにこのエリアの位置を持っているなら触らない。
+                if (this.index.TryGetValue(baseId, out var known) &&
+                    known.Exists(x => x.TerritoryId == territoryId))
+                {
+                    continue;
+                }
+
+                this.Add(baseId, new NpcLocation(territoryId, obj.Position, NpcLocationSource.World));
+                this.learnedCount++;
+                this.dirty = true;
+            }
         }
-        catch
+        catch (Exception ex)
         {
-            // 終了処理なので握り潰す。
+            this.anomalyLog.Warn("NpcLocation", $"NPC の位置を覚えられませんでした: {ex.Message}");
+        }
+
+        this.SaveIfDirty(now);
+    }
+
+    /// <summary>覚えたものがあれば保存する。書き込みは間隔を空ける。</summary>
+    private void SaveIfDirty(DateTime now)
+    {
+        if (!this.dirty || now < this.nextSaveUtc)
+        {
+            return;
+        }
+
+        this.dirty = false;
+        this.nextSaveUtc = now.AddSeconds(60);
+
+        if (NpcLocationCache.TrySave(this.gameVersion, this.index, out var failure))
+        {
+            this.anomalyLog.Info("NpcLocation", $"世界で見つけた NPC の位置を保存しました（累計 {this.learnedCount} 件）");
+        }
+        else
+        {
+            this.anomalyLog.Warn("NpcLocation", failure);
+        }
+    }
+
+    /// <summary>終了時の後始末。いまは覚えたぶんを書き出すだけ。</summary>
+    public void Dispose()
+    {
+        if (this.dirty)
+        {
+            NpcLocationCache.TrySave(this.gameVersion, this.index, out _);
         }
     }
 }
