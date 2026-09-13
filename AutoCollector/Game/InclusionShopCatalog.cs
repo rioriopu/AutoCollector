@@ -69,6 +69,30 @@ public sealed class InclusionShopCatalog(
     private readonly SpecialCurrencyMap specialCurrencyMap = specialCurrencyMap;
     private readonly InclusionShopOrderStore orderStore = orderStore;
 
+    /// <summary>
+    /// 一覧に出さない系統。
+    ///
+    /// 同じ品が 2 通りの系統に入っている。新しい窓口では
+    /// 「クラフター装備」「製作関連アイテム」のようにまとめ直されているが、
+    /// 中身は「装備品」「秘伝書・素材・雑貨」と重複する。
+    ///
+    /// 実データでの包含率:
+    ///   クラフター装備   ⊂ 装備品                100%
+    ///   ギャザラー装備   ⊂ 装備品                100%
+    ///   製作関連アイテム ⊂ 秘伝書・素材・雑貨      79%
+    ///
+    /// 包含率で機械的に落とす案は使えなかった。
+    /// 「マテリア」が「採集関連アイテム」に 100% 含まれてしまい、
+    /// 必要な系統まで消える。名前で除く。
+    /// </summary>
+    private static readonly HashSet<string> ExcludedCategories =
+    [
+        "クラフター装備",
+        "ギャザラー装備",
+        "製作関連アイテム",
+        "採集関連アイテム",
+    ];
+
     private List<InclusionCategory>? categories;
 
     /// <summary>
@@ -225,7 +249,15 @@ public sealed class InclusionShopCatalog(
 
             foreach (var name in order)
             {
-                result.Add(new InclusionCategory(name, Shorten(name), best[name].Series));
+                var shortName = Shorten(name);
+
+                // 中身が別の系統と重複するものは出さない。
+                if (ExcludedCategories.Contains(shortName))
+                {
+                    continue;
+                }
+
+                result.Add(new InclusionCategory(name, shortName, best[name].Series));
             }
 
             this.anomalyLog.Info(
