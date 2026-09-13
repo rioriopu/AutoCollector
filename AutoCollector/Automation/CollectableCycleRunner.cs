@@ -86,6 +86,9 @@ public sealed class CollectableCycleRunner(
     /// <summary>動き出すのを待つ期限。ここを過ぎても動かなければ諦める。</summary>
     private DateTime startDeadlineUtc = DateTime.MinValue;
 
+    /// <summary>何も動かなかった動作が続いた回数。繰り返しを止める歯止め。</summary>
+    private int idleActions;
+
     public CycleStep Step { get; private set; } = CycleStep.Idle;
 
     public string StatusDetail { get; private set; } = string.Empty;
@@ -116,6 +119,7 @@ public sealed class CollectableCycleRunner(
         this.Cycles = 0;
         this.Deliveries = 0;
         this.Exchanges = 0;
+        this.idleActions = 0;
         this.snapshotBeforeCycle = this.TakeSnapshot();
 
         this.anomalyLog.Info("Cycle", "納品と交換の繰り返しを始めます");
@@ -172,18 +176,29 @@ public sealed class CollectableCycleRunner(
             this.Exchanges++;
             this.Cycles++;
 
-            // 交換まで終えて一周。ここで進んだかどうかを見る。
-            if (!this.MadeProgress(out var progressDetail))
-            {
-                this.Finish($"一周しても何も減りませんでした（{progressDetail}）");
-                return;
-            }
-
-            this.snapshotBeforeCycle = this.TakeSnapshot();
-
             if (this.Cycles >= MaxCycles)
             {
                 this.Finish($"上限の {MaxCycles} 周に達しました");
+                return;
+            }
+        }
+
+        // 納品でも交換でも、動いた結果を毎回見る。
+        //
+        // 交換のときだけ見ていたため、納品を繰り返すだけで何も進まない状態を
+        // 拾えなかった。2 回続けて何も動かなければ止める。
+        if (this.MadeProgress(out var progressDetail))
+        {
+            this.idleActions = 0;
+            this.snapshotBeforeCycle = this.TakeSnapshot();
+        }
+        else
+        {
+            this.idleActions++;
+
+            if (this.idleActions >= 2)
+            {
+                this.Finish($"続けても何も動きませんでした（{progressDetail}）");
                 return;
             }
         }
@@ -199,10 +214,13 @@ public sealed class CollectableCycleRunner(
     {
         reason = string.Empty;
 
-        // 納品する意味のある収集品があるなら納品する。
-        var deliverable = this.CountDeliverable(out var blockedDetail);
+        // 「いま納品できる」と「交換すれば納品できる」は別物。
+        //
+        // ここを一緒にしていたため、上限に達した収集品を持っていると
+        // 納品へ行っては 1 個も納品できずに戻る、を延々と繰り返していた。
+        var counts = this.CountDeliverable(out var blockedDetail);
 
-        if (deliverable > 0)
+        if (counts.Now > 0)
         {
             var npc = this.collectablesNpc.ChooseDestination(Plugin.C.PreferredCollectablesNpcDataId);
 
@@ -218,19 +236,25 @@ public sealed class CollectableCycleRunner(
                 return false;
             }
 
-            this.BeginWaiting(CycleStep.Delivering, $"納品へ向かいます（対象 {deliverable} 種）");
+            this.BeginWaiting(CycleStep.Delivering, $"納品へ向かいます（対象 {counts.Now} 種）");
             return true;
         }
 
-        // 納品できないなら、スクリップを使って枠を空ける。
-        if (this.monitor.RequestManualRun(out var exchangeReason))
+        // いまは納品できないが、交換すれば枠が空くものがある。先に交換する。
+        if (counts.AfterExchange > 0)
         {
-            this.BeginWaiting(CycleStep.Exchanging, "交換へ向かいます");
-            return true;
+            if (this.monitor.RequestManualRun(out var exchangeReason))
+            {
+                this.BeginWaiting(CycleStep.Exchanging, $"枠を空けるため交換へ向かいます（{counts.AfterExchange} 種の納品待ち）");
+                return true;
+            }
+
+            reason = $"スクリップの枠を空けられません（{exchangeReason}）";
+            return false;
         }
 
         reason = string.IsNullOrEmpty(blockedDetail)
-            ? $"納品も交換もできません（{exchangeReason}）"
+            ? "納品できる収集品がありません"
             : blockedDetail;
 
         return false;
@@ -248,17 +272,25 @@ public sealed class CollectableCycleRunner(
     }
 
     /// <summary>
-    /// 納品する意味のある収集品の種類数。
+    /// 収集品を 3 つに分けて数える。
     ///
-    /// 生むスクリップに余裕がある、またはそのスクリップを減らす設定がある、
-    /// のどちらかを満たすものだけを数える。
+    /// | 区分 | 意味 |
+    /// |---|---|
+    /// | Now | いま納品できる。生むスクリップに余裕がある |
+    /// | AfterExchange | いまは上限だが、そのスクリップを減らす設定がある。交換すれば納品できる |
+    /// | それ以外 | 上限で、減らす設定も無い。納品しても意味がない |
+    ///
+    /// **Now と AfterExchange を一緒にしてはいけない。**
+    /// 一緒にすると、上限に達した収集品を持っているときに
+    /// 納品へ行っては 1 個も納品できずに戻る、を繰り返す。
     /// </summary>
-    private int CountDeliverable(out string blockedDetail)
+    private (int Now, int AfterExchange) CountDeliverable(out string blockedDetail)
     {
         blockedDetail = string.Empty;
 
         var blocked = new List<string>();
-        var count = 0;
+        var now = 0;
+        var afterExchange = 0;
 
         foreach (var (itemId, name, held) in Diagnostics.CollectablesShopReader.ListHeldCollectables())
         {
@@ -271,34 +303,34 @@ public sealed class CollectableCycleRunner(
             {
                 // 何のスクリップになるか分からないものは、止める理由にしない。
                 // 納品してみれば分かる。
-                count++;
+                now++;
                 continue;
             }
 
             if (this.HasRoom(reward))
             {
-                count++;
+                now++;
                 continue;
             }
 
-            // 上限に近い。そのスクリップを減らす設定があるなら、交換で空く見込みがある。
+            // 上限に達している。そのスクリップを減らす設定があるなら、交換で空く見込みがある。
             if (this.HasPresetConsuming(reward.CurrencyItemId))
             {
-                count++;
+                afterExchange++;
                 continue;
             }
 
             blocked.Add($"{name}（{ItemName(reward.CurrencyItemId)} が上限）");
         }
 
-        if (count == 0 && blocked.Count > 0)
+        if (now == 0 && afterExchange == 0 && blocked.Count > 0)
         {
             blockedDetail =
                 $"{string.Join(" / ", blocked.Take(3))} を納品できません。" +
                 "そのスクリップを減らす交換設定がないため、納品しても上限で止まります";
         }
 
-        return count;
+        return (now, afterExchange);
     }
 
     /// <summary>このスクリップに、あと 1 回納品するだけの余裕があるか。</summary>

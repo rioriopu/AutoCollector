@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 
 namespace AutoCollector.Game;
@@ -19,10 +19,14 @@ public sealed record CurrencyChoice(uint TomestonesRowId, uint ItemId, string Na
 /// スクリップなどはスロットの概念が無いので ItemId で持つ。
 /// この違いを 1 か所に閉じ込め、呼び出し側は ItemId だけを受け取る。
 /// </summary>
-public sealed class CurrencyCatalog(TomestoneService tomestones, SpecialCurrencyMap specials)
+public sealed class CurrencyCatalog(
+    TomestoneService tomestones,
+    SpecialCurrencyMap specials,
+    InclusionShopCatalog inclusionShops)
 {
     private readonly TomestoneService tomestones = tomestones;
     private readonly SpecialCurrencyMap specials = specials;
+    private readonly InclusionShopCatalog inclusionShops = inclusionShops;
 
     /// <summary>プリセットが監視する通貨の ItemId を求める。</summary>
     public bool TryResolve(ExchangePreset preset, out uint itemId)
@@ -48,12 +52,46 @@ public sealed class CurrencyCatalog(TomestoneService tomestones, SpecialCurrency
             list.Add(new CurrencyChoice(slot.TomestonesRowId, slot.ItemId, slot.Name, "アラガントームストーン"));
         }
 
+        // 交換に使えるスクリップだけを出す。
+        //
+        // 特殊通貨の一覧にはクラフタースクリップ:白貨 のような、
+        // すでに交換所から消えたものも残っている。選べても意味がない。
+        var usable = this.UsableCurrencies();
+
         foreach (var (itemId, name) in this.specials.ListCurrencies())
         {
-            list.Add(new CurrencyChoice(0, itemId, name, "スクリップなど"));
+            if (!usable.Contains(itemId))
+            {
+                continue;
+            }
+
+            list.Add(new CurrencyChoice(0, itemId, name, "スクリップ"));
         }
 
         return list;
+    }
+
+    /// <summary>
+    /// いま交換に使える通貨。
+    ///
+    /// アイテム交換画面に並ぶ品のコストとして実際に使われているものだけを採る。
+    /// </summary>
+    private HashSet<uint> UsableCurrencies()
+    {
+        var set = new HashSet<uint>();
+
+        foreach (var category in this.inclusionShops.ListCategories())
+        {
+            foreach (var series in category.Series)
+            {
+                foreach (var currencyItemId in series.Currencies)
+                {
+                    set.Add(currencyItemId);
+                }
+            }
+        }
+
+        return set;
     }
 
     /// <summary>プリセットへ選択を書き込む。</summary>

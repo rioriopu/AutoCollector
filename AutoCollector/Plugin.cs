@@ -238,7 +238,7 @@ public sealed class Plugin : IDalamudPlugin
         this.SelfCheck = new SelfCheck(C, this.AnomalyLog, this.TomestoneService, this.CurrencyService);
         this.NpcLocationService = new NpcLocationService(this.AnomalyLog);
         this.SpecialCurrencyMap = new SpecialCurrencyMap(this.AnomalyLog);
-        this.CurrencyCatalog = new CurrencyCatalog(this.TomestoneService, this.SpecialCurrencyMap);
+
         this.ExchangeResolver = new ExchangeResolver(this.AnomalyLog, this.TomestoneService, this.NpcLocationService, this.SpecialCurrencyMap);
         this.ShopService = new ShopService(this.AnomalyLog, DataFileLoader.LoadShopLayout(this.AnomalyLog));
         this.InclusionShopService = new InclusionShopService(this.AnomalyLog, this.SpecialCurrencyMap);
@@ -251,6 +251,10 @@ public sealed class Plugin : IDalamudPlugin
         this.CollectableRewardService = new CollectableRewardService(this.AnomalyLog, this.SpecialCurrencyMap);
         this.InclusionShopCatalog = new InclusionShopCatalog(
             this.AnomalyLog, this.TomestoneService, this.SpecialCurrencyMap, this.InclusionShopOrderStore);
+
+        // 通貨の一覧は、交換に使えるものだけに絞る。先に交換の一覧が要る。
+        this.CurrencyCatalog = new CurrencyCatalog(
+            this.TomestoneService, this.SpecialCurrencyMap, this.InclusionShopCatalog);
         this.CollectableDelivery = new CollectableDeliveryRunner(
             this.AnomalyLog, this.CollectablesShopService, this.CurrencyService, this.SpecialCurrencyMap);
 
