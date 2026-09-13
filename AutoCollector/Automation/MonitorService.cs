@@ -537,9 +537,15 @@ public sealed class MonitorService(
         return targets;
     }
 
-    /// <summary>すでに十分持っているか。装備はアーマリーに入るため、そちらも数える。</summary>
+    /// <summary>この品を飛ばすか。十分持っている、またはゲームに拒まれた品。</summary>
     private bool IsSatisfied(ExchangeEntry entry)
     {
+        // ゲームが購入を拒む品（習得済みの秘伝書など）は毎回試さない。
+        if (this.executor.IsRejected(entry.RewardItemId))
+        {
+            return true;
+        }
+
         if (entry.StopAtOwned <= 0)
         {
             return false;

@@ -154,6 +154,9 @@ public sealed class PurchaseAttempt
 
     public int CurrencyBefore { get; set; }
 
+    /// <summary>この 1 回で何個交換しようとしたか。まとめ買いのときに 2 以上になる。</summary>
+    public int Amount { get; set; } = 1;
+
     public DateTime FiredAtUtc { get; set; }
 
     /// <summary>結果が確定したか。false のまま残っているものは「結果未確認」。</summary>
@@ -260,6 +263,15 @@ public sealed unsafe class ExchangeExecutor(
     /// </summary>
     private const int InclusionExchangeCommand = 14;
 
+    /// <summary>
+    /// 1 回の発火で交換する上限。
+    ///
+    /// 実測で Fire(14, 0u, 2u) が通り +2 になることを確認している。
+    /// 上限がどこまでかは確かめていないため、控えめに置く。
+    /// 1 個ずつだと 1 回あたり 1.5 秒かかり、10 個で 15 秒になる。
+    /// </summary>
+    private const int MaxBatchAmount = 20;
+
     /// <summary>個数。MVP は 1 固定。2 以上は未実測のため設定に露出させない。</summary>
     private const int ExchangeQuantity = 1;
 
@@ -340,6 +352,15 @@ public sealed unsafe class ExchangeExecutor(
     /// <summary>その並びを最初に見た時刻。</summary>
     private DateTime menuSignatureSinceUtc = DateTime.MinValue;
 
+    /// <summary>
+    /// ゲームに交換を拒まれた品。
+    ///
+    /// 習得済みの秘伝書のように、撃っても何も起きない品がある。
+    /// 毎回試すと時間を無駄にするうえ、そのたびに 15 秒待つことになる。
+    /// プラグインを読み込み直すまで覚えておく。
+    /// </summary>
+    private readonly HashSet<uint> rejectedRewards = [];
+
     /// <summary>納品を開始済みか。開始と終了の区別に使う。</summary>
     private bool deliveryStarted;
 
@@ -396,6 +417,15 @@ public sealed unsafe class ExchangeExecutor(
     /// 代入箇所が多く、どこで何に移ったかを追うのが難しい。
     /// 遷移のたびに詳細ログへ残し、そのときの外部プラグインの状態も一緒に記録する。
     /// </summary>
+    /// <summary>ゲームに拒まれた品か。監視側が並びを作るときに飛ばす。</summary>
+    public bool IsRejected(uint rewardItemId) => this.rejectedRewards.Contains(rewardItemId);
+
+    /// <summary>拒まれた品の数。UI に出す。</summary>
+    public int RejectedCount => this.rejectedRewards.Count;
+
+    /// <summary>拒まれた品の記録を消す。設定を変えたあとにやり直せるようにする。</summary>
+    public void ClearRejected() => this.rejectedRewards.Clear();
+
     /// <summary>いま動いているか。UI でボタンを塞ぐために使う。</summary>
     public bool IsBusy => this.Step is not (ExchangeStep.Idle or ExchangeStep.Done or ExchangeStep.Error);
 
@@ -2554,7 +2584,12 @@ public sealed unsafe class ExchangeExecutor(
 
         var rewardName = Svc.Data.GetExcelSheet<Item>()?.GetRowOrDefault(definition.RewardItemId)?.Name.ExtractText() ?? string.Empty;
 
+        var amount = this.DecideBatchAmount(definition, entry, currencyBefore, (int)freeSlots, keepFree);
+
         // ここから先は不可逆。記録を先に立ててから撃つ。
+        //
+        // まとめ買いでは、費やす通貨も受け取る数も個数ぶん増える。
+        // 検証はこの値と突き合わせるので、掛けた後の値を記録する。
         Plugin.C.InFlight = new PurchaseAttempt
         {
             ShopId = definition.ShopId,
@@ -2562,24 +2597,24 @@ public sealed unsafe class ExchangeExecutor(
             RewardName = rewardName,
             CurrencyItemId = definition.CurrencyItemId,
             CallbackIndex = callbackIndex,
-            CurrencyCost = definition.CurrencyCost,
-            RewardQuantity = definition.RewardQuantity,
+            CurrencyCost = definition.CurrencyCost * (uint)amount,
+            RewardQuantity = definition.RewardQuantity * (uint)amount,
             RewardBefore = rewardBefore,
             CurrencyBefore = currencyBefore,
+            Amount = amount,
             FiredAtUtc = DateTime.UtcNow,
         };
         EzConfig.Save();
 
         this.anomalyLog.Info(
             "Exchange",
-            $"交換を実行します: {rewardName} × {definition.RewardQuantity}" +
-            $"（コスト {definition.CurrencyCost} / index {callbackIndex} / アイテム交換画面）");
+            $"交換を実行します: {rewardName} × {definition.RewardQuantity * (uint)amount}" +
+            $"（{amount} 回ぶん / コスト {definition.CurrencyCost * (uint)amount} / index {callbackIndex} / アイテム交換画面）");
 
-        // 数量は 1 回につき 1 個。まとめ買いは結果の検証が複雑になるため行わない。
-        //
-        // 実測は Fire(14, 0u, 1u)。コマンドは Int、index と数量は UInt だった。
+        // 実測は Fire(14, 0u, 1u) と Fire(14, 0u, 2u)。
+        // コマンドは Int、index と数量は UInt だった。
         // int のまま渡すと AtkValueType.Int になり、実測と型が食い違う。
-        Callback.Fire(addon, true, InclusionExchangeCommand, (uint)callbackIndex, 1u);
+        Callback.Fire(addon, true, InclusionExchangeCommand, (uint)callbackIndex, (uint)amount);
 
         // 実測では、撃った直後に確認ダイアログが出る。
         // これに答えないと交換は成立しない。
@@ -2797,9 +2832,36 @@ public sealed unsafe class ExchangeExecutor(
             if (currencyKnown && rewardKnown &&
                 currencyNow == attempt.CurrencyBefore && rewardNow == attempt.RewardBefore)
             {
-                this.FailUnresolved(
-                    ExchangeFailure.ExchangeNotApplied,
-                    "交換が行われた形跡がありません。所持数が変化していません");
+                // 通貨も品も、まったく動いていない。
+                //
+                // ゲーム側が購入を拒んだということ。実測では、習得済みの秘伝書で
+                // Fire(14, 0u, 1u) と確認ダイアログまで通るのに増減が無かった。
+                //
+                // 片方だけ動いている場合と違い、ここは「交換されていない」と言い切れる。
+                // 未確定として残すと、以後すべての交換が受け付けられなくなる。
+                // 1 品の都合で全体を止めるのは割に合わない。
+                this.anomalyLog.Warn(
+                    "Exchange",
+                    $"{attempt.RewardName} は交換できませんでした。所持数が動いていません。この品は以後飛ばします");
+
+                attempt.Resolved = true;
+                attempt.Outcome = "交換できませんでした（所持数が動いていません）";
+                Plugin.C.InFlight = null;
+                EzConfig.Save();
+
+                // 同じ品を何度も試さない。プラグインを読み込み直すまで覚えておく。
+                this.rejectedRewards.Add(attempt.RewardItemId);
+
+                this.Failure = ExchangeFailure.None;
+                this.StatusDetail = $"{attempt.RewardName} は交換できませんでした";
+
+                if (this.TryAdvanceToNextTarget("交換できませんでした"))
+                {
+                    return;
+                }
+
+                this.Step = ExchangeStep.ResumeAutoDuty;
+                this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(20);
                 return;
             }
 
@@ -2853,10 +2915,13 @@ public sealed unsafe class ExchangeExecutor(
 
                 if (current.Current is { } finishedTarget)
                 {
-                    finishedTarget.Completed++;
+                    // まとめ買いでは 1 回の発火で複数個を交換している。
+                    var fired = Math.Max(1, attempt.Amount);
+
+                    finishedTarget.Completed += fired;
                     if (!finishedTarget.Unlimited && finishedTarget.Remaining > 0)
                     {
-                        finishedTarget.Remaining--;
+                        finishedTarget.Remaining = Math.Max(0, finishedTarget.Remaining - fired);
                     }
                 }
             }
@@ -2906,6 +2971,52 @@ public sealed unsafe class ExchangeExecutor(
     /// 買いすぎは取り返しがつかないため、迷ったら止める。
     /// </summary>
     /// <summary>
+    /// 1 回の発火で何個交換するかを決める。
+    ///
+    /// 1 個ずつだと 1 回あたり 1.5 秒かかる。10 個で 15 秒になり、
+    /// 交換リストを並べるほど待ち時間が積み上がる。
+    ///
+    /// **足りない側に合わせる。** 通貨・所持枠・残りの必要数のうち一番小さい数にする。
+    /// 画面が数量を選べない品は 1 個のまま。
+    /// </summary>
+    private int DecideBatchAmount(
+        ExchangeDefinition definition,
+        InclusionShopEntry entry,
+        int currencyBefore,
+        int freeSlots,
+        int keepFree)
+    {
+        if (!entry.CanSelectAmount || definition.CurrencyCost == 0)
+        {
+            return 1;
+        }
+
+        var affordable = currencyBefore / (int)definition.CurrencyCost;
+
+        // 残す通貨量の設定を守る。
+        if (this.session is { Mode: ExchangeMode.UntilCurrencyReserve } reserve)
+        {
+            var spendable = currencyBefore - reserve.CurrencyReserve;
+            affordable = Math.Min(affordable, spendable > 0 ? spendable / (int)definition.CurrencyCost : 0);
+        }
+
+        // この品の残りの必要数。
+        var wanted = int.MaxValue;
+        if (this.session?.Current is { Unlimited: false } target)
+        {
+            wanted = Math.Max(1, target.Remaining);
+        }
+
+        // 所持枠。品が重なるかどうかは分からないので 1 個 1 枠として見る。
+        // 重なる品ならこれより多く入るが、少なく見積もるぶんには害がない。
+        var bagRoom = Math.Max(1, freeSlots - keepFree);
+
+        var amount = Math.Min(Math.Min(affordable, wanted), Math.Min(bagRoom, MaxBatchAmount));
+
+        return Math.Max(1, amount);
+    }
+
+    /// <summary>
     /// 交換リストの次の品へ進む。
     ///
     /// **いま行っている窓口で扱えるものだけを続ける。**
@@ -2933,6 +3044,11 @@ public sealed unsafe class ExchangeExecutor(
             if (next is null)
             {
                 break;
+            }
+
+            if (this.rejectedRewards.Contains(next.Definition.RewardItemId))
+            {
+                continue;
             }
 
             if (currentNpc != 0 && next.Definition.NpcDataId != currentNpc)
