@@ -45,6 +45,8 @@ public sealed class Plugin : IDalamudPlugin
 
     internal CollectablesNpcService CollectablesNpcService { get; private set; } = null!;
 
+    internal InclusionShopCatalog InclusionShopCatalog { get; private set; } = null!;
+
     internal ShopService ShopService { get; private set; } = null!;
 
     internal InclusionShopService InclusionShopService { get; private set; } = null!;
@@ -140,6 +142,7 @@ public sealed class Plugin : IDalamudPlugin
         this.CollectablesShopReader = new CollectablesShopReader();
         this.CollectablesShopService = new CollectablesShopService(this.AnomalyLog);
         this.CollectablesNpcService = new CollectablesNpcService(this.AnomalyLog, this.NpcLocationService);
+        this.InclusionShopCatalog = new InclusionShopCatalog(this.AnomalyLog);
         this.CollectableDelivery = new CollectableDeliveryRunner(
             this.AnomalyLog, this.CollectablesShopService, this.CurrencyService, this.SpecialCurrencyMap);
 
