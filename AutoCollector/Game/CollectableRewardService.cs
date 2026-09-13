@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using AutoCollector.Diagnostics;
 using ECommons.DalamudServices;
@@ -61,6 +61,7 @@ public sealed class CollectableRewardService(AnomalyLog anomalyLog, SpecialCurre
         {
             var shopItems = Svc.Data.GetSubrowExcelSheet<CollectablesShopItem>();
             var scrips = Svc.Data.GetExcelSheet<CollectablesShopRewardScrip>();
+            var items = Svc.Data.GetExcelSheet<Item>();
 
             if (shopItems is null || scrips is null)
             {
@@ -74,6 +75,17 @@ public sealed class CollectableRewardService(AnomalyLog anomalyLog, SpecialCurre
                 {
                     var itemId = row.Item.RowId;
                     if (itemId == 0 || result.ContainsKey(itemId))
+                    {
+                        continue;
+                    }
+
+                    // 収集品だけを採る。
+                    //
+                    // このシートには旧方式で納品できた普通の品も載っている。
+                    // 実測では 木工 Lv50〜60 で 42 件が引けたが、
+                    // 収集品は 6 件だけで、残りはバーチロングボウのような普通の装備だった。
+                    // 製作手帳の収集品欄と件数が合わなくなる。
+                    if (items is not null && items.TryGetRow(itemId, out var item) && !item.IsCollectable)
                     {
                         continue;
                     }
