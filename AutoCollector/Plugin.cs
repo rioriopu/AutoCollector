@@ -57,6 +57,8 @@ public sealed class Plugin : IDalamudPlugin
 
     internal RetainerRestockRunner RetainerRestock { get; private set; } = null!;
 
+    internal CraftRunner CraftRunner { get; private set; } = null!;
+
     internal CollectableCycleRunner CollectableCycle { get; private set; } = null!;
 
     internal ShopService ShopService { get; private set; } = null!;
@@ -310,6 +312,7 @@ public sealed class Plugin : IDalamudPlugin
             this.SpecialCurrencyMap);
         this.RetainerRestock = new RetainerRestockRunner(
             this.AnomalyLog, this.CurrencyService, this.MenuService, this.AutoRetainer);
+        this.CraftRunner = new CraftRunner(this.AnomalyLog, this.CurrencyService, this.Artisan);
         this.AutoDutySetup = new AutoDutySetup(this.AutoDuty, this.AnomalyLog);
         this.AutoDutyKeeper = new AutoDutyKeeper(
             this.AnomalyLog,
@@ -433,6 +436,7 @@ public sealed class Plugin : IDalamudPlugin
             this.CollectableDelivery.Tick();
             this.CollectableCycle.Tick();
             this.RetainerRestock.Tick();
+            this.CraftRunner.Tick();
 
             // 納品画面が開いた瞬間を捉えて自動でダンプする。読み取りのみ。
             this.CollectablesShopReader.Tick(ResolveLogDirectory());

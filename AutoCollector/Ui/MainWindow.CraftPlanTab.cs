@@ -333,6 +333,77 @@ public sealed partial class MainWindow
         }
 
         ImGui.Spacing();
+
+        // --- 作らせる ---
+        var craft = this.plugin.CraftRunner;
+
+        if (craft.IsRunning)
+        {
+            ImGui.TextColored(
+                ImGuiColors.DalamudYellow,
+                $"製作中: {craft.StatusDetail}（{craft.StepIndex + 1} / {craft.StepCount} 手順）");
+
+            if (ImGui.Button("中止する##stopcraft"))
+            {
+                craft.Stop("ユーザー操作");
+            }
+        }
+        else
+        {
+            var steps = CraftRunner.BuildSteps(plan);
+            var blocked = plan.Materials.Any(x => x.Shortfall > 0 && !x.IsIntermediate);
+
+            using (ImRaii.Disabled(steps.Count == 0 || blocked || !this.plugin.Artisan.IsLoaded))
+            {
+                if (ImGui.Button("この計画で作らせる##startcraft"))
+                {
+                    if (!craft.Start(plan, out var craftFailure))
+                    {
+                        this.plugin.AnomalyLog.Warn("Craft", craftFailure);
+                    }
+                }
+            }
+
+            ImGui.SameLine();
+
+            if (!this.plugin.Artisan.IsLoaded)
+            {
+                ImGui.TextColored(ImGuiColors.DalamudRed, "Artisan が導入されていません");
+            }
+            else if (blocked)
+            {
+                ImGui.TextColored(ImGuiColors.DalamudYellow, "素材が足りません。先に取り出してください");
+            }
+            else
+            {
+                ImGui.TextColored(
+                    ImGuiColors.DalamudGrey,
+                    $"{steps.Count} 手順: {string.Join(" → ", steps.Select(x => $"{x.Name}×{x.Crafts}回"))}");
+            }
+
+            if (!string.IsNullOrEmpty(craft.LastFailure))
+            {
+                ImGui.TextColored(ImGuiColors.DalamudRed, $"  {craft.LastFailure}");
+            }
+            else if (!string.IsNullOrEmpty(craft.StatusDetail))
+            {
+                ImGui.TextColored(ImGuiColors.DalamudGrey, $"  前回: {craft.StatusDetail}");
+            }
+        }
+
+        if (craft.Trace.Count > 0)
+        {
+            using var craftChild = ImRaii.Child("##crafttrace", new Vector2(0, 90), true);
+            if (craftChild)
+            {
+                foreach (var line in craft.Trace)
+                {
+                    ImGui.TextUnformatted(line);
+                }
+            }
+        }
+
+        ImGui.Spacing();
         ImGui.TextUnformatted("要る素材");
 
         using var table = ImRaii.Table("##materials", 6, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp);

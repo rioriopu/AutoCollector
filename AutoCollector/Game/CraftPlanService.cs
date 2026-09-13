@@ -36,6 +36,8 @@ public sealed record CraftJob(uint CraftType, string Name);
 /// 作れる素材の、さらにその素材。
 /// リテイナーに完成品が無い場合、こちらを取り出して自分で作ることになる。
 /// </param>
+/// <param name="RecipeId">作れる素材の場合のレシピ。作れないなら 0。</param>
+/// <param name="AmountResult">そのレシピが 1 回で作る数。</param>
 public sealed record PlanMaterial(
     uint ItemId,
     string Name,
@@ -45,6 +47,8 @@ public sealed record PlanMaterial(
     int Shortfall,
     int NewSlots,
     bool IsIntermediate,
+    uint RecipeId,
+    int AmountResult,
     IReadOnlyList<PlanMaterial> SubMaterials);
 
 /// <summary>作る計画。</summary>
@@ -55,6 +59,13 @@ public sealed record CraftPlan(
     int KeepFree,
     IReadOnlyList<PlanMaterial> Materials,
     IReadOnlyList<string> Notes);
+
+/// <summary>製作の 1 手順。</summary>
+/// <param name="RecipeId">作らせるレシピ。</param>
+/// <param name="Crafts">何回作らせるか。個数ではない。</param>
+/// <param name="ResultItemId">できあがる品。所持数で終わりを確かめる。</param>
+/// <param name="ExpectedCount">終わったときに持っているはずの数。</param>
+public sealed record CraftStep(uint RecipeId, int Crafts, string Name, uint ResultItemId, int ExpectedCount);
 
 /// <summary>
 /// 「どの収集品を何個作るか」と「そのために何の素材が何個いるか」を求める。
@@ -291,6 +302,8 @@ public sealed class CraftPlanService(
                     Math.Max(0, needed - held),
                     0,
                     false,
+                    0,
+                    1,
                     []));
             }
         }
@@ -458,7 +471,8 @@ public sealed class CraftPlanService(
 
             totalNewSlots += newSlots;
 
-            var isIntermediate = recipes.Any(x => x.ItemResult.RowId == ingredient.RowId);
+            var subRecipe = recipes.FirstOrDefault(x => x.ItemResult.RowId == ingredient.RowId);
+            var isIntermediate = subRecipe.RowId != 0;
 
             // 作れる素材が足りないなら、その素材を作るのに要るものまで辿る。
             // リテイナーに完成品が無いとき、これが無いと手が止まる。
@@ -475,6 +489,8 @@ public sealed class CraftPlanService(
                 shortfall,
                 newSlots,
                 isIntermediate,
+                subRecipe.RowId,
+                isIntermediate ? Math.Max(1, (int)subRecipe.AmountResult) : 1,
                 subMaterials));
         }
 

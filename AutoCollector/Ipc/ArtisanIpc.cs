@@ -1,4 +1,4 @@
-using AutoCollector.Diagnostics;
+﻿using AutoCollector.Diagnostics;
 
 namespace AutoCollector.Ipc;
 
@@ -33,6 +33,25 @@ public sealed class ArtisanIpc(AnomalyLog anomalyLog) : IpcGateBase("Artisan", a
     /// <summary>製作リストを実行中か。</summary>
     public bool TryIsListRunning(out bool running)
         => this.TryInvoke("IsListRunning", () => this.Func<bool>("Artisan.IsListRunning").InvokeFunc(), out running);
+
+    /// <summary>
+    /// 何かしら動いているか。製作が終わったことの判定に使う。
+    ///
+    /// 耐久モード・製作リスト・待ち行列・製作中かどうかをまとめて見ている。
+    /// </summary>
+    public bool TryIsBusy(out bool busy)
+        => this.TryInvoke("IsBusy", () => this.Func<bool>("Artisan.IsBusy").InvokeFunc(), out busy);
+
+    /// <summary>
+    /// レシピを指定して、その回数だけ作らせる。
+    ///
+    /// 回数であって個数ではない。1 回で複数できるレシピでは、
+    /// 回数 × 1 回でできる数が手に入る。
+    /// </summary>
+    public bool TryCraftItem(ushort recipeId, int amount)
+        => this.TryAction(
+            "CraftItem",
+            () => this.Func<ushort, int, object>("Artisan.CraftItem").InvokeAction(recipeId, amount));
 
     /// <summary>停止要求が立っているか。自分以外が立てている場合もある。</summary>
     public bool TryGetStopRequest(out bool stopped)
