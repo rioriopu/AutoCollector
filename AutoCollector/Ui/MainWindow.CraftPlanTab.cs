@@ -285,6 +285,17 @@ public sealed partial class MainWindow
                             ItemId = x.ItemId,
                             Name = x.Name,
                             Remaining = x.Shortfall,
+
+                            // 作れる素材が手に入らなかったときは、その素材を取りに行く。
+                            Fallback = x.SubMaterials
+                                .Where(sub => sub.Shortfall > 0)
+                                .Select(sub => new RestockRequest
+                                {
+                                    ItemId = sub.ItemId,
+                                    Name = sub.Name,
+                                    Remaining = sub.Shortfall,
+                                })
+                                .ToList(),
                         })
                         .ToList();
 
@@ -367,6 +378,33 @@ public sealed partial class MainWindow
 
             ImGui.TableNextColumn();
             ImGui.TextUnformatted(material.NewSlots.ToString());
+
+            // 作れる素材が足りないなら、その素材も出す。
+            // リテイナーに完成品が無いときはこちらを取り出すことになる。
+            foreach (var sub in material.SubMaterials)
+            {
+                ImGui.TableNextRow();
+
+                ImGui.TableNextColumn();
+                ImGui.TextColored(ImGuiColors.DalamudGrey, $"    └ {sub.Name}");
+
+                ImGui.TableNextColumn();
+                ImGui.TextColored(ImGuiColors.DalamudGrey, sub.PerCraft.ToString());
+
+                ImGui.TableNextColumn();
+                ImGui.TextColored(ImGuiColors.DalamudGrey, sub.Needed.ToString());
+
+                ImGui.TableNextColumn();
+                ImGui.TextColored(ImGuiColors.DalamudGrey, sub.Held.ToString());
+
+                ImGui.TableNextColumn();
+                ImGui.TextColored(
+                    sub.Shortfall > 0 ? ImGuiColors.DalamudYellow : ImGuiColors.HealerGreen,
+                    sub.Shortfall > 0 ? sub.Shortfall.ToString() : "足りています");
+
+                ImGui.TableNextColumn();
+                ImGui.TextColored(ImGuiColors.DalamudGrey, "-");
+            }
         }
     }
 
