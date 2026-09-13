@@ -164,8 +164,6 @@ public sealed class PresetTab(Plugin plugin)
 
         if (choices.Count > 0)
         {
-            // 見出しを添えて、トームストーンとスクリップを見分けられるようにする。
-            var names = choices.Select(x => $"[{x.Group}] {x.Name}").ToArray();
             var index = CurrencyCatalog.IndexOf(choices, preset);
             if (index < 0)
             {
@@ -173,16 +171,38 @@ public sealed class PresetTab(Plugin plugin)
             }
 
             ImGui.SetNextItemWidth(320f);
-            if (ImGui.Combo("監視する通貨", ref index, names, names.Length))
-            {
-                CurrencyCatalog.Apply(preset, choices[index]);
 
-                // 通貨が変われば買えるものも変わる。前の通貨で選んだ品は残さない。
-                preset.Rewards.Clear();
-                preset.RewardItemId = 0;
-                preset.PreferredNpcDataId = 0;
-                changed = true;
+            // 色を付けたいので、既定の Combo ではなく自前で開く。
+            // 既定の Combo は行ごとに色を変えられない。
+            using (var combo = ImRaii.Combo("監視する通貨", choices[index].Name))
+            {
+                if (combo)
+                {
+                    for (var i = 0; i < choices.Count; i++)
+                    {
+                        using var id = ImRaii.PushId($"cur{i}");
+
+                        if (ImGui.Selectable("##row", i == index))
+                        {
+                            CurrencyCatalog.Apply(preset, choices[i]);
+
+                            // 通貨が変われば買えるものも変わる。前の通貨で選んだ品は残さない。
+                            preset.Rewards.Clear();
+                            preset.RewardItemId = 0;
+                            preset.PreferredNpcDataId = 0;
+                            changed = true;
+                        }
+
+                        ImGui.SameLine(0f, 0f);
+                        DrawCurrencyName(choices[i].Name);
+                    }
+                }
             }
+
+            // 閉じているときは色が付けられないため、選んでいるものを下に色付きで出す。
+            ImGui.TextUnformatted("  選択中:");
+            ImGui.SameLine(0f, 0f);
+            DrawCurrencyName(choices[index].Name);
 
             ImGui.TextColored(
                 ImGuiColors.DalamudGrey,
@@ -521,6 +541,42 @@ public sealed class PresetTab(Plugin plugin)
         var separator = name.LastIndexOf('：');
         return separator >= 0 && separator + 1 < name.Length ? name[(separator + 1)..] : name;
     }
+
+    /// <summary>
+    /// 通貨の名前を描く。貨の色が名前で分かるようにする。
+    ///
+    /// 「クラフタースクリップ:橙貨」なら、橙貨 の部分だけを橙色にする。
+    /// 一覧に並んだときに、どの階層のスクリップかを一目で選べるようにするため。
+    /// </summary>
+    private static void DrawCurrencyName(string name)
+    {
+        var separator = name.LastIndexOf(':');
+
+        if (separator < 0 || separator + 1 >= name.Length)
+        {
+            ImGui.TextUnformatted(name);
+            return;
+        }
+
+        var head = name[..(separator + 1)];
+        var tail = name[(separator + 1)..];
+
+        ImGui.TextUnformatted(head);
+        ImGui.SameLine(0f, 0f);
+        ImGui.TextColored(CurrencyColor(tail), tail);
+    }
+
+    /// <summary>貨の名前から色を決める。分からないものは既定の色にする。</summary>
+    private static Vector4 CurrencyColor(string tail) => tail switch
+    {
+        "橙貨" => new Vector4(1.00f, 0.55f, 0.15f, 1f),
+        "紫貨" => new Vector4(0.72f, 0.45f, 0.95f, 1f),
+        "黄貨" => new Vector4(0.95f, 0.85f, 0.25f, 1f),
+        "白貨" => new Vector4(0.90f, 0.90f, 0.90f, 1f),
+        "赤貨" => new Vector4(0.95f, 0.35f, 0.35f, 1f),
+        "青貨" => new Vector4(0.40f, 0.65f, 1.00f, 1f),
+        _ => ImGuiColors.DalamudWhite,
+    };
 
     private static string ItemName(uint itemId)
         => ECommons.DalamudServices.Svc.Data.GetExcelSheet<Lumina.Excel.Sheets.Item>()?.GetRowOrDefault(itemId)?.Name.ExtractText()
