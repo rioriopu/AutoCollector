@@ -296,9 +296,22 @@ public sealed partial class MainWindow
             ImGui.SameLine();
             ImGui.TextColored(
                 ImGuiColors.DalamudGrey,
-                shortfalls.Count == 0 ? "足りない素材はありません" : "呼び鈴の近くで押してください");
+                shortfalls.Count == 0 ? "足りない素材はありません" : $"{shortfalls.Count} 種類を取り出します");
 
-            if (!string.IsNullOrEmpty(restock.StatusDetail))
+            // 押す前に、呼び鈴が見えているかを出す。
+            // 押しても何も起きないとき、原因がここか別かを切り分けられるようにする。
+            var bell = restock.DescribeBell();
+            ImGui.TextColored(
+                bell.StartsWith("呼び鈴が見つかりました", StringComparison.Ordinal)
+                    ? ImGuiColors.HealerGreen
+                    : ImGuiColors.DalamudRed,
+                $"  {bell}");
+
+            if (!string.IsNullOrEmpty(restock.LastFailure))
+            {
+                ImGui.TextColored(ImGuiColors.DalamudRed, $"  始められませんでした: {restock.LastFailure}");
+            }
+            else if (!string.IsNullOrEmpty(restock.StatusDetail))
             {
                 ImGui.TextColored(ImGuiColors.DalamudGrey, $"  前回: {restock.StatusDetail}");
             }

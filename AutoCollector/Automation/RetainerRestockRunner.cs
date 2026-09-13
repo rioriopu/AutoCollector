@@ -148,6 +148,9 @@ public sealed unsafe class RetainerRestockRunner(
 
     public int Withdrawn { get; private set; }
 
+    /// <summary>始められなかった理由。押しても動かないときに画面へ出す。</summary>
+    public string LastFailure { get; private set; } = string.Empty;
+
     public bool IsRunning => this.Step is not (RestockStep.Idle or RestockStep.Done or RestockStep.Error);
 
     /// <summary>いま取り出そうとしているもの。表示用。</summary>
@@ -156,9 +159,11 @@ public sealed unsafe class RetainerRestockRunner(
     /// <summary>取り出しを始める。</summary>
     public bool Start(IReadOnlyList<RestockRequest> wanted, out string reason)
     {
+        this.LastFailure = string.Empty;
+
         if (this.IsRunning)
         {
-            reason = "すでに動いています";
+            reason = this.LastFailure = "すでに動いています";
             return false;
         }
 
@@ -166,19 +171,19 @@ public sealed unsafe class RetainerRestockRunner(
 
         if (targets.Count == 0)
         {
-            reason = "取り出すものがありません";
+            reason = this.LastFailure = "取り出すものがありません";
             return false;
         }
 
         if (!Player.Available)
         {
-            reason = "プレイヤーの状態を読み取れません";
+            reason = this.LastFailure = "プレイヤーの状態を読み取れません";
             return false;
         }
 
         if (FindBell() is null)
         {
-            reason = "近くに呼び鈴がありません。呼び鈴の近くで実行してください";
+            reason = this.LastFailure = $"近くに呼び鈴がありません（{DescribeNearby()}）";
             return false;
         }
 
@@ -799,6 +804,54 @@ public sealed unsafe class RetainerRestockRunner(
         return container is not null && container->IsLoaded;
     }
 
+    /// <summary>
+    /// いまの呼び鈴の検出状況。画面に出して、押す前に分かるようにする。
+    /// </summary>
+    public string DescribeBell()
+    {
+        if (!Player.Available)
+        {
+            return "プレイヤーの状態を読み取れません";
+        }
+
+        var bell = FindBell();
+
+        if (bell is not null)
+        {
+            var distance = Vector3.Distance(bell.Position, Player.Position);
+            return $"呼び鈴が見つかりました（{bell.Name}・距離 {distance:F1}）";
+        }
+
+        return $"呼び鈴が見つかりません（{DescribeNearby()}）";
+    }
+
+    /// <summary>
+    /// 近くにある触れるものを並べる。
+    /// 呼び鈴が見つからないとき、何が近くにあるのかが分からないと原因を追えない。
+    /// </summary>
+    private static string DescribeNearby()
+    {
+        try
+        {
+            var near = Svc.Objects
+                .Where(x => x.ObjectKind is ObjectKind.EventObj or ObjectKind.HousingEventObject)
+                .Select(x => (Name: x.Name.ToString(), Distance: Vector3.Distance(x.Position, Player.Position)))
+                .Where(x => x.Distance <= 15f)
+                .OrderBy(x => x.Distance)
+                .Take(4)
+                .Select(x => $"{x.Name} {x.Distance:F1}")
+                .ToList();
+
+            return near.Count == 0
+                ? "近くに触れるものがありません"
+                : $"近くにあるもの: {string.Join(" / ", near)}";
+        }
+        catch (Exception ex)
+        {
+            return $"周囲を読めません: {ex.Message}";
+        }
+    }
+
     /// <summary>近くの呼び鈴。無ければ null。</summary>
     private static Dalamud.Game.ClientState.Objects.Types.IGameObject? FindBell()
     {
@@ -813,20 +866,20 @@ public sealed unsafe class RetainerRestockRunner(
 
             var name = obj.Name.ToString();
 
-            if (!string.Equals(name, bellName, StringComparison.Ordinal) &&
-                !string.Equals(name, "リテイナーベル", StringComparison.Ordinal) &&
-                !string.Equals(name, "Summoning Bell", StringComparison.OrdinalIgnoreCase))
+            // 「呼び鈴」はシートから引く。英語環境や別表記も拾えるよう、含むかどうかで見る。
+            var matches =
+                (!string.IsNullOrEmpty(bellName) && name.Contains(bellName, StringComparison.Ordinal)) ||
+                name.Contains("呼び鈴", StringComparison.Ordinal) ||
+                name.Contains("Summoning Bell", StringComparison.OrdinalIgnoreCase);
+
+            if (!matches || !obj.IsTargetable)
             {
                 continue;
             }
 
-            if (!obj.IsTargetable)
-            {
-                continue;
-            }
-
-            // 宿屋の呼び鈴は少し遠くからでも届く。広めに取って、実際の可否はゲームに任せる。
-            if (Vector3.Distance(obj.Position, Player.Position) <= 6.5f)
+            // 話しかけられる距離はものによって違う。
+            // 広めに取り、実際に届くかはゲームの応答で判断する。
+            if (Vector3.Distance(obj.Position, Player.Position) <= 10f)
             {
                 return obj;
             }
