@@ -1,5 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Numerics;
 using AutoCollector.Diagnostics;
 using ECommons.DalamudServices;
@@ -36,20 +38,20 @@ public sealed class NpcLocationService(AnomalyLog anomalyLog)
     private const byte EventNpcLevelType = 8;
 
     /// <summary>
-    /// 読む配置ファイル。
+    /// フレームを使って読む配置ファイル。
     ///
-    /// **planner.lgb を足してはいけない。**
-    /// 30 エリアで 170 秒（全 589 エリア換算で約 56 分）かかる。
-    /// planevent.lgb は同じ 30 エリアで 82 ms なので 2000 倍以上遅い。
-    /// しかも planner.lgb は 30 件中 13 件しか存在せず、オブジェクト数も 1/9 しかない。
-    /// 存在しないファイルの探索コストが極端に高いためと考えられる。
+    /// **planner.lgb をここに足してはいけない。**
+    /// 実測（2026-09-13）では、コストは中身の解析ではなく
+    /// ファイルの取り出しそのものにある。
     ///
-    /// 2026-09-13 に「リムサとグリダニアの窓口が出ない」（F-30）を理由に足してしまい、
-    /// 起動時に操作不能になった。**この注意書きを読まずに覆した。**
-    /// 実測し直したところ、全エリアの走査は 10 分でも終わらなかった。
+    /// <code>
+    /// 全 596 bg の FileExists     :      28 ms   ← ほぼ無料
+    /// 街 29 bg の planner を取得  :  53,069 ms   ← 1 件で数秒かかるものがある
+    /// リムサ下甲板層 / グリダニア旧市街 :  1 ms 程度
+    /// </code>
     ///
-    /// planner にしかいない NPC の扱いは別の手段で解決すること。
-    /// 全エリアを舐める方法は使えない。
+    /// 1 件が数秒かかることがあるため、時間で区切っても 1 フレームを止めてしまう。
+    /// planner.lgb は <see cref="ScanPlannerInBackground"/> で背景スレッドから読む。
     /// </summary>
     private static readonly string[] LayerFileNames = ["planevent.lgb"];
 
@@ -64,6 +66,17 @@ public sealed class NpcLocationService(AnomalyLog anomalyLog)
 
     /// <summary>索引を作ったときのゲームの版。保存と照合に使う。</summary>
     private string gameVersion = string.Empty;
+
+    /// <summary>背景で planner.lgb を読む処理。読み終わるまで結果は取り込まない。</summary>
+    private Task<Dictionary<uint, List<NpcLocation>>>? plannerTask;
+
+    private readonly CancellationTokenSource plannerCancel = new();
+
+    /// <summary>背景走査を始めたか。1 度だけ走らせる。</summary>
+    private bool plannerStarted;
+
+    /// <summary>背景走査の結果を取り込んだか。取り込んでから索引を保存する。</summary>
+    private bool plannerMerged;
     private int bgCursor;
     private bool levelScanDone;
 
@@ -85,6 +98,9 @@ public sealed class NpcLocationService(AnomalyLog anomalyLog)
     /// </summary>
     public bool TickBuild(int frameBudgetMilliseconds = 6)
     {
+        // 背景で読み終わっていれば取り込む。ここだけがゲーム側のスレッド。
+        this.TryMergePlannerResults();
+
         if (this.IsReady)
         {
             return true;
@@ -257,15 +273,9 @@ public sealed class NpcLocationService(AnomalyLog anomalyLog)
         this.bgToTerritory = null;
         this.anomalyLog.Info("NpcLocation", $"NPC 配置の索引を構築しました（{this.index.Count} 体）");
 
-        // 次回は走査せずに済むよう残す。失敗しても動作には影響しない。
-        if (NpcLocationCache.TrySave(this.gameVersion, this.index, out var saveFailure))
-        {
-            this.anomalyLog.Info("NpcLocation", "次回のために NPC 配置を保存しました");
-        }
-        else
-        {
-            this.anomalyLog.Warn("NpcLocation", saveFailure);
-        }
+        // planner.lgb はここでは読まない。1 件で数秒かかることがあり、
+        // フレームを止めてしまう。背景で読み、読み終わってから保存する。
+        this.StartPlannerScan();
 
         return true;
     }
@@ -359,5 +369,227 @@ public sealed class NpcLocationService(AnomalyLog anomalyLog)
 
         var placeName = territory.Value.PlaceName.ValueNullable?.Name.ExtractText();
         return string.IsNullOrEmpty(placeName) ? $"Territory {territoryId}" : placeName;
+    }
+
+    /// <summary>
+    /// planner.lgb を背景スレッドで読む。
+    ///
+    /// ここだけ Framework スレッドの外で動く。
+    /// ゲームの状態には触らず、ゲームデータの読み出しだけを行う。
+    /// vnavmesh も同じことをしている（NavmeshManager が Task.Run の中から
+    /// SceneExtractor を作り、その中で DataManager.GetFile を呼ぶ）。
+    ///
+    /// 取り出しに数秒かかるファイルがあるため、フレームの中では読めない。
+    /// 結果は自分の辞書に貯め、<see cref="TryMergePlannerResults"/> が
+    /// Framework スレッドで索引へ取り込む。
+    /// </summary>
+    private void StartPlannerScan()
+    {
+        if (this.plannerStarted)
+        {
+            return;
+        }
+
+        this.plannerStarted = true;
+
+        // 走査対象は planevent と同じ bg の一覧。ここで控えておく。
+        // 背景スレッドからシートを引き直さずに済ませる。
+        var targets = new List<(string Path, uint TerritoryId)>();
+
+        try
+        {
+            var territories = Svc.Data.GetExcelSheet<TerritoryType>();
+            if (territories is null)
+            {
+                return;
+            }
+
+            var seen = new HashSet<string>();
+
+            foreach (var territory in territories)
+            {
+                var bg = territory.Bg.ExtractText();
+                if (string.IsNullOrEmpty(bg) || !bg.Contains('/') || !seen.Add(bg))
+                {
+                    continue;
+                }
+
+                var separator = bg.LastIndexOf('/');
+                if (separator <= 0)
+                {
+                    continue;
+                }
+
+                var path = $"bg/{bg[..separator]}/planner.lgb";
+
+                // 無いファイルを取りに行かせない。存在確認はほぼ無料で、
+                // 596 件すべて確かめても 28 ms 程度だった。
+                if (!Svc.Data.FileExists(path))
+                {
+                    continue;
+                }
+
+                targets.Add((path, territory.RowId));
+            }
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Warn("NpcLocation", $"背景走査の対象を作れませんでした: {ex.Message}");
+            return;
+        }
+
+        if (targets.Count == 0)
+        {
+            this.plannerMerged = true;
+            this.SaveIndex();
+            return;
+        }
+
+        this.anomalyLog.Info("NpcLocation", $"追加の配置ファイル {targets.Count} 件を背景で読み込みます");
+
+        var token = this.plannerCancel.Token;
+
+        this.plannerTask = Task.Run(
+            () =>
+            {
+                var found = new Dictionary<uint, List<NpcLocation>>();
+
+                foreach (var (path, territoryId) in targets)
+                {
+                    if (token.IsCancellationRequested)
+                    {
+                        break;
+                    }
+
+                    LgbFile? lgb;
+                    try
+                    {
+                        lgb = Svc.Data.GetFile<LgbFile>(path);
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+
+                    if (lgb is null)
+                    {
+                        continue;
+                    }
+
+                    foreach (var layer in lgb.Layers)
+                    {
+                        foreach (var instance in layer.InstanceObjects)
+                        {
+                            if (instance.AssetType != LayerEntryType.EventNPC ||
+                                instance.Object is not LayerCommon.ENPCInstanceObject npc)
+                            {
+                                continue;
+                            }
+
+                            var baseId = npc.ParentData.ParentData.BaseId;
+                            if (baseId == 0)
+                            {
+                                continue;
+                            }
+
+                            var position = new Vector3(
+                                instance.Transform.Translation.X,
+                                instance.Transform.Translation.Y,
+                                instance.Transform.Translation.Z);
+
+                            if (!found.TryGetValue(baseId, out var list))
+                            {
+                                found[baseId] = list = [];
+                            }
+
+                            list.Add(new NpcLocation(territoryId, position, NpcLocationSource.LayerFile));
+                        }
+                    }
+                }
+
+                return found;
+            },
+            token);
+    }
+
+    /// <summary>
+    /// 背景で読んだ結果を索引へ取り込む。
+    /// 索引そのものは Framework スレッドからしか触らない。
+    /// </summary>
+    private void TryMergePlannerResults()
+    {
+        if (this.plannerMerged || this.plannerTask is not { IsCompleted: true } task)
+        {
+            return;
+        }
+
+        this.plannerMerged = true;
+
+        try
+        {
+            if (task.IsFaulted)
+            {
+                this.anomalyLog.Warn(
+                    "NpcLocation",
+                    $"追加の配置ファイルを読めませんでした: {task.Exception?.GetBaseException().Message}");
+                return;
+            }
+
+            if (task.IsCanceled)
+            {
+                return;
+            }
+
+            var before = this.index.Count;
+
+            foreach (var (npcId, locations) in task.Result)
+            {
+                foreach (var location in locations)
+                {
+                    this.Add(npcId, location);
+                }
+            }
+
+            this.anomalyLog.Info(
+                "NpcLocation",
+                $"追加の配置を取り込みました（{before} → {this.index.Count} 体）");
+
+            this.SaveIndex();
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Warn("NpcLocation", $"追加の配置を取り込めませんでした: {ex.Message}");
+        }
+        finally
+        {
+            this.plannerTask = null;
+        }
+    }
+
+    /// <summary>索引を保存する。両方の走査が終わってから呼ぶ。</summary>
+    private void SaveIndex()
+    {
+        if (NpcLocationCache.TrySave(this.gameVersion, this.index, out var saveFailure))
+        {
+            this.anomalyLog.Info("NpcLocation", "次回のために NPC 配置を保存しました");
+        }
+        else
+        {
+            this.anomalyLog.Warn("NpcLocation", saveFailure);
+        }
+    }
+
+    /// <summary>背景走査を打ち切る。プラグインの終了時に呼ぶ。</summary>
+    public void Dispose()
+    {
+        try
+        {
+            this.plannerCancel.Cancel();
+            this.plannerCancel.Dispose();
+        }
+        catch
+        {
+            // 終了処理なので握り潰す。
+        }
     }
 }

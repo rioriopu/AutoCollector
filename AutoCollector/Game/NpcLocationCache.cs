@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Numerics;
@@ -22,8 +22,13 @@ internal static class NpcLocationCache
     /// <summary>ファイルの識別子。別物を読み込まないための印。</summary>
     private const uint Magic = 0x434C4E41;
 
-    /// <summary>形式の版。構造を変えたら上げる。古い版は捨てて作り直す。</summary>
-    private const int FormatVersion = 1;
+    /// <summary>
+    /// 形式の版。構造を変えたら上げる。古い版は捨てて作り直す。
+    ///
+    /// 2 で planner.lgb の配置を含めるようになった。
+    /// 1 で作られたものは planevent しか入っていないため作り直す。
+    /// </summary>
+    private const int FormatVersion = 2;
 
     /// <summary>1 体あたりの配置数の上限。これを超える分は捨てる。</summary>
     private const int MaxLocationsPerNpc = 1024;
