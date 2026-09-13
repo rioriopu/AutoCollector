@@ -188,6 +188,14 @@ public sealed class InclusionShopOrderStore(AnomalyLog anomalyLog)
         }
     }
 
+    /// <summary>いますぐ保存する。確認用。</summary>
+    public void ForceSave()
+    {
+        this.dirty = true;
+        this.nextSaveUtc = DateTime.MinValue;
+        this.SaveIfDirty();
+    }
+
     /// <summary>終了時に書き残しを出す。覚えたぶんを失わないため。</summary>
     public void Dispose()
     {
@@ -197,6 +205,31 @@ public sealed class InclusionShopOrderStore(AnomalyLog anomalyLog)
 
     /// <summary>保存先。画面に出して、実際に書けているかを確かめられるようにする。</summary>
     public string FilePath => ResolvePath();
+
+    /// <summary>
+    /// 保存済みファイルの状態。
+    ///
+    /// ゲームが動いているユーザーのフォルダは外から読めないことがある。
+    /// 書けているかどうかを画面で確かめられるようにする。
+    /// </summary>
+    public string DescribeFile()
+    {
+        try
+        {
+            var info = new FileInfo(ResolvePath());
+
+            if (!info.Exists)
+            {
+                return "まだ保存されていません";
+            }
+
+            return $"保存済み {info.Length:N0} バイト（{info.LastWriteTime:HH:mm:ss}）";
+        }
+        catch (Exception ex)
+        {
+            return $"確認できません: {ex.Message}";
+        }
+    }
 
     /// <summary>覚えたものを消す。並びがおかしくなったときのやり直し用。</summary>
     public void Clear()
