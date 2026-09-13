@@ -25,8 +25,23 @@ public sealed partial class MainWindow
     /// <summary>選んでいるジョブ。CraftType の行番号。</summary>
     private uint craftPlanJob;
 
-    /// <summary>選んでいる Lv 帯。0 なら絞らない。</summary>
+    /// <summary>選んでいる Lv 帯の下限。</summary>
     private int craftPlanLevelBand;
+
+    /// <summary>
+    /// 製作手帳の「RECIPE LEVEL」と同じ区切り。
+    ///
+    /// **50-60 は Lv60 を含む。** 10 で割った刻みではない。
+    /// 実際の手帳（木工 50-60）には Lv50・52・54・56・58・60 の 6 件が並ぶ。
+    /// </summary>
+    private static readonly (int Min, int Max)[] LevelBands =
+    [
+        (50, 60),
+        (61, 70),
+        (71, 80),
+        (81, 90),
+        (91, 100),
+    ];
 
     private void DrawCraftPlanTab()
     {
@@ -125,44 +140,49 @@ public sealed partial class MainWindow
 
         // --- Lv 帯 ---
         //
-        // 紫貨は Lv50 から Lv90 まで広く、そのまま並べると探せない。
-        // 橙貨は Lv100 だけなので、この絞り込みは邪魔になる。出さない。
-        var bands = filtered.Select(x => (x.ClassJobLevel / 10) * 10).Distinct().OrderBy(x => x).ToList();
-        var showBands = bands.Count > 1;
+        // 製作手帳の「RECIPE LEVEL」と同じ区切りにする。
+        // 50-60 は Lv60 を含む。10 で割った刻みではない。
+        var available = LevelBands
+            .Where(band => filtered.Any(x => x.ClassJobLevel >= band.Min && x.ClassJobLevel <= band.Max))
+            .ToList();
 
-        if (showBands)
+        // 帯が 1 つしかないなら絞る意味がない。橙貨は各ジョブ 1 件なので出ない。
+        if (available.Count > 1)
         {
-            ImGui.TextColored(ImGuiColors.DalamudGrey, "  レベルで絞る:");
+            ImGui.TextColored(ImGuiColors.DalamudGrey, "  レベル:");
 
-            ImGui.SameLine();
-            if (ImGui.SmallButton("すべて##band0"))
-            {
-                this.craftPlanLevelBand = 0;
-                this.craftPlanTargetItemId = 0;
-            }
-
-            foreach (var band in bands)
+            foreach (var band in available)
             {
                 ImGui.SameLine();
 
-                using var color = ImRaii.PushColor(
-                    ImGuiCol.Button,
-                    ImGuiColors.ParsedBlue,
-                    this.craftPlanLevelBand == band);
+                var selected = this.craftPlanLevelBand == band.Min;
 
-                if (ImGui.SmallButton($"Lv{band}##band{band}"))
+                using var color = ImRaii.PushColor(ImGuiCol.Button, ImGuiColors.ParsedBlue, selected);
+
+                if (ImGui.SmallButton($"{band.Min}-{band.Max}##band{band.Min}"))
                 {
-                    this.craftPlanLevelBand = band;
+                    this.craftPlanLevelBand = band.Min;
                     this.craftPlanTargetItemId = 0;
                 }
             }
         }
 
-        if (this.craftPlanLevelBand > 0)
+        // 帯が選ばれていなければ、いちばん上の帯にしておく。
+        if (available.Count > 0 && !available.Any(x => x.Min == this.craftPlanLevelBand))
         {
-            filtered = filtered
-                .Where(x => x.ClassJobLevel >= this.craftPlanLevelBand && x.ClassJobLevel < this.craftPlanLevelBand + 10)
-                .ToList();
+            this.craftPlanLevelBand = available[^1].Min;
+        }
+
+        if (available.Count > 1)
+        {
+            var current = LevelBands.FirstOrDefault(x => x.Min == this.craftPlanLevelBand);
+
+            if (current.Max > 0)
+            {
+                filtered = filtered
+                    .Where(x => x.ClassJobLevel >= current.Min && x.ClassJobLevel <= current.Max)
+                    .ToList();
+            }
         }
 
         ImGui.TextColored(ImGuiColors.DalamudGrey, $"  作れる収集品 {filtered.Count} 件（製作手帳と同じ並び）");
