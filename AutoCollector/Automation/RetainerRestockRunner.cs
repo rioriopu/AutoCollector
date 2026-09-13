@@ -828,19 +828,22 @@ public sealed unsafe class RetainerRestockRunner(
         return false;
     }
 
-    /// <summary>リテイナーの持ち物が読める状態か。</summary>
+    /// <summary>
+    /// リテイナーの持ち物の画面が開いているか。
+    ///
+    /// **入れ物が読めるかどうかで判定してはいけない。**
+    /// RetainerPage1 は一度開くと読めるままになるため、
+    /// 「アイテムの受け渡し」を選ぶ前から読める状態になっている。
+    /// それを準備完了と見なしていたため、受け渡しを選ばずに素通りしていた。
+    /// 実測では、選ぶ段階から取り出す段階まで 119 ミリ秒しか経っていなかった。
+    ///
+    /// 画面が開いているかで判定する。
+    /// </summary>
     private static bool IsRetainerInventoryReady()
-    {
-        var manager = InventoryManager.Instance();
-
-        if (manager is null)
-        {
-            return false;
-        }
-
-        var container = manager->GetInventoryContainer(InventoryType.RetainerPage1);
-        return container is not null && container->IsLoaded;
-    }
+        => (GenericHelpers.TryGetAddonByName<AtkUnitBase>("InventoryRetainer", out var small) &&
+            GenericHelpers.IsAddonReady(small)) ||
+           (GenericHelpers.TryGetAddonByName<AtkUnitBase>("InventoryRetainerLarge", out var large) &&
+            GenericHelpers.IsAddonReady(large));
 
     /// <summary>
     /// いまの呼び鈴の検出状況。画面に出して、押す前に分かるようにする。
@@ -926,12 +929,32 @@ public sealed unsafe class RetainerRestockRunner(
         return null;
     }
 
-    /// <summary>ゲームの表記を引く。日本語でも英語でも同じ番号で取れる。</summary>
+    /// <summary>
+    /// ゲームの表記を引く。日本語でも英語でも同じ番号で取れる。
+    ///
+    /// 角括弧から後ろは実行時に値が入る差し込み部分なので落とす。
+    ///
+    /// <code>
+    /// 2378 「アイテムの受け渡し　[預託中：枠]」 → 「アイテムの受け渡し」
+    /// </code>
+    ///
+    /// 落とさずに照合すると、実際の「アイテムの受け渡し　[預託中：15枠]」と
+    /// 一致せず、選べないまま素通りする。
+    /// </summary>
     private static string AddonText(uint rowId)
     {
         try
         {
-            return Svc.Data.GetExcelSheet<Addon>()?.GetRowOrDefault(rowId)?.Text.ExtractText() ?? string.Empty;
+            var text = Svc.Data.GetExcelSheet<Addon>()?.GetRowOrDefault(rowId)?.Text.ExtractText() ?? string.Empty;
+
+            var bracket = text.IndexOfAny(['[', '［']);
+
+            if (bracket > 0)
+            {
+                text = text[..bracket];
+            }
+
+            return text.Trim().Trim('　');
         }
         catch
         {
