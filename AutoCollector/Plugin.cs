@@ -163,16 +163,46 @@ public sealed class Plugin : IDalamudPlugin
     /// </summary>
     private static void MigrateConfig()
     {
-        if (C.ConfigVersion >= 1)
+        var changed = false;
+
+        if (C.ConfigVersion < 1)
         {
-            return;
+            // 詳細ログは当初 既定で有効にしていた。既定を無効へ変えたので合わせる。
+            C.DetailedLogEnabled = false;
+            C.ConfigVersion = 1;
+            changed = true;
         }
 
-        // 詳細ログは当初 既定で有効にしていた。既定を無効へ変えたので合わせる。
-        C.DetailedLogEnabled = false;
+        if (C.ConfigVersion < 2)
+        {
+            // 交換対象は 1 件だけだった。交換リストへ移す。
+            foreach (var preset in C.Presets)
+            {
+                if (preset.Rewards.Count == 0 && preset.RewardItemId != 0)
+                {
+                    preset.Rewards.Add(new ExchangeEntry
+                    {
+                        RewardItemId = preset.RewardItemId,
 
-        C.ConfigVersion = 1;
-        EzConfig.Save();
+                        // 旧設定の個数の考え方をそのまま引き継ぐ。
+                        // 個数指定でなければ上限なしとして扱う。
+                        Quantity = preset.Mode == ExchangeMode.FixedQuantity ? Math.Max(1, preset.Quantity) : 0,
+
+                        // 旧設定には「持っていたら飛ばす」に当たるものが無い。
+                        // 勝手に飛ばすと動きが変わるため、判定しない。
+                        StopAtOwned = 0,
+                    });
+                }
+            }
+
+            C.ConfigVersion = 2;
+            changed = true;
+        }
+
+        if (changed)
+        {
+            EzConfig.Save();
+        }
     }
 
     private void Load()

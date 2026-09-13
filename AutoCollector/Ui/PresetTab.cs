@@ -135,9 +135,12 @@ public sealed class PresetTab(Plugin plugin)
             ? this.plugin.CurrencyCatalog.ListChoices().FirstOrDefault(x => x.ItemId == currencyItemId)?.Name ?? "?"
             : "?";
 
-        var reward = preset.RewardItemId == 0
-            ? "未設定"
-            : ItemName(preset.RewardItemId);
+        var reward = preset.Rewards.Count switch
+        {
+            0 => "未設定",
+            1 => ItemName(preset.Rewards[0].RewardItemId),
+            _ => $"{ItemName(preset.Rewards[0].RewardItemId)} ほか {preset.Rewards.Count - 1} 件",
+        };
 
         return $"{label}  [{currency} → {reward}]";
     }
@@ -175,7 +178,9 @@ public sealed class PresetTab(Plugin plugin)
                 CurrencyCatalog.Apply(preset, choices[index]);
 
                 // 通貨が変われば買えるものも変わる。前の通貨で選んだ品は残さない。
+                preset.Rewards.Clear();
                 preset.RewardItemId = 0;
+                preset.PreferredNpcDataId = 0;
                 changed = true;
             }
 
@@ -274,8 +279,8 @@ public sealed class PresetTab(Plugin plugin)
                     changed = true;
                 }
 
-                if (preset.RewardItemId != 0 &&
-                    this.plugin.CurrencyService.TryGetCount(preset.RewardItemId, out var owned, includeEquipped: true, includeArmory: true))
+                if (preset.Rewards.Count > 0 &&
+                    this.plugin.CurrencyService.TryGetCount(preset.Rewards[0].RewardItemId, out var owned, includeEquipped: true, includeArmory: true))
                 {
                     ImGui.TextColored(ImGuiColors.DalamudGrey, $"  現在 {owned:N0} / 目標 {preset.Quantity:N0}");
                 }
@@ -322,7 +327,7 @@ public sealed class PresetTab(Plugin plugin)
             return;
         }
 
-        ImGui.TextUnformatted($"交換対象: {(preset.RewardItemId == 0 ? "未設定" : ItemName(preset.RewardItemId))}");
+        this.DrawRewardList(preset, ref changed);
 
         var catalog = this.plugin.InclusionShopCatalog;
         // 選んでいる通貨で買えるものだけを出す。
@@ -356,11 +361,11 @@ public sealed class PresetTab(Plugin plugin)
 
                 foreach (var (category, series, offer) in this.searchResults)
                 {
-                    if (ImGui.Selectable($"{offer.RewardName}  （{offer.CurrencyCost:N0}）##s{series.SpecialShopId}_{offer.RewardItemId}",
-                            preset.RewardItemId == offer.RewardItemId))
+                    var inList = preset.Rewards.Any(x => x.RewardItemId == offer.RewardItemId);
+
+                    if (ImGui.Selectable($"{offer.RewardName}  （{offer.CurrencyCost:N0}）##s{series.SpecialShopId}_{offer.RewardItemId}", inList))
                     {
-                        preset.RewardItemId = offer.RewardItemId;
-                        preset.PreferredNpcDataId = 0;
+                        Toggle(preset, offer.RewardItemId);
                         changed = true;
                     }
 
@@ -424,12 +429,11 @@ public sealed class PresetTab(Plugin plugin)
                 ? $"{offer.RewardName} ×{offer.RewardQuantity}"
                 : offer.RewardName;
 
-            if (ImGui.Selectable($"{label}##r{offer.RewardItemId}", preset.RewardItemId == offer.RewardItemId))
-            {
-                preset.RewardItemId = offer.RewardItemId;
+            var already = preset.Rewards.Any(x => x.RewardItemId == offer.RewardItemId);
 
-                // 品が変われば扱う窓口も変わる。前の指定は持ち越さない。
-                preset.PreferredNpcDataId = 0;
+            if (ImGui.Selectable($"{label}##r{offer.RewardItemId}", already))
+            {
+                Toggle(preset, offer.RewardItemId);
                 changed = true;
             }
 
@@ -448,11 +452,12 @@ public sealed class PresetTab(Plugin plugin)
     /// </summary>
     private void DrawNpcPicker(ExchangePreset preset, uint currencyItemId, ref bool changed)
     {
-        if (preset.RewardItemId == 0)
+        if (preset.Rewards.Count == 0)
         {
             return;
         }
 
+        var firstReward = preset.Rewards[0].RewardItemId;
         var resolver = this.plugin.ExchangeResolver;
 
         if (!resolver.IsBuiltFor(currencyItemId))
@@ -474,7 +479,7 @@ public sealed class PresetTab(Plugin plugin)
         // 構築済みの索引をこの通貨へ切り替える。同じ通貨なら作り直しは起きない。
         resolver.BeginBuild(currencyItemId);
 
-        var group = resolver.GroupByReward(true).FirstOrDefault(x => x.RewardItemId == preset.RewardItemId);
+        var group = resolver.GroupByReward(true).FirstOrDefault(x => x.RewardItemId == firstReward);
 
         if (group is null || group.Definitions.Count == 0)
         {
@@ -520,4 +525,111 @@ public sealed class PresetTab(Plugin plugin)
     private static string ItemName(uint itemId)
         => ECommons.DalamudServices.Svc.Data.GetExcelSheet<Lumina.Excel.Sheets.Item>()?.GetRowOrDefault(itemId)?.Name.ExtractText()
            ?? $"<{itemId}>";
+
+    /// <summary>交換リストに入れる・外す。</summary>
+    private static void Toggle(ExchangePreset preset, uint rewardItemId)
+    {
+        var existing = preset.Rewards.FirstOrDefault(x => x.RewardItemId == rewardItemId);
+
+        if (existing is not null)
+        {
+            preset.Rewards.Remove(existing);
+            return;
+        }
+
+        preset.Rewards.Add(new ExchangeEntry { RewardItemId = rewardItemId });
+    }
+
+    /// <summary>
+    /// 交換リスト。上から順に交換する。
+    ///
+    /// 品ごとに「何個まで」と「いくつ持っていたら飛ばすか」を持つ。
+    /// 秘伝書のように 1 冊あれば足りるものを毎回買い直さないため。
+    /// </summary>
+    private void DrawRewardList(ExchangePreset preset, ref bool changed)
+    {
+        ImGui.TextUnformatted($"交換リスト（{preset.Rewards.Count} 件）");
+
+        if (preset.Rewards.Count == 0)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudGrey, "  下の一覧から品を選ぶと、ここに並びます");
+            return;
+        }
+
+        ExchangeEntry? remove = null;
+        var moveUp = -1;
+
+        using (var child = ImRaii.Child("##rewardlist_selected", new Vector2(0, Math.Min(160f, 30f + (preset.Rewards.Count * 26f))), true))
+        {
+            if (child)
+            {
+                for (var i = 0; i < preset.Rewards.Count; i++)
+                {
+                    var entry = preset.Rewards[i];
+                    using var id = ImRaii.PushId($"entry{i}");
+
+                    if (ImGui.SmallButton("×"))
+                    {
+                        remove = entry;
+                    }
+
+                    ImGui.SameLine();
+
+                    using (ImRaii.Disabled(i == 0))
+                    {
+                        if (ImGui.SmallButton("↑"))
+                        {
+                            moveUp = i;
+                        }
+                    }
+
+                    ImGui.SameLine();
+                    ImGui.TextUnformatted(ItemName(entry.RewardItemId));
+
+                    ImGui.SameLine();
+                    ImGui.SetCursorPosX(ImGui.GetCursorPosX() + 8f);
+
+                    var quantity = entry.Quantity;
+                    ImGui.SetNextItemWidth(90f);
+                    if (ImGui.InputInt("個##qty", ref quantity))
+                    {
+                        entry.Quantity = Math.Max(0, quantity);
+                        changed = true;
+                    }
+
+                    ImGui.SameLine();
+
+                    var stopAt = entry.StopAtOwned;
+                    ImGui.SetNextItemWidth(90f);
+                    if (ImGui.InputInt("所持で止める##own", ref stopAt))
+                    {
+                        entry.StopAtOwned = Math.Max(0, stopAt);
+                        changed = true;
+                    }
+
+                    if (entry.Quantity == 0)
+                    {
+                        ImGui.SameLine();
+                        ImGui.TextColored(ImGuiColors.DalamudYellow, "上限なし");
+                    }
+                }
+            }
+        }
+
+        ImGui.TextColored(
+            ImGuiColors.DalamudGrey,
+            "  個数 0 は上限なし。所持で止める は、その数だけ持っていれば飛ばします（0 で判定しない）");
+
+        if (remove is not null)
+        {
+            preset.Rewards.Remove(remove);
+            changed = true;
+        }
+
+        if (moveUp > 0)
+        {
+            (preset.Rewards[moveUp - 1], preset.Rewards[moveUp]) = (preset.Rewards[moveUp], preset.Rewards[moveUp - 1]);
+            changed = true;
+        }
+    }
 }

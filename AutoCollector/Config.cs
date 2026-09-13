@@ -41,6 +41,27 @@ public sealed class ThresholdSetting
     public int Value { get; set; } = 90;
 }
 
+/// <summary>
+/// 交換リストの 1 行。
+///
+/// 装備や秘伝書のように「これとこれとこれを 1 個ずつ」欲しい場合、
+/// プリセットを品の数だけ作るのは手間が大きい。1 つのプリセットに並べられるようにする。
+/// </summary>
+public sealed class ExchangeEntry
+{
+    public uint RewardItemId { get; set; }
+
+    /// <summary>交換する個数。0 なら上限なし（通貨が尽きるか、他の終了条件まで）。</summary>
+    public int Quantity { get; set; } = 1;
+
+    /// <summary>
+    /// すでに持っている数がこの値に達していれば飛ばす。0 なら判定しない。
+    ///
+    /// 秘伝書のように 1 冊あれば足りるものを、毎回買い直さないための条件。
+    /// </summary>
+    public int StopAtOwned { get; set; } = 1;
+}
+
 /// <summary>1 件の交換設定。</summary>
 public sealed class ExchangePreset
 {
@@ -65,8 +86,21 @@ public sealed class ExchangePreset
     /// </summary>
     public uint CurrencyItemId { get; set; }
 
-    /// <summary>交換して得るアイテムの ItemId。</summary>
+    /// <summary>
+    /// 交換して得るアイテムの ItemId。
+    ///
+    /// 交換リストへ移行したため、新しい設定では使わない。
+    /// 既存の設定を読み込んだときに <see cref="Rewards"/> へ移すためだけに残す。
+    /// </summary>
     public uint RewardItemId { get; set; }
+
+    /// <summary>
+    /// 交換する品の並び。上から順に交換する。
+    ///
+    /// 1 回の移動でまとめて交換する。品ごとに窓口が違う場合は、
+    /// いま行っている窓口で扱えるものだけをその場で交換する。
+    /// </summary>
+    public List<ExchangeEntry> Rewards { get; set; } = [];
 
     /// <summary>ユーザーが交換所 NPC を明示指定した場合の ENpcBase.RowId。0 なら自動選択。</summary>
     public uint PreferredNpcDataId { get; set; }

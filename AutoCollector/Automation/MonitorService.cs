@@ -239,12 +239,24 @@ public sealed class MonitorService(
         this.buildingForPreset = Guid.Empty;
         this.resolver.BeginBuild(currencyItemId);
 
-        var definition = this.resolver.Resolve(currencyItemId, preset.RewardItemId, preset.PreferredNpcDataId);
-        if (definition is null)
+        // 交換リストから、いま交換すべき品を並べる。
+        var targets = this.BuildTargets(preset, currencyItemId, out var buildFailure);
+
+        if (targets.Count == 0)
         {
-            this.DisablePreset(preset, "交換先を解決できませんでした");
+            if (!string.IsNullOrEmpty(buildFailure))
+            {
+                this.DisablePreset(preset, buildFailure);
+            }
+            else
+            {
+                this.LastDecision = $"{preset.Name}: 交換するものがありません";
+            }
+
             return;
         }
+
+        var definition = targets[0].Definition;
 
         var session = new ExchangeSession
         {
@@ -253,6 +265,7 @@ public sealed class MonitorService(
             RemainingCount = preset.Mode == ExchangeMode.FixedQuantity ? Math.Max(1, preset.Quantity) : 0,
             TargetQuantity = preset.Quantity,
             PresetId = preset.Id,
+            Targets = targets,
         };
 
         if (!this.executor.RequestWithTravel(definition, session, out var reason))
@@ -335,11 +348,18 @@ public sealed class MonitorService(
     {
         var currencyResolved = this.currencyCatalog.TryResolve(preset, out var currencyItemId);
         var currencyName = currencyResolved ? StatusText.ItemName(currencyItemId) : "（解決できません）";
-        var rewardName = preset.RewardItemId == 0 ? "（未選択）" : StatusText.ItemName(preset.RewardItemId);
+        // 交換リストの先頭を代表として出す。2 件以上あることも添える。
+        var firstReward = preset.Rewards.Count > 0 ? preset.Rewards[0].RewardItemId : 0u;
+
+        var rewardName = firstReward == 0
+            ? "（未選択）"
+            : preset.Rewards.Count > 1
+                ? $"{StatusText.ItemName(firstReward)} ほか {preset.Rewards.Count - 1} 件"
+                : StatusText.ItemName(firstReward);
 
         var hasReward = this.currencyService.TryGetCount(
-            preset.RewardItemId, out var owned, includeEquipped: true, includeArmory: true);
-        int? ownedReward = preset.RewardItemId != 0 && hasReward ? owned : null;
+            firstReward, out var owned, includeEquipped: true, includeArmory: true);
+        int? ownedReward = firstReward != 0 && hasReward ? owned : null;
 
         var modeText = ModeText(preset, rewardName, ownedReward);
 
@@ -356,7 +376,7 @@ public sealed class MonitorService(
             return New(0, null, null, PresetReadiness.CurrencyUnresolved);
         }
 
-        if (preset.RewardItemId == 0)
+        if (firstReward == 0)
         {
             return New(0, null, null, PresetReadiness.NeedsReward);
         }
@@ -379,7 +399,7 @@ public sealed class MonitorService(
 
         PresetProgress New(int current, int? cap, int? trigger, PresetReadiness readiness) => new(
             preset.Id, preset.Name, preset.Enabled, preset.DisabledReason,
-            currencyItemId, currencyName, preset.RewardItemId, rewardName,
+            currencyItemId, currencyName, firstReward, rewardName,
             current, cap, trigger, ownedReward, readiness, modeText, verb);
     }
 
@@ -437,5 +457,95 @@ public sealed class MonitorService(
         this.LastDecision = $"{preset.Name}: 無効化しました（{reason}）";
         this.anomalyLog.Error("Monitor", $"{preset.Name} を無効化しました: {reason}");
         Svc.Chat.Print($"[Auto Collector] {preset.Name} を無効化しました: {reason}");
+    }
+
+    /// <summary>
+    /// 交換リストから、この移動で交換する品を並べる。
+    ///
+    /// **同じ窓口で扱えるものだけをまとめる。**
+    /// 品ごとに別の窓口へ回ると移動が増えて時間がかかる。
+    /// 残ったものは次の判定で拾う。
+    ///
+    /// すでに十分持っているものは並べない。
+    /// </summary>
+    private List<ExchangeTarget> BuildTargets(ExchangePreset preset, uint currencyItemId, out string failure)
+    {
+        failure = string.Empty;
+
+        var entries = preset.Rewards.Where(x => x.RewardItemId != 0).ToList();
+
+        if (entries.Count == 0)
+        {
+            failure = "交換する品が設定されていません";
+            return [];
+        }
+
+        // まず窓口を決める。指定があればそれを優先する。
+        uint chosenNpc = 0;
+
+        foreach (var entry in entries)
+        {
+            if (this.IsSatisfied(entry))
+            {
+                continue;
+            }
+
+            var definition = this.resolver.Resolve(currencyItemId, entry.RewardItemId, preset.PreferredNpcDataId);
+            if (definition is null)
+            {
+                continue;
+            }
+
+            chosenNpc = definition.NpcDataId;
+            break;
+        }
+
+        if (chosenNpc == 0)
+        {
+            // 1 つも解決できない場合だけ、設定の誤りとして扱う。
+            var anyResolvable = entries.Any(x => this.resolver.Resolve(currencyItemId, x.RewardItemId, 0) is not null);
+            failure = anyResolvable ? string.Empty : "交換先を解決できませんでした";
+            return [];
+        }
+
+        var targets = new List<ExchangeTarget>();
+
+        foreach (var entry in entries)
+        {
+            if (this.IsSatisfied(entry))
+            {
+                continue;
+            }
+
+            var definition = this.resolver.Resolve(currencyItemId, entry.RewardItemId, chosenNpc);
+
+            // 決めた窓口で扱えないものは、この移動では扱わない。
+            if (definition is null || definition.NpcDataId != chosenNpc)
+            {
+                continue;
+            }
+
+            targets.Add(new ExchangeTarget
+            {
+                Definition = definition,
+                Unlimited = entry.Quantity <= 0,
+                Remaining = Math.Max(0, entry.Quantity),
+                StopAtOwned = entry.StopAtOwned,
+            });
+        }
+
+        return targets;
+    }
+
+    /// <summary>すでに十分持っているか。装備はアーマリーに入るため、そちらも数える。</summary>
+    private bool IsSatisfied(ExchangeEntry entry)
+    {
+        if (entry.StopAtOwned <= 0)
+        {
+            return false;
+        }
+
+        return this.currencyService.TryGetCount(entry.RewardItemId, out var owned, false, true) &&
+               owned >= entry.StopAtOwned;
     }
 }
