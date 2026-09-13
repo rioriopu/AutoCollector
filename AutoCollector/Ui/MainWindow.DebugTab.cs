@@ -270,7 +270,17 @@ public sealed partial class MainWindow
                 $"（直近は {orderStore.LastUnmatchedCount} 品）");
         }
 
+        var fileState = orderStore.DescribeFile();
+        ImGui.TextColored(
+            fileState.StartsWith("保存済み", StringComparison.Ordinal) ? ImGuiColors.HealerGreen : ImGuiColors.DalamudRed,
+            $"  {fileState}");
         ImGui.TextColored(ImGuiColors.DalamudGrey, $"  保存先: {orderStore.FilePath}");
+
+        ImGui.SameLine();
+        if (ImGui.SmallButton("いま保存する##saveorder"))
+        {
+            orderStore.ForceSave();
+        }
 
         if (ImGui.Button("覚えた並びを消す##clearorder"))
         {
