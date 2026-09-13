@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using AutoCollector.Diagnostics;
-using ECommons.Configuration;
+using System.Text.Json;
 using ECommons.DalamudServices;
 
 namespace AutoCollector.Game;
@@ -41,6 +41,8 @@ public sealed class InclusionShopOrderStore(AnomalyLog anomalyLog)
 {
     private const string FileName = "inclusion-order.json";
 
+    private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
+
     private readonly AnomalyLog anomalyLog = anomalyLog;
 
     private Dictionary<uint, List<uint>>? orders;
@@ -70,7 +72,10 @@ public sealed class InclusionShopOrderStore(AnomalyLog anomalyLog)
                 return this.orders;
             }
 
-            var file = EzConfig.LoadConfiguration<InclusionShopOrderFile>(path, false);
+            // ライブラリ任せにせず自分で読み書きする。
+            // EzConfig.SaveConfiguration では 1 件もファイルが作られなかった。
+            var file = JsonSerializer.Deserialize<InclusionShopOrderFile>(File.ReadAllText(path))
+                       ?? new InclusionShopOrderFile();
 
             // ゲームが更新されたら品揃えが変わる。覚えた並びは捨てる。
             var version = NpcLocationCache.ResolveGameVersion();
@@ -161,7 +166,7 @@ public sealed class InclusionShopOrderStore(AnomalyLog anomalyLog)
         }
 
         this.dirty = false;
-        this.nextSaveUtc = now.AddSeconds(20);
+        this.nextSaveUtc = now.AddSeconds(3);
 
         try
         {
@@ -171,13 +176,27 @@ public sealed class InclusionShopOrderStore(AnomalyLog anomalyLog)
                 Orders = this.Load(),
             };
 
-            EzConfig.SaveConfiguration(file, ResolvePath(), true, false);
+            var path = ResolvePath();
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, JsonSerializer.Serialize(file, JsonOptions));
+
+            this.anomalyLog.Info("Inclusion", $"並び順を保存しました（{file.Orders.Count} 種別）: {path}");
         }
         catch (Exception ex)
         {
             this.anomalyLog.Warn("Inclusion", $"並び順を保存できませんでした: {ex.Message}");
         }
     }
+
+    /// <summary>終了時に書き残しを出す。覚えたぶんを失わないため。</summary>
+    public void Dispose()
+    {
+        this.nextSaveUtc = DateTime.MinValue;
+        this.SaveIfDirty();
+    }
+
+    /// <summary>保存先。画面に出して、実際に書けているかを確かめられるようにする。</summary>
+    public string FilePath => ResolvePath();
 
     /// <summary>覚えたものを消す。並びがおかしくなったときのやり直し用。</summary>
     public void Clear()

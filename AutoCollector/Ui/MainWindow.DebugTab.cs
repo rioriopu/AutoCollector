@@ -270,6 +270,8 @@ public sealed partial class MainWindow
                 $"（直近は {orderStore.LastUnmatchedCount} 品）");
         }
 
+        ImGui.TextColored(ImGuiColors.DalamudGrey, $"  保存先: {orderStore.FilePath}");
+
         if (ImGui.Button("覚えた並びを消す##clearorder"))
         {
             orderStore.Clear();
