@@ -243,6 +243,12 @@ public sealed unsafe class ExchangeExecutor(
     /// </summary>
     private static readonly TimeSpan SettleBetweenExchanges = TimeSpan.FromMilliseconds(1200);
 
+    /// <summary>
+    /// 会話メニューの選択肢が落ち着いたとみなすまでの時間。
+    /// これを過ぎても一致しなければ、待っても一致しない。
+    /// </summary>
+    private static readonly TimeSpan MenuSettleWindow = TimeSpan.FromMilliseconds(2000);
+
     /// <summary>発火前にこれらが開いていたら撃たない。</summary>
     private static readonly string[] BlockingAddons =
     [
@@ -295,6 +301,12 @@ public sealed unsafe class ExchangeExecutor(
 
     /// <summary>同じ選択肢を続けて選んだ回数。</summary>
     private int sameMenuSelections;
+
+    /// <summary>直前に見た選択肢の並び。変化が無いことの判定に使う。</summary>
+    private string lastMenuSignature = string.Empty;
+
+    /// <summary>その並びを最初に見た時刻。</summary>
+    private DateTime menuSignatureSinceUtc = DateTime.MinValue;
 
     /// <summary>納品を開始済みか。開始と終了の区別に使う。</summary>
     private bool deliveryStarted;
@@ -802,6 +814,8 @@ public sealed unsafe class ExchangeExecutor(
         this.menuSelections = 0;
         this.sameMenuSelections = 0;
         this.lastMenuSelection = string.Empty;
+        this.lastMenuSignature = string.Empty;
+        this.menuSignatureSinceUtc = DateTime.MinValue;
 
         // 納品は品数ぶん繰り返すため長くかかる。移動と会話を含めても
         // 15 分あれば足りる。これを超えるのは何かが噛み合っていないとき。
@@ -2047,9 +2061,12 @@ public sealed unsafe class ExchangeExecutor(
             // ただし無制限に戻ってはいけない。人が手で閉じた場合や、
             // 選ぶべき選択肢が無い場合、話しかけ直しても同じ画面に戻るだけで
             // 永久に往復する。締切も毎回引き直されるため自力では抜けられない。
+            // 人がキャンセルを押した場合もここへ来る。
+            // 押し返すように話しかけ直すと、操作を奪い合って抜けられなくなる。
+            // 1 度だけやり直し、それでも駄目なら諦める。
             this.menuBounces++;
 
-            if (this.menuBounces > 3)
+            if (this.menuBounces > 1)
             {
                 this.Fail(
                     ExchangeFailure.MenuResolutionFailed,
@@ -2134,7 +2151,26 @@ public sealed unsafe class ExchangeExecutor(
             }
         }
 
-        if (DateTime.UtcNow <= this.stepDeadlineUtc)
+        // 一致しないまま待ち続けない。
+        //
+        // メニューが切り替わる途中なら選択肢は変わる。変わらないなら、
+        // 待っても一致しない。実測では、選択肢に候補が 1 つも無い状態で
+        // 30 秒待つ間に人がキャンセルを押し、そのたびに話しかけ直して
+        // 抜けられなくなっていた。
+        //
+        // 選択肢が変わらないまま一定時間が過ぎたら、その場で失敗させる。
+        var signature = string.Join("", this.menu.ListEntries());
+
+        if (signature != this.lastMenuSignature)
+        {
+            this.lastMenuSignature = signature;
+            this.menuSignatureSinceUtc = DateTime.UtcNow;
+            return;
+        }
+
+        var settled = DateTime.UtcNow - this.menuSignatureSinceUtc > MenuSettleWindow;
+
+        if (!settled && DateTime.UtcNow <= this.stepDeadlineUtc)
         {
             // まだ猶予がある。メニューが切り替わる途中の可能性もあるので待つ。
             return;
