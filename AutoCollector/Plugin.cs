@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using AutoCollector.Automation;
 using AutoCollector.Diagnostics;
 using AutoCollector.Ipc;
@@ -11,6 +12,7 @@ using ECommons;
 using ECommons.Configuration;
 using ECommons.DalamudServices;
 using ECommons.Schedulers;
+using ECommons.Throttlers;
 using ECommons.SimpleGui;
 
 namespace AutoCollector;
@@ -46,6 +48,8 @@ public sealed class Plugin : IDalamudPlugin
     internal CollectablesNpcService CollectablesNpcService { get; private set; } = null!;
 
     internal InclusionShopCatalog InclusionShopCatalog { get; private set; } = null!;
+
+    internal InclusionShopOrderStore InclusionShopOrderStore { get; private set; } = null!;
 
     internal ShopService ShopService { get; private set; } = null!;
 
@@ -105,6 +109,51 @@ public sealed class Plugin : IDalamudPlugin
     }
 
     /// <summary>
+    /// アイテム交換画面が開いていれば、並んでいる品の順を覚える。
+    ///
+    /// 並び順をシートから再現しようとしたが、装備以外で規則を特定できなかった。
+    /// 実際に開いた画面から覚えるほうが確実で、覚えれば設定画面でも同じ並びで出せる。
+    ///
+    /// 画面は SpecialShop の行番号を持っていないため、品の顔ぶれで照合する。
+    /// **読み取りだけを行う。ゲームの状態は変更しない。**
+    /// </summary>
+    private unsafe void LearnInclusionShopOrder()
+    {
+        // 毎フレーム読む必要はない。タブの切り替えを拾えれば足りる。
+        if (!EzThrottler.Throttle("AutoCollector.LearnOrder", 500))
+        {
+            this.InclusionShopOrderStore.SaveIfDirty();
+            return;
+        }
+
+        try
+        {
+            if (!this.InclusionShopService.IsOpen() ||
+                !this.InclusionShopService.TryGetAddon(out var addon) ||
+                !this.InclusionShopService.TryReadEntries(addon, out var entries, out _, out _) ||
+                entries.Count == 0)
+            {
+                this.InclusionShopOrderStore.SaveIfDirty();
+                return;
+            }
+
+            // 画面に出ている順（スロット順）で ItemId を並べる。
+            var itemIds = entries.OrderBy(x => x.Slot).Select(x => x.ItemId).ToList();
+
+            if (this.InclusionShopCatalog.TryFindSeriesByItems(itemIds, out var specialShopId))
+            {
+                this.InclusionShopOrderStore.Learn(specialShopId, itemIds);
+            }
+        }
+        catch (Exception ex)
+        {
+            this.AnomalyLog.Warn("Inclusion", $"並び順を覚えられませんでした: {ex.Message}");
+        }
+
+        this.InclusionShopOrderStore.SaveIfDirty();
+    }
+
+    /// <summary>
     /// 設定の移行。既定値を変えたときに、保存済みの古い値を揃え直す。
     /// </summary>
     private static void MigrateConfig()
@@ -142,7 +191,9 @@ public sealed class Plugin : IDalamudPlugin
         this.CollectablesShopReader = new CollectablesShopReader();
         this.CollectablesShopService = new CollectablesShopService(this.AnomalyLog);
         this.CollectablesNpcService = new CollectablesNpcService(this.AnomalyLog, this.NpcLocationService);
-        this.InclusionShopCatalog = new InclusionShopCatalog(this.AnomalyLog, this.TomestoneService, this.SpecialCurrencyMap);
+        this.InclusionShopOrderStore = new InclusionShopOrderStore(this.AnomalyLog);
+        this.InclusionShopCatalog = new InclusionShopCatalog(
+            this.AnomalyLog, this.TomestoneService, this.SpecialCurrencyMap, this.InclusionShopOrderStore);
         this.CollectableDelivery = new CollectableDeliveryRunner(
             this.AnomalyLog, this.CollectablesShopService, this.CurrencyService, this.SpecialCurrencyMap);
 
@@ -282,6 +333,10 @@ public sealed class Plugin : IDalamudPlugin
             // 配置ファイルから引けない NPC を、実際に見かけたときに覚える。
             // リムサとグリダニアの窓口はこれでしか位置を取れない。
             this.NpcLocationService.LearnFromWorld();
+
+            // 交換画面が開いていれば、品の並び順を覚える。
+            // シートからは装備以外の並びを再現できなかった。
+            this.LearnInclusionShopOrder();
 
             if (!this.ExchangeResolver.TickBuild())
             {

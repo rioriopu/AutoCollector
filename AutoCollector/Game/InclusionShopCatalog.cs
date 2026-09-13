@@ -23,16 +23,20 @@ public sealed record InclusionSeries(
 public sealed record InclusionCategory(string Name, string DisplayName, IReadOnlyList<InclusionSeries> Series);
 
 /// <summary>種別の中に並ぶ品 1 件。</summary>
-/// <param name="ClassJobCategory">画面の並べ替えに使う。職ごとにまとまる。</param>
-/// <param name="EquipSlotCategory">画面の並べ替えに使う。職の中で部位順になる。</param>
+/// <param name="Order">SpecialShop の並び順の列。画面の並べ替えの第一キー。</param>
+/// <param name="ClassJobCategory">職。職ごとにまとまる。</param>
+/// <param name="EquipSlotCategory">部位。職の中で部位順になる。</param>
+/// <param name="ItemLevel">アイテムレベル。同じ部位の中では高い方が先。</param>
 public sealed record InclusionOffer(
     uint RewardItemId,
     string RewardName,
     uint RewardQuantity,
     uint CurrencyItemId,
     uint CurrencyCost,
+    byte Order,
     uint ClassJobCategory,
-    uint EquipSlotCategory);
+    uint EquipSlotCategory,
+    uint ItemLevel);
 
 /// <summary>
 /// アイテム交換画面の中身を、ゲーム内と同じ形で引く。
@@ -57,11 +61,13 @@ public sealed record InclusionOffer(
 public sealed class InclusionShopCatalog(
     AnomalyLog anomalyLog,
     TomestoneService tomestoneService,
-    SpecialCurrencyMap specialCurrencyMap)
+    SpecialCurrencyMap specialCurrencyMap,
+    InclusionShopOrderStore orderStore)
 {
     private readonly AnomalyLog anomalyLog = anomalyLog;
     private readonly TomestoneService tomestoneService = tomestoneService;
     private readonly SpecialCurrencyMap specialCurrencyMap = specialCurrencyMap;
+    private readonly InclusionShopOrderStore orderStore = orderStore;
 
     private List<InclusionCategory>? categories;
 
@@ -282,12 +288,70 @@ public sealed class InclusionShopCatalog(
             this.offerCache[specialShopId] = all;
         }
 
+        // 実際の画面で見た並びを覚えていれば、そちらを使う。
+        // 推測より確実で、装備以外もゲームと同じ並びになる。
+        if (this.orderStore.TryGet(specialShopId, out var learned))
+        {
+            var byId = all.ToDictionary(x => x.RewardItemId);
+            var ordered = new List<InclusionOffer>(all.Count);
+
+            foreach (var itemId in learned)
+            {
+                if (byId.Remove(itemId, out var offer))
+                {
+                    ordered.Add(offer);
+                }
+            }
+
+            // 覚えたあとに品が増えた場合に備えて、残りを後ろへ足す。
+            ordered.AddRange(all.Where(x => byId.ContainsKey(x.RewardItemId)));
+            all = ordered;
+        }
+
         if (currencyItemId == 0)
         {
             return all;
         }
 
         return all.Where(x => x.CurrencyItemId == currencyItemId).ToList();
+    }
+
+    /// <summary>
+    /// 画面に並んでいた品の集合から、どの種別かを特定する。
+    ///
+    /// 画面は SpecialShop の行番号を持っていない。品の顔ぶれで照合する。
+    /// </summary>
+    public bool TryFindSeriesByItems(IReadOnlyCollection<uint> itemIds, out uint specialShopId)
+    {
+        specialShopId = 0;
+
+        if (itemIds.Count == 0)
+        {
+            return false;
+        }
+
+        var target = itemIds.ToHashSet();
+
+        foreach (var category in this.ListCategories())
+        {
+            foreach (var series in category.Series)
+            {
+                var offers = this.ListOffers(series.SpecialShopId, 0);
+
+                if (offers.Count != target.Count)
+                {
+                    continue;
+                }
+
+                if (offers.Select(x => x.RewardItemId).ToHashSet().SetEquals(target))
+                {
+                    specialShopId = series.SpecialShopId;
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -428,8 +492,10 @@ public sealed class InclusionShopCatalog(
                     rewardQuantity,
                     costItemId,
                     costAmount,
+                    entry.Order,
                     row?.ClassJobCategory.RowId ?? 0,
-                    row?.EquipSlotCategory.RowId ?? 0));
+                    row?.EquipSlotCategory.RowId ?? 0,
+                    row?.LevelItem.RowId ?? 0));
             }
         }
         catch (Exception ex)
@@ -437,20 +503,24 @@ public sealed class InclusionShopCatalog(
             this.anomalyLog.Warn("Inclusion", $"品を読めませんでした（SpecialShop {specialShopId}）: {ex.Message}");
         }
 
-        // シートの並びは画面の並びと違う。
+        // シートの並びは画面の並びと違うため、並べ替える。
         //
-        // 実測（【ILv55】職人向け装備・48 件）で確かめた。
-        //   シート: 頭(8 職分) → 胴(8 職分) → 脚(8 職分) …  部位ごと
-        //   画面  : 木工[道具・頭・胴・手・脚・足] → 鍛冶[…] …  職ごと
+        // 観測 41 画面と突き合わせた結果、最も一致したのがこの順。
         //
-        // 職（ClassJobCategory）→ 部位（EquipSlotCategory）の安定ソートで
-        // 48 件すべてが観測と一致した。
+        //   シート順そのまま                  8 / 41
+        //   Order 昇順                      25 / 41
+        //   Order 昇順 → 職 → 部位 → iLv 降  28 / 41   ← これ
         //
-        // 秘伝書のように職も部位も持たないものは値が揃うため、
-        // 安定ソートによりシートの並びがそのまま残る。こちらも観測と合う。
+        // 外れた 13 画面はすべて装備を 1 つも含まない（素材・釣り餌・雑貨・マテリア）。
+        // 装備の画面 28 件はすべて一致する。
+        //
+        // 装備以外の規則は特定できていない。
+        // そちらは実際に画面を開いたときに覚える（InclusionShopOrderStore）。
         return offers
-            .OrderBy(x => x.ClassJobCategory)
+            .OrderBy(x => x.Order)
+            .ThenBy(x => x.ClassJobCategory)
             .ThenBy(x => x.EquipSlotCategory)
+            .ThenByDescending(x => x.ItemLevel)
             .ToList();
     }
 
