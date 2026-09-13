@@ -108,8 +108,20 @@ public sealed class InclusionShopCatalog(
                 return this.categories = result;
             }
 
-            // 系統名 → 種別（SpecialShop の重複は取り除く）
-            var merged = new Dictionary<string, List<InclusionSeries>>();
+            // 系統は都市ごとに別の行として用意されている。
+            //
+            //   InclusionShop 3801094 → Category 49   リムサなど
+            //   InclusionShop 3801096 → Category 55
+            //   InclusionShop 3801097 → Category 59
+            //   InclusionShop 3801103 → Category 70   トライヨラ
+            //
+            // 中身の種別は同じ名前だが、指している SpecialShop の行が違う。
+            // 例: ILv570 は Category 49 だと 1770483、Category 70 だと 1770787。
+            //
+            // **和を取ってはいけない。** SpecialShop の行で重複を取り除いても
+            // 同じ名前の種別が何本も並んでしまう。
+            // 系統ごとに 1 つの行を選ぶ。種別が最も多く、同数なら新しい行を使う。
+            var best = new Dictionary<string, (uint CategoryRowId, List<InclusionSeries> Series)>();
             var order = new List<string>();
 
             foreach (var shop in shops)
@@ -133,11 +145,14 @@ public sealed class InclusionShopCatalog(
                         continue;
                     }
 
-                    if (!merged.TryGetValue(categoryName, out var list))
+                    // すでに同じ行を見ているなら読み直さない。
+                    if (best.TryGetValue(categoryName, out var current) &&
+                        current.CategoryRowId == categoryRef.RowId)
                     {
-                        merged[categoryName] = list = [];
-                        order.Add(categoryName);
+                        continue;
                     }
+
+                    var list = new List<InclusionSeries>();
 
                     for (ushort sub = 0; sub < count; sub++)
                     {
@@ -147,13 +162,13 @@ public sealed class InclusionShopCatalog(
                         }
 
                         var specialShopId = row.SpecialShop.RowId;
-                        if (specialShopId == 0 || list.Any(x => x.SpecialShopId == specialShopId))
+                        if (specialShopId == 0)
                         {
                             continue;
                         }
 
                         var name = specialShops.GetRowOrDefault(specialShopId)?.Name.ExtractText() ?? string.Empty;
-                        if (string.IsNullOrWhiteSpace(name))
+                        if (string.IsNullOrWhiteSpace(name) || list.Any(x => x.Name == name))
                         {
                             continue;
                         }
@@ -177,16 +192,31 @@ public sealed class InclusionShopCatalog(
 
                         list.Add(new InclusionSeries(specialShopId, name, Shorten(name), currencies));
                     }
+
+                    if (list.Count == 0)
+                    {
+                        continue;
+                    }
+
+                    if (!best.TryGetValue(categoryName, out var existing))
+                    {
+                        best[categoryName] = (categoryRef.RowId, list);
+                        order.Add(categoryName);
+                        continue;
+                    }
+
+                    // 種別が多い方を採る。同数なら新しい行（番号が大きい方）。
+                    if (list.Count > existing.Series.Count ||
+                        (list.Count == existing.Series.Count && categoryRef.RowId > existing.CategoryRowId))
+                    {
+                        best[categoryName] = (categoryRef.RowId, list);
+                    }
                 }
             }
 
             foreach (var name in order)
             {
-                var series = merged[name];
-                if (series.Count > 0)
-                {
-                    result.Add(new InclusionCategory(name, Shorten(name), series));
-                }
+                result.Add(new InclusionCategory(name, Shorten(name), best[name].Series));
             }
 
             this.anomalyLog.Info(
