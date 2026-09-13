@@ -144,6 +144,11 @@ public sealed class Plugin : IDalamudPlugin
             {
                 this.InclusionShopOrderStore.Learn(specialShopId, itemIds);
             }
+            else
+            {
+                // 特定できないと覚えられない。黙って落とすと原因が追えない。
+                this.InclusionShopOrderStore.NoteUnmatched(itemIds.Count);
+            }
         }
         catch (Exception ex)
         {

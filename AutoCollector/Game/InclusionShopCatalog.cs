@@ -83,6 +83,9 @@ public sealed class InclusionShopCatalog(
     /// <summary>種別ごとの品。開いたものだけを覚える。</summary>
     private readonly Dictionary<uint, List<InclusionOffer>> offerCache = [];
 
+    /// <summary>種別ごとの、絞り込まない品の顔ぶれ。画面との照合に使う。</summary>
+    private readonly Dictionary<uint, HashSet<uint>> rawRewardCache = [];
+
     /// <summary>系統と種別の一覧。初回の呼び出しで作る。</summary>
     public IReadOnlyList<InclusionCategory> ListCategories()
     {
@@ -320,6 +323,10 @@ public sealed class InclusionShopCatalog(
     /// 画面に並んでいた品の集合から、どの種別かを特定する。
     ///
     /// 画面は SpecialShop の行番号を持っていない。品の顔ぶれで照合する。
+    ///
+    /// 照合には**シートの生の顔ぶれ**を使う。
+    /// 一覧に出す品は「報酬 1 種・コスト 1 種」のものだけに絞っているため、
+    /// 絞ったあとの集合で比べると画面と一致しない。
     /// </summary>
     public bool TryFindSeriesByItems(IReadOnlyCollection<uint> itemIds, out uint specialShopId)
     {
@@ -336,14 +343,9 @@ public sealed class InclusionShopCatalog(
         {
             foreach (var series in category.Series)
             {
-                var offers = this.ListOffers(series.SpecialShopId, 0);
+                var raw = this.ReadRawRewards(series.SpecialShopId);
 
-                if (offers.Count != target.Count)
-                {
-                    continue;
-                }
-
-                if (offers.Select(x => x.RewardItemId).ToHashSet().SetEquals(target))
+                if (raw.Count == target.Count && raw.SetEquals(target))
                 {
                     specialShopId = series.SpecialShopId;
                     return true;
@@ -352,6 +354,47 @@ public sealed class InclusionShopCatalog(
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// SpecialShop が出す品を、絞り込みなしで集める。画面との照合専用。
+    /// </summary>
+    private HashSet<uint> ReadRawRewards(uint specialShopId)
+    {
+        if (this.rawRewardCache.TryGetValue(specialShopId, out var cached))
+        {
+            return cached;
+        }
+
+        var set = new HashSet<uint>();
+
+        try
+        {
+            var specialShops = Svc.Data.GetExcelSheet<SpecialShop>();
+
+            if (specialShops is not null && specialShops.TryGetRow(specialShopId, out var shop))
+            {
+                foreach (var entry in shop.Item)
+                {
+                    foreach (var receive in entry.ReceiveItems)
+                    {
+                        if (receive.Item.RowId == 0)
+                        {
+                            continue;
+                        }
+
+                        set.Add(receive.Item.RowId);
+                        break;
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Warn("Inclusion", $"品の顔ぶれを読めませんでした（{specialShopId}）: {ex.Message}");
+        }
+
+        return this.rawRewardCache[specialShopId] = set;
     }
 
     /// <summary>
