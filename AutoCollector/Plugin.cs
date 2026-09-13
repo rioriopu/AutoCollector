@@ -509,6 +509,16 @@ public sealed class Plugin : IDalamudPlugin
             Svc.Log.Error($"[Auto Collector] AutoRetainer の抑制解除に失敗しました: {ex}");
         }
 
+        // 覚えた並び順を書き残す。
+        try
+        {
+            this.InclusionShopOrderStore?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            Svc.Log.Error($"[Auto Collector] 並び順を保存できませんでした: {ex}");
+        }
+
         // 背景で配置ファイルを読んでいる場合は打ち切る。
         try
         {
