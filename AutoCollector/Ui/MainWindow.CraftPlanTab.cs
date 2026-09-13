@@ -21,7 +21,12 @@ public sealed partial class MainWindow
     private uint craftPlanCurrencyItemId;
     private uint craftPlanTargetItemId;
     private int craftPlanKeepFree = 10;
-    private string craftPlanJobFilter = string.Empty;
+
+    /// <summary>選んでいるジョブ。CraftType の行番号。</summary>
+    private uint craftPlanJob;
+
+    /// <summary>選んでいる Lv 帯。0 なら絞らない。</summary>
+    private int craftPlanLevelBand;
 
     private void DrawCraftPlanTab()
     {
@@ -88,20 +93,85 @@ public sealed partial class MainWindow
             return;
         }
 
+        // --- ジョブ ---
+        var jobs = this.plugin.CraftPlanService.ListJobs();
+
+        if (jobs.Count == 0)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudRed, "ジョブの一覧を作れませんでした");
+            return;
+        }
+
+        var jobIndex = Math.Max(0, jobs.ToList().FindIndex(x => x.CraftType == this.craftPlanJob));
+
         ImGui.SetNextItemWidth(200f);
-        ImGui.InputTextWithHint("##jobfilter", "ジョブで絞る（調理 など）", ref this.craftPlanJobFilter, 32);
+        using (var jobCombo = ImRaii.Combo("ジョブ", jobs[jobIndex].Name))
+        {
+            if (jobCombo)
+            {
+                for (var i = 0; i < jobs.Count; i++)
+                {
+                    if (ImGui.Selectable($"{jobs[i].Name}##job{i}", i == jobIndex))
+                    {
+                        this.craftPlanJob = jobs[i].CraftType;
+                        this.craftPlanTargetItemId = 0;
+                        this.craftPlanLevelBand = 0;
+                    }
+                }
+            }
+        }
 
-        var filtered = string.IsNullOrWhiteSpace(this.craftPlanJobFilter)
-            ? craftable
-            : craftable.Where(x => x.JobName.Contains(this.craftPlanJobFilter, StringComparison.Ordinal)).ToList();
+        var filtered = craftable.Where(x => x.CraftType == this.craftPlanJob).ToList();
 
-        ImGui.TextColored(ImGuiColors.DalamudGrey, $"  作れる収集品 {filtered.Count} 件（もらえる量の多い順）");
+        // --- Lv 帯 ---
+        //
+        // 紫貨は Lv50 から Lv90 まで広く、そのまま並べると探せない。
+        // 橙貨は Lv100 だけなので、この絞り込みは邪魔になる。出さない。
+        var bands = filtered.Select(x => (x.ClassJobLevel / 10) * 10).Distinct().OrderBy(x => x).ToList();
+        var showBands = bands.Count > 1;
+
+        if (showBands)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudGrey, "  レベルで絞る:");
+
+            ImGui.SameLine();
+            if (ImGui.SmallButton("すべて##band0"))
+            {
+                this.craftPlanLevelBand = 0;
+                this.craftPlanTargetItemId = 0;
+            }
+
+            foreach (var band in bands)
+            {
+                ImGui.SameLine();
+
+                using var color = ImRaii.PushColor(
+                    ImGuiCol.Button,
+                    ImGuiColors.ParsedBlue,
+                    this.craftPlanLevelBand == band);
+
+                if (ImGui.SmallButton($"Lv{band}##band{band}"))
+                {
+                    this.craftPlanLevelBand = band;
+                    this.craftPlanTargetItemId = 0;
+                }
+            }
+        }
+
+        if (this.craftPlanLevelBand > 0)
+        {
+            filtered = filtered
+                .Where(x => x.ClassJobLevel >= this.craftPlanLevelBand && x.ClassJobLevel < this.craftPlanLevelBand + 10)
+                .ToList();
+        }
+
+        ImGui.TextColored(ImGuiColors.DalamudGrey, $"  作れる収集品 {filtered.Count} 件（製作手帳と同じ並び）");
 
         using (var child = ImRaii.Child("##craftlist", new Vector2(0, 150), true))
         {
             if (child)
             {
-                foreach (var item in filtered.OrderByDescending(x => x.HighReward).Take(200))
+                foreach (var item in filtered)
                 {
                     if (ImGui.Selectable($"{item.Name}##c{item.ItemId}", this.craftPlanTargetItemId == item.ItemId))
                     {
@@ -109,7 +179,7 @@ public sealed partial class MainWindow
                     }
 
                     ImGui.SameLine();
-                    ImGui.TextColored(ImGuiColors.DalamudGrey, $"  {item.JobName}  最大 {item.HighReward}");
+                    ImGui.TextColored(ImGuiColors.DalamudGrey, $"  Lv{item.ClassJobLevel}  最大 {item.HighReward}");
                 }
             }
         }
