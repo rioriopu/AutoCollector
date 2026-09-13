@@ -125,6 +125,15 @@ public sealed class MonitorService(
 
     private DateTime nextSnapshotUtc = DateTime.MinValue;
 
+    /// <summary>手動で押されたが、まだ始められていないプリセット。</summary>
+    private Guid manualPresetId = Guid.Empty;
+
+    /// <summary>手動のぶんを待つ期限。索引づくりが終わらない場合に諦める。</summary>
+    private DateTime manualDeadlineUtc = DateTime.MinValue;
+
+    /// <summary>手動で押されたぶんを待つ上限。索引づくりはこれより早く終わる。</summary>
+    private static readonly TimeSpan ManualWaitLimit = TimeSpan.FromSeconds(60);
+
     public void Tick()
     {
         // どの早期 return よりも先に更新する。
@@ -143,6 +152,16 @@ public sealed class MonitorService(
         if (this.executor.InFlight is not null)
         {
             this.LastDecision = "前回の交換の結果が未確認のため、監視を停止しています";
+            return;
+        }
+
+        // 手動で押されたぶんは、外部自動化の条件や確認間隔を待たせない。
+        //
+        // 1 回目の押下で交換候補の索引を作り始め、そこで戻っていた。
+        // そのため 2 回押さないと動き出さなかった。
+        // 索引ができたら自分で始める。
+        if (this.TryResumeManualRun())
+        {
             return;
         }
 
@@ -210,8 +229,51 @@ public sealed class MonitorService(
             return false;
         }
 
+        // 索引がまだなら、この 1 回では始まらない。できたら自分で始める。
+        this.manualPresetId = preset.Id;
+        this.manualDeadlineUtc = DateTime.UtcNow.Add(ManualWaitLimit);
+
         this.TryStart(preset);
         reason = this.LastDecision;
+        return true;
+    }
+
+    /// <summary>
+    /// 手動で押されたぶんの続き。
+    ///
+    /// 交換候補の索引づくりは時間がかかる。押した時点では始められないため、
+    /// できあがるまで覚えておいて、そこから始める。
+    /// </summary>
+    private bool TryResumeManualRun()
+    {
+        if (this.manualPresetId == Guid.Empty)
+        {
+            return false;
+        }
+
+        if (DateTime.UtcNow > this.manualDeadlineUtc)
+        {
+            this.manualPresetId = Guid.Empty;
+            this.LastDecision = "手動で押された交換を始められませんでした";
+            return false;
+        }
+
+        var preset = Plugin.C.Presets.FirstOrDefault(x => x.Id == this.manualPresetId);
+
+        if (preset is null || !preset.Enabled)
+        {
+            this.manualPresetId = Guid.Empty;
+            return false;
+        }
+
+        this.TryStart(preset);
+
+        // 始まったら覚えておく必要はない。
+        if (this.executor.Step != ExchangeStep.Idle && this.executor.Step != ExchangeStep.Done)
+        {
+            this.manualPresetId = Guid.Empty;
+        }
+
         return true;
     }
 
