@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using AutoCollector.Diagnostics;
@@ -8,13 +8,22 @@ using Lumina.Excel.Sheets;
 namespace AutoCollector.Game;
 
 /// <summary>作れる収集品 1 件。</summary>
+/// <param name="CraftType">ジョブ。CraftType の行番号（0 木工 〜 7 調理）。</param>
+/// <param name="ClassJobLevel">必要なレベル。Lv 帯で絞るのに使う。</param>
+/// <param name="NotebookOrder">製作手帳での並び順。小さいほど先。</param>
 public sealed record CraftableCollectable(
     uint ItemId,
     string Name,
     uint RecipeId,
+    uint CraftType,
     string JobName,
+    int ClassJobLevel,
+    long NotebookOrder,
     uint CurrencyItemId,
     ushort HighReward);
+
+/// <summary>選べるジョブ 1 件。</summary>
+public sealed record CraftJob(uint CraftType, string Name);
 
 /// <summary>作るのに要る素材 1 件。</summary>
 /// <param name="PerCraft">1 回あたりの数。</param>
@@ -71,11 +80,55 @@ public sealed class CraftPlanService(
     private readonly CurrencyService currency = currency;
 
     private List<CraftableCollectable>? craftables;
+    private List<CraftJob>? jobs;
     private uint crystalCategoryRowId;
 
-    /// <summary>このスクリップを生む、作れる収集品の一覧。</summary>
+    /// <summary>
+    /// このスクリップを生む、作れる収集品の一覧。
+    ///
+    /// 並びは製作手帳の収集品欄と同じにする。
+    /// 名前順やもらえる量の順では、手帳と見比べたときに探せない。
+    /// </summary>
     public IReadOnlyList<CraftableCollectable> ListCraftable(uint currencyItemId)
-        => this.Build().Where(x => x.CurrencyItemId == currencyItemId).ToList();
+        => this.Build()
+            .Where(x => x.CurrencyItemId == currencyItemId)
+            .OrderBy(x => x.NotebookOrder)
+            .ToList();
+
+    /// <summary>クラフターのジョブ一覧。</summary>
+    public IReadOnlyList<CraftJob> ListJobs()
+    {
+        if (this.jobs is not null)
+        {
+            return this.jobs;
+        }
+
+        var result = new List<CraftJob>();
+
+        try
+        {
+            var craftTypes = Svc.Data.GetExcelSheet<CraftType>();
+
+            if (craftTypes is not null)
+            {
+                foreach (var craftType in craftTypes)
+                {
+                    var name = craftType.Name.ExtractText();
+
+                    if (!string.IsNullOrWhiteSpace(name))
+                    {
+                        result.Add(new CraftJob(craftType.RowId, name));
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Warn("Craft", $"ジョブの一覧を作れませんでした: {ex.Message}");
+        }
+
+        return this.jobs = result;
+    }
 
     /// <summary>作れる収集品の総数。</summary>
     public int KnownCount => this.Build().Count;
@@ -95,6 +148,10 @@ public sealed class CraftPlanService(
             var recipes = Svc.Data.GetExcelSheet<Recipe>();
             var craftTypes = Svc.Data.GetExcelSheet<CraftType>();
             var categories = Svc.Data.GetExcelSheet<ItemUICategory>();
+            var levelTable = Svc.Data.GetExcelSheet<RecipeLevelTable>();
+
+            // 製作手帳の並び。行の番号と、その行の中の位置で決まる。
+            var notebookOrder = BuildNotebookOrder();
 
             if (items is null || recipes is null || craftTypes is null)
             {
@@ -139,12 +196,16 @@ public sealed class CraftPlanService(
                 }
 
                 var job = craftTypes.GetRowOrDefault(recipe.CraftType.RowId)?.Name.ExtractText() ?? string.Empty;
+                var level = levelTable?.GetRowOrDefault(recipe.RecipeLevelTable.RowId)?.ClassJobLevel ?? 0;
 
                 result.Add(new CraftableCollectable(
                     resultItemId,
                     name,
                     recipe.RowId,
+                    recipe.CraftType.RowId,
                     job,
+                    level,
+                    notebookOrder.TryGetValue(recipe.RowId, out var order) ? order : long.MaxValue,
                     reward.CurrencyItemId,
                     reward.HighReward));
             }
@@ -156,9 +217,50 @@ public sealed class CraftPlanService(
             this.anomalyLog.Error("Craft", $"作れる収集品を求められませんでした: {ex.Message}");
         }
 
-        return this.craftables = result.OrderBy(x => x.JobName, StringComparer.Ordinal)
-            .ThenByDescending(x => x.HighReward)
-            .ToList();
+        return this.craftables = result.OrderBy(x => x.NotebookOrder).ToList();
+    }
+
+    /// <summary>
+    /// レシピ → 製作手帳での並び順。
+    ///
+    /// 手帳は行ごとにレシピが並んでいる。行の番号と、その行の中の位置で順が決まる。
+    /// 名前順やレベル順ではなく、この順で出さないと手帳と見比べられない。
+    /// </summary>
+    private static Dictionary<uint, long> BuildNotebookOrder()
+    {
+        var map = new Dictionary<uint, long>();
+
+        try
+        {
+            var notebook = Svc.Data.GetExcelSheet<RecipeNotebookList>();
+
+            if (notebook is null)
+            {
+                return map;
+            }
+
+            foreach (var row in notebook)
+            {
+                var index = 0;
+
+                foreach (var recipe in row.Recipe)
+                {
+                    if (recipe.RowId != 0)
+                    {
+                        // 行の中は 1000 件も無いので、この掛け方で順が崩れない。
+                        map.TryAdd(recipe.RowId, ((long)row.RowId * 1000) + index);
+                    }
+
+                    index++;
+                }
+            }
+        }
+        catch
+        {
+            // 引けなければ並べ替えないだけ。動作には影響しない。
+        }
+
+        return map;
     }
 
     /// <summary>
