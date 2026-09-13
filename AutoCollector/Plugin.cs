@@ -59,6 +59,8 @@ public sealed class Plugin : IDalamudPlugin
 
     internal CraftRunner CraftRunner { get; private set; } = null!;
 
+    internal RetainerInventoryStore RetainerInventory { get; private set; } = null!;
+
     internal CollectableCycleRunner CollectableCycle { get; private set; } = null!;
 
     internal ShopService ShopService { get; private set; } = null!;
@@ -166,6 +168,45 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         this.InclusionShopOrderStore.SaveIfDirty();
+    }
+
+    /// <summary>
+    /// リテイナーの持ち物を覚える。
+    ///
+    /// 自分で開いたときだけでなく、人が手で開いたときも控える。
+    /// 普段の出し入れで勝手に埋まっていき、総当たりせずに済むようになる。
+    ///
+    /// **読み取りだけを行う。ゲームの状態は変更しない。**
+    /// </summary>
+    private void LearnRetainerInventory()
+    {
+        if (!EzThrottler.Throttle("AutoCollector.LearnRetainer", 1000))
+        {
+            this.RetainerInventory.SaveIfDirty();
+            return;
+        }
+
+        try
+        {
+            if (!RetainerRestockRunner.TryGetOpenRetainerName(out var name))
+            {
+                this.RetainerInventory.SaveIfDirty();
+                return;
+            }
+
+            var contents = RetainerRestockRunner.ReadOpenRetainerItems();
+
+            if (contents.Count > 0)
+            {
+                this.RetainerInventory.Remember(name, contents);
+            }
+        }
+        catch (Exception ex)
+        {
+            this.AnomalyLog.Warn("Retainer", $"リテイナーの持ち物を覚えられませんでした: {ex.Message}");
+        }
+
+        this.RetainerInventory.SaveIfDirty();
     }
 
     /// <summary>
@@ -310,8 +351,9 @@ public sealed class Plugin : IDalamudPlugin
             this.CollectableRewardService,
             this.CurrencyService,
             this.SpecialCurrencyMap);
+        this.RetainerInventory = new RetainerInventoryStore(this.AnomalyLog);
         this.RetainerRestock = new RetainerRestockRunner(
-            this.AnomalyLog, this.CurrencyService, this.MenuService, this.AutoRetainer);
+            this.AnomalyLog, this.CurrencyService, this.MenuService, this.AutoRetainer, this.RetainerInventory);
         this.CraftRunner = new CraftRunner(this.AnomalyLog, this.CurrencyService, this.Artisan);
         this.AutoDutySetup = new AutoDutySetup(this.AutoDuty, this.AnomalyLog);
         this.AutoDutyKeeper = new AutoDutyKeeper(
@@ -437,6 +479,7 @@ public sealed class Plugin : IDalamudPlugin
             this.CollectableCycle.Tick();
             this.RetainerRestock.Tick();
             this.CraftRunner.Tick();
+            this.LearnRetainerInventory();
 
             // 納品画面が開いた瞬間を捉えて自動でダンプする。読み取りのみ。
             this.CollectablesShopReader.Tick(ResolveLogDirectory());
@@ -584,6 +627,16 @@ public sealed class Plugin : IDalamudPlugin
         catch (Exception ex)
         {
             Svc.Log.Error($"[Auto Collector] AutoRetainer の抑制解除に失敗しました: {ex}");
+        }
+
+        // リテイナーの持ち物を書き残す。
+        try
+        {
+            this.RetainerInventory?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            Svc.Log.Error($"[Auto Collector] リテイナーの持ち物を保存できませんでした: {ex}");
         }
 
         // 覚えた並び順を書き残す。
