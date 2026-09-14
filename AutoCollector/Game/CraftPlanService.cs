@@ -50,7 +50,34 @@ public sealed record PlanMaterial(
     bool IsIntermediate,
     uint RecipeId,
     int AmountResult,
-    IReadOnlyList<PlanMaterial> SubMaterials);
+    IReadOnlyList<PlanMaterial> SubMaterials)
+{
+    /// <summary>
+    /// いま鞄にあるものだけで用意できるか。
+    ///
+    /// **中間素材は「足りない」で終わらせない。**
+    /// 黒麦粉が 133 足りなくても、その素材の黒麦が鞄にあるなら自分で作れる。
+    /// 製作の手順は中間素材から先に作るようにできているので、そのまま進めてよい。
+    ///
+    /// 2026-09-14 の実測。黒麦 270 個（黒麦粉 135 個ぶん）を取り出し終えているのに、
+    /// 黒麦粉が足りないという理由だけで製作に入らず止まっていた。
+    /// </summary>
+    public bool CanCoverFromBag()
+    {
+        if (this.Shortfall <= 0)
+        {
+            return true;
+        }
+
+        // 自分で作れない、または素材を辿れていないなら、足りないまま。
+        if (!this.IsIntermediate || this.RecipeId == 0 || this.SubMaterials.Count == 0)
+        {
+            return false;
+        }
+
+        return this.SubMaterials.All(x => x.Shortfall <= 0);
+    }
+}
 
 /// <summary>作る計画。</summary>
 /// <param name="TargetHeld">
@@ -466,8 +493,12 @@ public sealed class CraftPlanService(
             if (crafts + materialSlots <= usable)
             {
                 // 手持ちの素材だけで作れる個数まで落とす指定なら、
-                // 足りないものが 1 つでもあるあいだは個数を減らし続ける。
-                if (requireMaterials && materials.Any(x => x.Shortfall > 0))
+                // 用意できないものが 1 つでもあるあいだは個数を減らし続ける。
+                //
+                // **中間素材は、その素材が鞄にあるなら用意できる扱いにする。**
+                // ここで一緒に数えていたため、黒麦を取り出し終えていても
+                // 黒麦粉が足りないという理由だけで 0 個まで落ちていた。
+                if (requireMaterials && materials.Any(x => !x.CanCoverFromBag()))
                 {
                     continue;
                 }
