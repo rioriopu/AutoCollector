@@ -70,7 +70,7 @@ public static class StatusText
         ExchangeFailure.InsufficientCurrency =>
             "プリセットの交換を始める条件を、1 回分のコストより大きい値にしてください。",
         ExchangeFailure.NoBagSpace =>
-            "不要なアイテムを整理するか、設定タブの「交換後に残す所持枠」を小さくしてください。",
+            "不要なアイテムを整理するか、プリセットの「残す空き枠」を小さくしてください。",
 
         // 未対応
         ExchangeFailure.InclusionShopUnsupported =>

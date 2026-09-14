@@ -1198,18 +1198,6 @@ public sealed partial class MainWindow(Plugin plugin)
 
         ImGui.Spacing();
 
-        var keepFree = Plugin.C.KeepFreeInventorySlots;
-        ImGui.SetNextItemWidth(160f);
-        if (ImGui.InputInt("交換後に残す所持枠", ref keepFree))
-        {
-            Plugin.C.KeepFreeInventorySlots = Math.Clamp(keepFree, 0, 50);
-            changed = true;
-        }
-
-        ImGui.TextColored(ImGuiColors.DalamudGrey, "  AutoRetainer は所持枠が空いていないキャラクタを処理対象から外して保存します");
-
-        ImGui.Spacing();
-
         var range = Plugin.C.NpcApproachRange;
         if (ImGui.SliderFloat("NPC への接近距離", ref range, 1.0f, 6.0f, "%.1f"))
         {

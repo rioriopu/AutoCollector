@@ -246,14 +246,9 @@ public sealed class Config
     /// <summary>AutoRetainer が導入されている場合、交換中に SetSuppressed で抑制するか。</summary>
     public bool SuppressAutoRetainer { get; set; } = true;
 
-    /// <summary>
-    /// 交換後に残しておく所持枠の数。
-    ///
-    /// AutoRetainer は所持枠が空いていないキャラクタを処理対象から外し、
-    /// その設定を保存する（MultiMode.cs の Data.Enabled = false）。
-    /// 交換で枠を埋め切ると、リテイナーが回らなくなったように見える。
-    /// </summary>
-    public int KeepFreeInventorySlots { get; set; } = 5;
+    // 交換後に残す所持枠の設定は廃止した。
+    // 残す枠はプリセットの「残す空き枠」だけで決める。
+    // 2 つあると、片方を直しても交換の数が変わらず、理由が読めなくなる。
 
     /// <summary>NPC へ近づく際の許容距離。</summary>
     public float NpcApproachRange { get; set; } = 3.0f;
