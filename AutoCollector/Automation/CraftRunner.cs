@@ -66,6 +66,9 @@ public sealed class CraftRunner(
     private int index;
     private DateTime deadlineUtc = DateTime.MinValue;
 
+    /// <summary>Artisan に立てた停止要求を、まだ解除していない。</summary>
+    private bool releasePending;
+
     public CraftRunStep Step { get; private set; } = CraftRunStep.Idle;
 
     public string StatusDetail { get; private set; } = string.Empty;
@@ -181,7 +184,16 @@ public sealed class CraftRunner(
         return true;
     }
 
-    /// <summary>止める。Artisan 側は自分では止めない。</summary>
+    /// <summary>
+    /// 止める。
+    ///
+    /// **Artisan にも止まってもらう。**
+    /// 数えるのをやめるだけでは、頼んだ回数ぶん作り続ける。
+    /// 「止める」を押したのに手が動き続けることになる。
+    ///
+    /// 止め方は協調的な停止要求だけ。強制はしない。
+    /// **立てた要求は必ず解除する。** 解除は手が止まったのを見てから行う（<see cref="Tick"/>）。
+    /// </summary>
     public void Stop(string reason)
     {
         if (!this.IsRunning)
@@ -189,14 +201,49 @@ public sealed class CraftRunner(
             return;
         }
 
+        if (this.artisan.Stop())
+        {
+            this.releasePending = true;
+            this.Note("Artisan に停止を頼みました");
+        }
+        else
+        {
+            this.Note("Artisan に停止を頼めませんでした。作り終わるまで動き続けます");
+        }
+
         this.Note($"止めます: {reason}");
         this.Step = CraftRunStep.Done;
         this.StatusDetail = reason;
     }
 
+    /// <summary>
+    /// 立てた停止要求を、手が止まったのを見てから解除する。
+    /// ここを通さないと Artisan が止まったままになる。
+    /// </summary>
+    private void ReleaseIfSettled()
+    {
+        if (!this.releasePending)
+        {
+            return;
+        }
+
+        // まだ動いているなら待つ。読み取れないときも待たずに解除する
+        // （読めない状態で握り続けるほうが害が大きい）。
+        if (this.artisan.TryIsBusy(out var busy) && busy)
+        {
+            return;
+        }
+
+        this.artisan.Release();
+        this.releasePending = false;
+    }
+
     /// <summary>Framework.Update から毎フレーム呼ぶ。</summary>
     public void Tick()
     {
+        // 止めたあとの後始末。走っていなくても通す。
+        this.ReleaseIfSettled();
+
         if (!this.IsRunning)
         {
             return;

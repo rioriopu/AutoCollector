@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Numerics;
 using AutoCollector.Automation;
 using Dalamud.Bindings.ImGui;
@@ -66,20 +67,57 @@ public sealed partial class MainWindow
     {
         var runner = this.plugin.GoalRunner;
 
-        if (!runner.IsRunning)
+        // **止まったあとも出し続ける。**
+        // 走っているあいだだけ描いていたため、止まった瞬間に理由も記録も画面から消え、
+        // 何段目で何が起きたのかを追えなくなっていた。
+        var stoppedPresets = Plugin.C.Presets
+            .Where(x => !string.IsNullOrEmpty(runner.BlockedReason(x.Id)))
+            .ToList();
+
+        if (!runner.IsRunning && stoppedPresets.Count == 0 && runner.Trace.Count == 0)
         {
             return;
         }
 
         ImGui.Separator();
-        ImGui.TextColored(
-            ImGuiColors.HealerGreen,
-            $"目標つきの周回: {runner.Preset?.Name ?? "?"}（{Describe(runner.Step)} / {runner.Rounds} 回目）");
-        ImGui.TextColored(ImGuiColors.DalamudGrey, $"  {runner.StatusDetail}");
 
-        if (ImGui.Button("止める##stopgoalstatus"))
+        if (runner.IsRunning)
         {
-            runner.Stop("ユーザー操作");
+            ImGui.TextColored(
+                ImGuiColors.HealerGreen,
+                $"目標つきの周回: {runner.Preset?.Name ?? "?"}（{Describe(runner.Step)} / {runner.Rounds} 回目）");
+            ImGui.TextColored(ImGuiColors.DalamudGrey, $"  {runner.StatusDetail}");
+
+            if (ImGui.Button("止める##stopgoalstatus"))
+            {
+                runner.Stop("ユーザー操作");
+            }
+        }
+        else if (stoppedPresets.Count > 0)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudYellow, "目標つきの周回が止まっています");
+
+            foreach (var preset in stoppedPresets)
+            {
+                var retry = runner.BlockedRetryInSeconds(preset.Id);
+
+                ImGui.TextColored(
+                    ImGuiColors.DalamudGrey,
+                    retry is null
+                        ? $"  {preset.Name}: {runner.BlockedReason(preset.Id)}"
+                        : $"  {preset.Name}: {runner.BlockedReason(preset.Id)}（{retry} 秒後にもう一度試します）");
+
+                using var id = ImRaii.PushId(preset.Id.ToString());
+
+                if (ImGui.SmallButton("いますぐもう一度試す"))
+                {
+                    runner.ClearBlock(preset.Id);
+                }
+            }
+        }
+        else
+        {
+            ImGui.TextColored(ImGuiColors.DalamudGrey, $"前回の目標つきの周回: {runner.StatusDetail}");
         }
 
         if (runner.Trace.Count == 0)
@@ -209,6 +247,30 @@ public sealed partial class MainWindow
             Head(ImGuiColors.DalamudYellow, "設定が途中です");
             Detail("監視する通貨は決まっていますが、何と交換するかが選ばれていません。");
             this.DrawJumpToPreset();
+            ImGui.Separator();
+            return;
+        }
+
+        // H6.5 目標つきの周回が止まっている
+        //
+        // **「これで正常です」より先に出す。**
+        // 止まっているのに「出番待ちです / これで正常です」と出していたため、
+        // 利用者は異常に気づかず、AutoDuty を起動すれば動くと思って待ち続けた。
+        // 目標つきの周回は外部の自動化を待たないので、H7 の説明も当てはまらない。
+        if (this.plugin.GoalRunner.HasBlocked && !this.plugin.GoalRunner.IsRunning)
+        {
+            Head(ImGuiColors.DalamudYellow, "目標つきの周回が止まっています");
+            Detail("下の「目標つきの周回が止まっています」に理由が出ています。");
+            this.DrawJumpToPreset();
+            ImGui.Separator();
+            return;
+        }
+
+        // H6.6 目標つきの周回が動いている
+        if (this.plugin.GoalRunner.IsRunning)
+        {
+            Head(ImGuiColors.HealerGreen, "目標つきの周回を回しています");
+            Detail(this.plugin.GoalRunner.StatusDetail);
             ImGui.Separator();
             return;
         }

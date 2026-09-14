@@ -1086,6 +1086,14 @@ public sealed unsafe class RetainerRestockRunner(
     /// <summary>
     /// いまの呼び鈴の検出状況。画面に出して、押す前に分かるようにする。
     /// </summary>
+    /// <summary>
+    /// 話しかけられる呼び鈴が近くにあるか。
+    ///
+    /// **判定はここを使う。<see cref="DescribeBell"/> の戻り文字列で分岐しないこと。**
+    /// 画面へ出す文言を直した瞬間に動作が変わる。実機でしか現れない壊れ方になる。
+    /// </summary>
+    public static bool IsBellNearby() => FindBell() is not null;
+
     public string DescribeBell()
     {
         if (!Player.Available)

@@ -527,6 +527,13 @@ public sealed class Plugin : IDalamudPlugin
     /// </summary>
     internal void EmergencyStop(string reason)
     {
+        // 束ねている側から先に止める。
+        //
+        // ここを通さないと、交換を止めた直後に目標つき周回が次の動作
+        // （製作や、リテイナーからの取り出し）を始めてしまう。
+        // 利用者は止めたつもりでいるのに、すぐ別の自動処理が動き出すことになる。
+        this.GoalRunner?.Stop(reason);
+
         // 何よりも先に発火経路を封鎖する。inFlight はクリアしない（未解決として残す）。
         this.ExchangeExecutor?.Abort(reason);
 
