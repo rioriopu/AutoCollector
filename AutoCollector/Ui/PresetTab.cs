@@ -956,6 +956,7 @@ public sealed class PresetTab(Plugin plugin)
                     : ImGuiColors.DalamudYellow,
                 $"  {bellNow}");
 
+            this.DrawKnownBell();
             return;
         }
 
@@ -966,6 +967,45 @@ public sealed class PresetTab(Plugin plugin)
                 ? ImGuiColors.DalamudGrey
                 : ImGuiColors.DalamudYellow,
             $"  {bell}");
+
+        this.DrawKnownBell();
+    }
+
+    /// <summary>
+    /// このエリアで覚えている呼び鈴の場所を出す。
+    ///
+    /// 近くに無くても、覚えていれば歩いて行ける。
+    /// 覚えているかどうかが分からないと、なぜ動くのか／動かないのかが読めない。
+    /// </summary>
+    private void DrawKnownBell()
+    {
+        var territory = ECommons.DalamudServices.Svc.ClientState.TerritoryType;
+        var known = this.plugin.BellLocations.Get(territory);
+
+        if (known is null)
+        {
+            ImGui.TextColored(
+                ImGuiColors.DalamudGrey,
+                "  このエリアの呼び鈴はまだ覚えていません（エリアに入ってしばらく探します）");
+            return;
+        }
+
+        ImGui.TextColored(
+            ImGuiColors.HealerGreen,
+            $"  覚えている呼び鈴: {known.Value.X:F1}, {known.Value.Y:F1}, {known.Value.Z:F1}" +
+            $"（全 {this.plugin.BellLocations.Count} エリア）");
+
+        ImGui.SameLine();
+
+        if (ImGui.SmallButton("忘れる##forgetbell"))
+        {
+            this.plugin.BellLocations.Forget(territory);
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("呼び鈴が動いた・別の場所を覚えさせたいときに押してください。次にこのエリアへ入り直すと探し直します。");
+        }
     }
 
     /// <summary>

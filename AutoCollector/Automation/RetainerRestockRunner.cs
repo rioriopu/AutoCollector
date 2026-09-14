@@ -125,37 +125,11 @@ public sealed unsafe class RetainerRestockRunner(
     MenuService menu,
     AutoRetainerIpc autoRetainer,
     RetainerInventoryStore inventoryStore,
-    NavigationService navigation)
+    NavigationService navigation,
+    BellLocationStore bellLocations)
 {
-    /// <summary>
-    /// 呼び鈴を探す範囲。
-    ///
-    /// **足りないぶんは歩く。距離で諦めない。**
-    /// 実際の上限は、こちらが決める数ではなく
-    /// <c>Svc.Objects</c> に載っているかどうか（ゲームが読み込んでいる範囲）。
-    /// 載っていないものは場所が分からないので、そもそも向かえない。
-    /// ここは「載っていれば拾う」という意味で広く取る。
-    ///
-    /// 以前は 10m 以内しか見ず、しかも歩かずにその場から話しかけていた。
-    /// 10m は話しかけられる距離より遠いため、実機では
-    /// 「距離が離れています」が出続けるだけで進まなかった（2026-09-14 実測）。
-    /// </summary>
-    private const float BellSearchRange = 200f;
-
     /// <summary>この距離まで近づいてから話しかける。</summary>
     private const float BellInteractRange = 3.5f;
-
-    /// <summary>
-    /// 前に使えた呼び鈴の場所。エリアごとに覚える。
-    ///
-    /// **遠いと <c>Svc.Objects</c> に載らない。** 載らなければ場所が分からず向かえない。
-    /// 一度でも使えた場所を覚えておけば、載っていなくてもそこへ歩ける。
-    /// 近づけば読み込まれるので、あとは普段どおり。
-    ///
-    /// 覚えるのはこの実行のあいだだけ。保存はしない。
-    /// 家具の呼び鈴は動かせるため、古い場所を当てにし続けるほうが危ない。
-    /// </summary>
-    private static readonly Dictionary<uint, Vector3> KnownBells = [];
 
     /// <summary>
     /// リテイナーの持ち物が入る入れ物。
@@ -185,6 +159,7 @@ public sealed unsafe class RetainerRestockRunner(
     private readonly AutoRetainerIpc autoRetainer = autoRetainer;
     private readonly RetainerInventoryStore inventoryStore = inventoryStore;
     private readonly NavigationService navigation = navigation;
+    private readonly BellLocationStore bellLocations = bellLocations;
 
     private readonly List<RestockRequest> requests = [];
 
@@ -553,6 +528,16 @@ public sealed unsafe class RetainerRestockRunner(
             {
                 this.StopMoving();
                 this.Finish(RestockStep.Error, $"近くに呼び鈴がありません（{DescribeNearby()}）");
+                return;
+            }
+
+            // 着いても見つからなければ、その記録は当てにならない。忘れる。
+            if (this.bellMoveIssued &&
+                Vector3.Distance(remembered, Player.Position) <= BellInteractRange + 1f)
+            {
+                this.StopMoving();
+                this.bellLocations.Forget(Svc.ClientState.TerritoryType);
+                this.Finish(RestockStep.Error, "覚えていた場所に呼び鈴がありませんでした");
                 return;
             }
 
@@ -1651,7 +1636,7 @@ public sealed unsafe class RetainerRestockRunner(
     /// **「いま話しかけられるか」ではない。** 歩いて行けるかどうか。
     /// 読み込まれているものが無くても、このエリアで前に使えた場所を覚えていれば行ける。
     /// </summary>
-    public static bool IsBellReachable() => FindBell() is not null || RememberedBell() is not null;
+    public bool IsBellReachable() => this.FindBell() is not null || this.RememberedBell() is not null;
 
     public string DescribeBell()
     {
@@ -1698,10 +1683,26 @@ public sealed unsafe class RetainerRestockRunner(
         }
     }
 
-    /// <summary>近くの呼び鈴。無ければ null。</summary>
-    private static Dalamud.Game.ClientState.Objects.Types.IGameObject? FindBell()
+    /// <summary>
+    /// いま読み込まれている呼び鈴のうち、いちばん近いもの。無ければ null。
+    ///
+    /// **距離で切らない。** 読み込まれていれば拾い、足りないぶんは歩く。
+    /// 実際の上限はこちらが決める数ではなく、ゲームが読み込んでいる範囲。
+    ///
+    /// エリアを移ったときの探索からも、取り出しの途中からも、同じここを通る。
+    /// 判定を 1 か所にしておかないと、探せる呼び鈴と使える呼び鈴がずれる。
+    /// </summary>
+    public static Dalamud.Game.ClientState.Objects.Types.IGameObject? ScanForBell()
     {
+        if (!Player.Available)
+        {
+            return null;
+        }
+
         var bellName = Svc.Data.GetExcelSheet<EObjName>()?.GetRowOrDefault(2000401)?.Singular.ExtractText() ?? string.Empty;
+
+        Dalamud.Game.ClientState.Objects.Types.IGameObject? nearest = null;
+        var nearestDistance = float.MaxValue;
 
         foreach (var obj in Svc.Objects)
         {
@@ -1723,26 +1724,38 @@ public sealed unsafe class RetainerRestockRunner(
                 continue;
             }
 
-            // 読み込まれている範囲まで拾う。足りないぶんは歩いて近寄る。
-            if (Vector3.Distance(obj.Position, Player.Position) <= BellSearchRange)
+            var distance = Vector3.Distance(obj.Position, Player.Position);
+
+            if (distance < nearestDistance)
             {
-                // 見つけた場所は覚えておく。離れて読み込まれなくなっても向かえる。
-                KnownBells[Svc.ClientState.TerritoryType] = obj.Position;
-                return obj;
+                nearest = obj;
+                nearestDistance = distance;
             }
         }
 
-        return null;
+        return nearest;
+    }
+
+    /// <summary>近くの呼び鈴。無ければ null。見つけたらその場所を覚える。</summary>
+    private Dalamud.Game.ClientState.Objects.Types.IGameObject? FindBell()
+    {
+        var bell = ScanForBell();
+
+        if (bell is not null)
+        {
+            this.bellLocations.Remember(Svc.ClientState.TerritoryType, bell.Position, bell.Name.ToString());
+        }
+
+        return bell;
     }
 
     /// <summary>
-    /// このエリアで前に使えた呼び鈴の場所。覚えていなければ null。
+    /// このエリアで覚えている呼び鈴の場所。覚えていなければ null。
     ///
     /// 読み込まれていない呼び鈴は <c>Svc.Objects</c> に載らない。
     /// 場所さえ分かればそこへ歩ける。近づけば読み込まれる。
     /// </summary>
-    private static Vector3? RememberedBell()
-        => KnownBells.TryGetValue(Svc.ClientState.TerritoryType, out var position) ? position : null;
+    private Vector3? RememberedBell() => this.bellLocations.Get(Svc.ClientState.TerritoryType);
 
     /// <summary>
     /// ゲームの表記を引く。日本語でも英語でも同じ番号で取れる。

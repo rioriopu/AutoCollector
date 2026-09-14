@@ -611,7 +611,7 @@ public sealed class GoalRunner(
         if (blocking.Count > 0 && signature != this.lastRestockSignature)
         {
             // 文言ではなく真偽で判定する。画面の文言を直しても動作が変わらないように。
-            if (!RetainerRestockRunner.IsBellReachable())
+            if (!this.restock.IsBellReachable())
             {
                 var bell = this.restock.DescribeBell();
                 this.Note($"素材が {blocking.Count} 種類足りませんが、{bell}");
