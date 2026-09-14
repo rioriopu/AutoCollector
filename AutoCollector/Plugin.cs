@@ -357,7 +357,15 @@ public sealed class Plugin : IDalamudPlugin
             this.SpecialCurrencyMap);
         this.RetainerInventory = new RetainerInventoryStore(this.AnomalyLog);
         this.RetainerRestock = new RetainerRestockRunner(
-            this.AnomalyLog, this.CurrencyService, this.MenuService, this.AutoRetainer, this.RetainerInventory);
+            this.AnomalyLog,
+            this.CurrencyService,
+            this.MenuService,
+            this.AutoRetainer,
+            this.RetainerInventory,
+
+            // 呼び鈴まで歩くための足。交換の移動とは別物にする。
+            // 同時には走らない（GoalRunner が順番に動かす）ので取り合わない。
+            new NavigationService(this.AnomalyLog, this.Vnavmesh));
         this.CraftRunner = new CraftRunner(this.AnomalyLog, this.CurrencyService, this.Artisan);
 
         // 目標から逆算する側。交換費用の取得に交換画面の一覧が要る。

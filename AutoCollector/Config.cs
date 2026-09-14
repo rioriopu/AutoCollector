@@ -137,8 +137,14 @@ public sealed class ExchangePreset
     /// </summary>
     public bool CraftToEarn { get; set; }
 
-    /// <summary>製作するジョブ。CraftType の行番号。0 は未選択。</summary>
-    public uint CraftJob { get; set; }
+    /// <summary>
+    /// 製作するジョブ。CraftType の行番号。**負なら未設定。**
+    ///
+    /// 0 を未設定に使ってはいけない。**木工師の CraftType が 0**。
+    /// 0 を未設定にしていたため、未設定のはずが「木工」と表示され、
+    /// 木工を選んでも製作リストに切り替わらなかった（2026-09-14 実測）。
+    /// </summary>
+    public int CraftJob { get; set; } = -1;
 
     /// <summary>
     /// 作る収集品の ItemId。0 は未選択。

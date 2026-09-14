@@ -19,6 +19,9 @@ namespace AutoCollector.Ui;
 /// </summary>
 public sealed class PresetTab(Plugin plugin)
 {
+    /// <summary>製作するジョブを選んでいないときの表示。</summary>
+    private const string UnsetJobLabel = "--選択して下さい--";
+
     private static readonly string[] ThresholdModeNames = ["固定値", "上限に対する割合", "上限までの残り"];
 
     private static readonly string[] ExchangeModeNames =
@@ -47,6 +50,83 @@ public sealed class PresetTab(Plugin plugin)
     private ScripGoal? goalCache;
     private Guid goalCachePresetId;
     private DateTime goalCacheUntilUtc;
+
+    /// <summary>いま打ち込み中の数値欄と、その文字列。打ち込みを邪魔しないために持つ。</summary>
+    private string numberEditKey = string.Empty;
+    private string numberEditText = string.Empty;
+
+    /// <summary>
+    /// 数値の入力欄。**全角数字を半角に直してから読む。**
+    ///
+    /// 日本語入力のまま打つと「５００」のような全角数字が入る。
+    /// <c>InputInt</c> はこれを数として読めず、打ったのに値が変わらない。
+    /// 打ち間違いにしか見えないので、こちらで直す。
+    ///
+    /// 数字以外は捨てる。打っている途中の空欄は 0 として扱わず、そのまま残す。
+    /// 0 にしてしまうと、消して打ち直すことができなくなる。
+    /// </summary>
+    private bool DrawNumber(string key, string label, ref int value, float width = 160f)
+    {
+        var editing = this.numberEditKey == key;
+        var text = editing ? this.numberEditText : value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+        ImGui.SetNextItemWidth(width);
+        var edited = ImGui.InputText(label, ref text, 12);
+
+        if (ImGui.IsItemActive())
+        {
+            this.numberEditKey = key;
+        }
+        else if (editing)
+        {
+            // 離れたら控えを捨てる。次に開いたときは実際の値から始める。
+            this.numberEditKey = string.Empty;
+            this.numberEditText = string.Empty;
+        }
+
+        if (!edited)
+        {
+            return false;
+        }
+
+        var normalized = NormalizeDigits(text);
+        this.numberEditText = normalized;
+
+        if (normalized.Length == 0)
+        {
+            // 全部消しただけ。値はまだ変えない。
+            return false;
+        }
+
+        if (!int.TryParse(normalized, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var parsed)
+            || parsed == value)
+        {
+            return false;
+        }
+
+        value = parsed;
+        return true;
+    }
+
+    /// <summary>全角数字を半角に直し、数字以外を捨てる。</summary>
+    private static string NormalizeDigits(string text)
+    {
+        var builder = new System.Text.StringBuilder(text.Length);
+
+        foreach (var c in text)
+        {
+            // 全角の ０〜９ は U+FF10〜U+FF19。半角との差はちょうど 0xFEE0。
+            var normalized = c >= '０' && c <= '９' ? (char)(c - 0xFEE0) : c;
+
+            if (normalized is >= '0' and <= '9')
+            {
+                builder.Append(normalized);
+            }
+        }
+
+        // 桁が多すぎると int に収まらない。収まる長さで切る。
+        return builder.Length > 10 ? builder.ToString(0, 10) : builder.ToString();
+    }
 
     public void Draw(ref bool select)
     {
@@ -267,7 +347,6 @@ public sealed class PresetTab(Plugin plugin)
         }
 
         var thresholdValue = preset.Threshold.Value;
-        ImGui.SetNextItemWidth(160f);
         var thresholdLabel = preset.Threshold.Mode switch
         {
             ThresholdMode.Fixed => "この所持数以上で開始",
@@ -275,7 +354,7 @@ public sealed class PresetTab(Plugin plugin)
             _ => "上限までの残りがこの値以下で開始",
         };
 
-        if (ImGui.InputInt(thresholdLabel, ref thresholdValue))
+        if (this.DrawNumber($"th{preset.Id}", thresholdLabel, ref thresholdValue))
         {
             preset.Threshold.Value = Math.Max(0, thresholdValue);
             changed = true;
@@ -306,8 +385,7 @@ public sealed class PresetTab(Plugin plugin)
             case ExchangeMode.UntilCurrencyReserve:
             {
                 var reserve = preset.CurrencyReserve;
-                ImGui.SetNextItemWidth(160f);
-                if (ImGui.InputInt("残す通貨量", ref reserve))
+                if (this.DrawNumber($"reserve{preset.Id}", "残す通貨量", ref reserve))
                 {
                     preset.CurrencyReserve = Math.Max(0, reserve);
                     changed = true;
@@ -319,8 +397,7 @@ public sealed class PresetTab(Plugin plugin)
             case ExchangeMode.FixedQuantity:
             {
                 var quantity = preset.Quantity;
-                ImGui.SetNextItemWidth(160f);
-                if (ImGui.InputInt("交換する回数", ref quantity))
+                if (this.DrawNumber($"qty{preset.Id}", "交換する回数", ref quantity))
                 {
                     preset.Quantity = Math.Clamp(quantity, 1, ExchangeSession.HardLimit);
                     changed = true;
@@ -332,8 +409,7 @@ public sealed class PresetTab(Plugin plugin)
             case ExchangeMode.UntilTargetQuantity:
             {
                 var target = preset.Quantity;
-                ImGui.SetNextItemWidth(160f);
-                if (ImGui.InputInt("目標の所持数", ref target))
+                if (this.DrawNumber($"target{preset.Id}", "目標の所持数", ref target))
                 {
                     preset.Quantity = Math.Max(1, target);
                     changed = true;
@@ -471,7 +547,7 @@ public sealed class PresetTab(Plugin plugin)
         this.DrawCraftJobCombo(preset, ref changed);
 
         // ジョブを選んでいるあいだは、表を製作リストに差し替える。
-        if (preset.CraftJob != 0)
+        if (preset.CraftJob >= 0)
         {
             this.DrawCraftPicker(preset, currencyItemId, ref changed);
             return;
@@ -549,7 +625,7 @@ public sealed class PresetTab(Plugin plugin)
             ImGui.TextColored(
                 ImGuiColors.DalamudGrey,
                 preset.PreferredNpcDataId == 0
-                    ? "  交換所: 自動で選びます"
+                    ? "  交換所: 自動（最寄り）で選びます"
                     : $"  交換所: {NpcLocationService.GetName(preset.PreferredNpcDataId)}（指定中）");
 
             if (ImGui.SmallButton("交換所を指定する##buildnpc"))
@@ -577,7 +653,7 @@ public sealed class PresetTab(Plugin plugin)
             .Select(g => g.First())
             .ToList();
 
-        var labels = new List<string> { "自動で選ぶ" };
+        var labels = new List<string> { "自動（最寄り）で選ぶ" };
         labels.AddRange(npcs.Select(x =>
             $"{x.NpcName} — {NpcLocationService.GetTerritoryName(x.TerritoryId)}"));
 
@@ -806,9 +882,8 @@ public sealed class PresetTab(Plugin plugin)
         }
 
         var keep = preset.CraftKeepFreeSlots;
-        ImGui.SetNextItemWidth(160f);
 
-        if (ImGui.InputInt("残す空き枠", ref keep))
+        if (this.DrawNumber($"keep{preset.Id}", "残す空き枠", ref keep))
         {
             preset.CraftKeepFreeSlots = Math.Max(0, keep);
             changed = true;
@@ -910,8 +985,11 @@ public sealed class PresetTab(Plugin plugin)
             return;
         }
 
-        var current = jobs.FirstOrDefault(x => x.CraftType == preset.CraftJob);
-        var label = current?.Name ?? "未設定";
+        var current = preset.CraftJob >= 0
+            ? jobs.FirstOrDefault(x => x.CraftType == (uint)preset.CraftJob)
+            : null;
+
+        var label = current?.Name ?? UnsetJobLabel;
 
         ImGui.SetNextItemWidth(180f);
 
@@ -921,20 +999,23 @@ public sealed class PresetTab(Plugin plugin)
             return;
         }
 
-        if (ImGui.Selectable("未設定##job0", preset.CraftJob == 0))
+        // 一覧の中の「--選択して下さい--」は見出しであって選択肢ではない。
+        // 押しても意味が無いので、押せないことが分かるよう灰色で出す。
+        using (ImRaii.Disabled())
         {
-            ClearCraftChoice(preset);
-            changed = true;
+            ImGui.Selectable($"{UnsetJobLabel}##jobunset", preset.CraftJob < 0);
         }
 
         foreach (var job in jobs)
         {
-            if (!ImGui.Selectable($"{job.Name}##job{job.CraftType}", job.CraftType == preset.CraftJob))
+            var selected = preset.CraftJob >= 0 && job.CraftType == (uint)preset.CraftJob;
+
+            if (!ImGui.Selectable($"{job.Name}##job{job.CraftType}", selected))
             {
                 continue;
             }
 
-            preset.CraftJob = job.CraftType;
+            preset.CraftJob = (int)job.CraftType;
 
             // ジョブが変われば作れる物も変わる。選び直しになる。
             preset.CraftCollectableItemId = 0;
@@ -954,7 +1035,7 @@ public sealed class PresetTab(Plugin plugin)
     private void DrawCraftPicker(ExchangePreset preset, uint currencyItemId, ref bool changed)
     {
         var craftable = this.plugin.CraftPlanService.ListCraftable(currencyItemId)
-            .Where(x => x.CraftType == preset.CraftJob)
+            .Where(x => x.CraftType == (uint)preset.CraftJob)
             .ToList();
 
         if (craftable.Count == 0)
@@ -1061,7 +1142,7 @@ public sealed class PresetTab(Plugin plugin)
     /// <summary>作る物の選択を解く。表を装備品へ戻すときに通す。</summary>
     private static void ClearCraftChoice(ExchangePreset preset)
     {
-        preset.CraftJob = 0;
+        preset.CraftJob = -1;
         preset.CraftCollectableItemId = 0;
         preset.CraftLevelBand = 0;
         preset.CraftToEarn = false;
@@ -1180,8 +1261,7 @@ public sealed class PresetTab(Plugin plugin)
                     // 2 つの数値は役割が違う。ラベルだけでは取り違えるため、
                     // それぞれに説明を付ける。
                     var quantity = entry.Quantity;
-                    ImGui.SetNextItemWidth(90f);
-                    if (ImGui.InputInt("一括交換する個数##qty", ref quantity))
+                    if (this.DrawNumber($"eq{i}{entry.RewardItemId}", "一括交換する個数##qty", ref quantity, 90f))
                     {
                         entry.Quantity = Math.Max(0, quantity);
                         changed = true;
@@ -1197,8 +1277,7 @@ public sealed class PresetTab(Plugin plugin)
                     ImGui.SameLine();
 
                     var limit = entry.OwnedLimit;
-                    ImGui.SetNextItemWidth(90f);
-                    if (ImGui.InputInt("所持の上限##own", ref limit))
+                    if (this.DrawNumber($"el{i}{entry.RewardItemId}", "所持の上限##own", ref limit, 90f))
                     {
                         entry.OwnedLimit = Math.Max(0, limit);
                         changed = true;
