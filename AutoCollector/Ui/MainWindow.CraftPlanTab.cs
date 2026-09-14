@@ -455,7 +455,7 @@ public sealed partial class MainWindow
         ImGui.TableSetupColumn("素材");
         ImGui.TableSetupColumn("1 回", ImGuiTableColumnFlags.WidthFixed, 50f);
         ImGui.TableSetupColumn("全部で", ImGuiTableColumnFlags.WidthFixed, 60f);
-        ImGui.TableSetupColumn("鞄にある", ImGuiTableColumnFlags.WidthFixed, 70f);
+        ImGui.TableSetupColumn("持っている", ImGuiTableColumnFlags.WidthFixed, 70f);
         ImGui.TableSetupColumn("引き出す", ImGuiTableColumnFlags.WidthFixed, 70f);
         ImGui.TableSetupColumn("リテイナー", ImGuiTableColumnFlags.WidthFixed, 110f);
         ImGui.TableSetupColumn("要る枠", ImGuiTableColumnFlags.WidthFixed, 55f);
@@ -472,6 +472,13 @@ public sealed partial class MainWindow
             {
                 ImGui.SameLine();
                 ImGui.TextColored(ImGuiColors.DalamudYellow, "（作れる）");
+            }
+
+            // クリスタルは鞄ではなく専用の入れ物に入る。枠を使わないことを示す。
+            if (material.IsCrystal)
+            {
+                ImGui.SameLine();
+                ImGui.TextColored(ImGuiColors.ParsedBlue, "（クリスタル）");
             }
 
             ImGui.TableNextColumn();
@@ -492,7 +499,14 @@ public sealed partial class MainWindow
             DrawRetainerHolding(inventory, material.ItemId, material.Shortfall);
 
             ImGui.TableNextColumn();
-            ImGui.TextUnformatted(material.NewSlots.ToString());
+            if (material.IsCrystal)
+            {
+                ImGui.TextColored(ImGuiColors.DalamudGrey, "枠なし");
+            }
+            else
+            {
+                ImGui.TextUnformatted(material.NewSlots.ToString());
+            }
 
             // 作れる素材が足りないなら、その素材も出す。
             // リテイナーに完成品が無いときはこちらを取り出すことになる。

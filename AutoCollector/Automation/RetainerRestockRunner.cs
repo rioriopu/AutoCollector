@@ -124,7 +124,13 @@ public sealed unsafe class RetainerRestockRunner(
     /// <summary>この距離まで近づいてから話しかける。</summary>
     private const float BellInteractRange = 3.5f;
 
-    /// <summary>リテイナーの持ち物が入る入れ物。クリスタルは扱わない。</summary>
+    /// <summary>
+    /// リテイナーの持ち物が入る入れ物。
+    ///
+    /// **クリスタルは別の入れ物に入る。**
+    /// 7 ページだけを見ていたため、クリスタルは持っていても見つけられず、
+    /// 引き出しの対象にもできなかった。
+    /// </summary>
     private static readonly InventoryType[] RetainerPages =
     [
         InventoryType.RetainerPage1,
@@ -134,6 +140,7 @@ public sealed unsafe class RetainerRestockRunner(
         InventoryType.RetainerPage5,
         InventoryType.RetainerPage6,
         InventoryType.RetainerPage7,
+        InventoryType.RetainerCrystals,
     ];
 
     /// <summary>この時間で終わらなければ諦める。取り残しても、握ったままにしない。</summary>
@@ -405,6 +412,23 @@ public sealed unsafe class RetainerRestockRunner(
     /// 実際に話しかけられるのはもっと近い距離のため、
     /// 「距離が離れています」が出続けるだけで永久に進まなかった。
     /// </summary>
+    /// <summary>
+    /// いまの所持数。
+    ///
+    /// **クリスタルは鞄に入らない。** 専用の入れ物に入るため、
+    /// 鞄を見る数え方では取り出しても増えたことにならず、
+    /// 「取り出せなかった」と判断して次の相手へ進んでしまう。
+    ///
+    /// どちらの入れ物にあるかは品目で決まる。多いほうを採れば取り違えない。
+    /// </summary>
+    private int HeldOf(uint itemId)
+    {
+        var bag = this.currency.TryGetCount(itemId, out var have) ? have : 0;
+        var crystals = this.currency.TryGetCrystalCount(itemId, out var stock) ? stock : 0;
+
+        return Math.Max(bag, crystals);
+    }
+
     /// <summary>自分が始めた移動だけを止める。頼み直せるよう印も消す。</summary>
     private void StopMoving()
     {
@@ -862,7 +886,7 @@ public sealed unsafe class RetainerRestockRunner(
         }
 
         // 反映は鞄の所持数で確かめる。撃った回数では数えない。
-        this.bagBefore = this.currency.TryGetCount(request.ItemId, out var before) ? before : 0;
+        this.bagBefore = this.HeldOf(request.ItemId);
         this.activeRequest = request;
 
         this.Note($"{request.Name} を {take} 個取り出します（このリテイナーに {available} 個）");
@@ -938,7 +962,7 @@ public sealed unsafe class RetainerRestockRunner(
             return;
         }
 
-        var now = this.currency.TryGetCount(request.ItemId, out var have) ? have : this.bagBefore;
+        var now = this.HeldOf(request.ItemId);
         var gained = now - this.bagBefore;
 
         if (gained > 0)
