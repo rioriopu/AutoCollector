@@ -81,10 +81,13 @@ public sealed class RestockRequest
     public IReadOnlyList<RestockRequest> Fallback { get; init; } = [];
 
     /// <summary>
-    /// 個数を指定せず「すべて取る」で受け取る品か。
+    /// 右クリックのメニューで「リテイナーから受け取る」を選ぶ品か。
     ///
-    /// **クリスタルには個数指定のメニューが出ない。**
-    /// 要るぶんより多く受け取ることになるが、クリスタルは鞄の枠を使わないため害がない。
+    /// **クリスタルのメニューには「個数指定」が出ない。**
+    /// 選ぼうとして見つからず、取り出せずに次の相手へ進んでいた。
+    ///
+    /// ただし **「受け取る」を選んでも「いくつ受け取りますか？」は出る**（実測）。
+    /// どちらを選んでも数値入力の段は必ず通す。
     /// </summary>
     public bool RetrieveAll { get; init; }
 }
@@ -112,8 +115,9 @@ public sealed class RestockRequest
 /// 依存するプラグインを増やさずに済む。
 ///
 /// **クリスタルは扱いが違う。**
-/// 入れ物が別で、鞄の枠を使わず、個数指定のメニューも出ない。
-/// 「すべて取る」で受け取る（<see cref="RestockRequest.RetrieveAll"/>）。
+/// 入れ物が別で、鞄の枠を使わない。右クリックのメニューにも「個数指定」が出ないため
+/// 「リテイナーから受け取る」を選ぶ（<see cref="RestockRequest.RetrieveAll"/>）。
+/// それでも個数は聞かれるので、数値入力の段は必ず通す。
 /// </summary>
 public sealed unsafe class RetainerRestockRunner(
     AnomalyLog anomalyLog,
@@ -174,9 +178,6 @@ public sealed unsafe class RetainerRestockRunner(
     private DateTime deadlineUtc = DateTime.MinValue;
     private DateTime stepDeadlineUtc = DateTime.MinValue;
 
-    /// <summary>数量を入れる対象。入力欄が出たときに使う。</summary>
-    private int pendingQuantity;
-
     /// <summary>いま取り出そうとしている品。反映を確かめるまで覚えておく。</summary>
     private RestockRequest? activeRequest;
 
@@ -197,9 +198,6 @@ public sealed unsafe class RetainerRestockRunner(
 
     /// <summary>持っていないと分かっていて開かなかった人数。取り逃したときの手掛かりになる。</summary>
     private int skippedKnownEmpty;
-
-    /// <summary>直前の取り出しで「すべて取る」を選んだか。個数の入力欄が出るかが変わる。</summary>
-    private bool retrieveWithoutQuantity;
 
     /// <summary>クリスタルの入れ物の読み取り状況を書き残したか。1 回の実行で 1 度だけ。</summary>
     private bool notedCrystalContainer;
@@ -292,7 +290,6 @@ public sealed unsafe class RetainerRestockRunner(
         this.pendingRetainers.Clear();
         this.currentRetainer = string.Empty;
         this.Withdrawn = 0;
-        this.pendingQuantity = 0;
         this.activeRequest = null;
         this.expandedFallback = false;
         this.bellMoveIssued = false;
@@ -986,14 +983,10 @@ public sealed unsafe class RetainerRestockRunner(
         {
             if (this.TrySelectRetrieve(contextMenu, out var selectFailure))
             {
-                // 全部取る場合は入力欄が出ない。一部だけ取る場合に出る。
-                this.pendingQuantity = this.retrieveWithoutQuantity ? 0 : this.pendingTake;
-
-                this.Move(
-                    this.pendingQuantity > 0 ? RestockStep.InputQuantity : RestockStep.WaitWithdraw,
-                    this.pendingQuantity > 0 ? "個数を入れています" : "取り出しの反映を待っています",
-                    15);
-
+                // **どちらを選んでも、必ず入力欄の段を通す。**
+                // 出るかどうかは品によって変わる。決め打ちにすると、
+                // 出たのに素通りして入力欄が開いたまま止まる。
+                this.Move(RestockStep.InputQuantity, "個数を入れています", 15);
                 return;
             }
 
@@ -1056,37 +1049,50 @@ public sealed unsafe class RetainerRestockRunner(
         }
     }
 
+    /// <summary>
+    /// 個数の入力欄を待って、要る数を入れる。
+    ///
+    /// **入力欄が出るかどうかを決め打ちにしない。**
+    /// 「すべて取る」を選んでも出ることがある。実測では、クリスタルは
+    /// どちらを選んでも「いくつ受け取りますか？」が出た（2026-09-14）。
+    /// 出ない前提で素通りしたため、入力欄が開いたまま 15 秒待って諦めていた。
+    ///
+    /// 出るか出ないかは**見て決める**。
+    /// 出れば入れる。出ないまま所持数が増えていれば、そのまま通ったということ。
+    /// </summary>
     private void TickInputQuantity()
     {
-        if (!GenericHelpers.TryGetAddonByName<AtkUnitBase>("InputNumeric", out var numeric) ||
-            !GenericHelpers.IsAddonReady(numeric))
+        if (GenericHelpers.TryGetAddonByName<AtkUnitBase>("InputNumeric", out var numeric) &&
+            GenericHelpers.IsAddonReady(numeric))
         {
-            if (this.Expired())
+            if (!EzThrottler.Throttle("AutoCollector.Quantity", 600))
             {
-                // 入力欄が出ないまま時間切れ。取り出せていない可能性がある。
-                this.anomalyLog.Warn("Restock", "個数の入力欄が出ませんでした");
-
-                if (this.activeRequest is not null)
-                {
-                    this.skippedHere.Add(this.activeRequest.ItemId);
-                }
-
-                this.activeRequest = null;
-                this.Move(RestockStep.Withdraw, "取り出しを続けます", 60);
+                return;
             }
 
+            // 相手が持っている数より多くは頼めない。
+            var value = Math.Max(1, Math.Min(this.pendingTake, this.pendingAvailable));
+
+            this.Note($"個数を入れます: {value}");
+            Callback.Fire(numeric, true, value);
+            this.Move(RestockStep.WaitWithdraw, "取り出しの反映を待っています", 15);
             return;
         }
 
-        if (!EzThrottler.Throttle("AutoCollector.Quantity", 600))
+        // 入力欄が出ないまま所持数が増えた。1 個だけの品などは聞かれずに渡される。
+        if (this.HeldOf(this.activeRequest?.ItemId ?? 0) > this.bagBefore)
         {
+            this.Move(RestockStep.WaitWithdraw, "取り出しの反映を待っています", 15);
             return;
         }
 
-        Callback.Fire(numeric, true, this.pendingQuantity);
-        this.pendingQuantity = 0;
-
-        this.Move(RestockStep.WaitWithdraw, "取り出しの反映を待っています", 15);
+        if (this.Expired())
+        {
+            // 入力欄も出ず、増えてもいない。取り出せていない。
+            this.Note("個数の入力欄が出ませんでした");
+            this.anomalyLog.Warn("Restock", "個数の入力欄が出ませんでした");
+            this.GiveUpOnCurrentItem();
+        }
     }
 
     /// <summary>
@@ -1209,15 +1215,13 @@ public sealed unsafe class RetainerRestockRunner(
     /// 表示の並びは環境で変わるため、項目の位置を決め打ちにしない。
     /// 文字列と突き合わせて位置を求める。
     /// </summary>
-    /// <param name="preferAll">
-    /// 個数を指定せず「すべて取る」を使う。
-    ///
-    /// **クリスタルには個数指定が出ない。**
+    /// <remarks>
+    /// **クリスタルには個数指定の項目が出ない。**
     /// Artisan の実装も、アイテム番号 19 以下（シャード・クリスタル・クラスター）と
-    /// 1 個しかない品は「すべて取る」だけを使っている
+    /// 1 個しかない品は「リテイナーから受け取る」だけを使っている
     /// （`Artisan/Tasks/TaskSelectRetainer.cs` の `OpenItemContextMenu`）。
     /// 個数指定を探して見つからず、取り出せずに次の相手へ進んでいた。
-    /// </param>
+    /// </remarks>
     private bool RequestContextMenu(out string failure)
     {
         failure = string.Empty;
@@ -1315,9 +1319,6 @@ public sealed unsafe class RetainerRestockRunner(
             index = alternative;
             useAll = !useAll;
         }
-
-        // 入力欄が出るかどうかは、どちらを選んだかで決まる。
-        this.retrieveWithoutQuantity = useAll;
 
         Callback.Fire(contextMenu, true, 0, index, 0, 0, 0);
         return true;

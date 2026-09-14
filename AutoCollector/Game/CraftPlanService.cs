@@ -580,12 +580,19 @@ public sealed class CraftPlanService(
     /// </summary>
     private int HeldOf(uint itemId, bool isCrystal)
     {
-        if (isCrystal)
+        var normal = this.currency.TryGetCount(itemId, out var have) ? have : 0;
+
+        if (!isCrystal)
         {
-            return this.currency.TryGetCrystalCount(itemId, out var crystals) ? crystals : 0;
+            return normal;
         }
 
-        return this.currency.TryGetCount(itemId, out var have) ? have : 0;
+        // **どちらか一方だけを信じない。**
+        // 専用の入れ物が読めないことがあり、0 と読むと、9999 個持っている物まで
+        // 「足りない」と判断してリテイナーへ取りに行くことになる。
+        var crystals = this.currency.TryGetCrystalCount(itemId, out var stock) ? stock : 0;
+
+        return Math.Max(normal, crystals);
     }
 
     /// <summary>この個数を作るのに要る素材と、新たに要る枠数。</summary>
