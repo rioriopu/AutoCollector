@@ -564,6 +564,15 @@ public sealed class GoalRunner(
 
         var shortfalls = plan.Materials.Where(x => x.Shortfall > 0).ToList();
 
+        // **足りないことと、作れないことは別物。**
+        //
+        // 中間素材は、その素材が鞄にあるなら自分で作れる。製作の手順は
+        // 中間素材から先に作るようにできているので、そのまま進めてよい。
+        //
+        // ここを分けていなかったため、黒麦 270 個（黒麦粉 135 個ぶん）を
+        // 取り出し終えていても、黒麦粉が足りないという理由だけで止まっていた。
+        var blocking = plan.Materials.Where(x => !x.CanCoverFromBag()).ToList();
+
         // 同じ不足で 2 度取りに行かない。
         //
         // リテイナーに無いものは、何度行っても無い。
@@ -571,13 +580,13 @@ public sealed class GoalRunner(
         // 作れるぶんまで作らずに終わってしまう。
         var signature = string.Join(",", shortfalls.Select(x => $"{x.ItemId}:{x.Shortfall}"));
 
-        if (shortfalls.Count > 0 && signature != this.lastRestockSignature)
+        if (blocking.Count > 0 && signature != this.lastRestockSignature)
         {
             // 文言ではなく真偽で判定する。画面の文言を直しても動作が変わらないように。
             if (!RetainerRestockRunner.IsBellNearby())
             {
                 var bell = this.restock.DescribeBell();
-                this.Note($"素材が {shortfalls.Count} 種類足りませんが、{bell}");
+                this.Note($"素材が {blocking.Count} 種類足りませんが、{bell}");
 
                 // 呼び鈴はいずれ近くに来る。歩いて行けば解消するので、自動でやり直す。
                 this.retryAfterOnFinish = BellRetryInterval;
@@ -626,14 +635,25 @@ public sealed class GoalRunner(
             return true;
         }
 
-        // 取りに行っても足りなかった。作れるぶんだけ作る。
-        if (shortfalls.Count > 0)
+        // 取りに行っても用意できないものが残った。作れるぶんだけ作る。
+        //
+        // 中間素材は数えない。素材が鞄にあれば、先に作ってから進む。
+        if (blocking.Count > 0)
         {
             return this.BeginCraftWithinMaterials(
                 preset,
                 goal,
-                $"リテイナーから取り出しても足りませんでした（{DescribeShortfalls(shortfalls)}）",
+                $"リテイナーから取り出しても足りませんでした（{DescribeShortfalls(blocking)}）",
                 out reason);
+        }
+
+        // 自分で作る素材があるなら、そう分かるように残す。
+        // 「足りないのに進んだ」ように見えるのを防ぐ。
+        var makeFirst = plan.Materials.Where(x => x.Shortfall > 0 && x.CanCoverFromBag()).ToList();
+
+        if (makeFirst.Count > 0)
+        {
+            this.Note($"先に作る素材: {string.Join(" / ", makeFirst.Select(x => $"{x.Name}×{x.Shortfall}"))}");
         }
 
         return this.StartCraft(plan, goal, out reason);
