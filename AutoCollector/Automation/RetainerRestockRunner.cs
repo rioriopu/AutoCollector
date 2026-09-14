@@ -43,6 +43,9 @@ public enum RestockStep
     /// <summary>持ち物を調べて取り出している。</summary>
     Withdraw,
 
+    /// <summary>品を右クリックしたメニューが出るのを待っている。</summary>
+    OpenContextMenu,
+
     /// <summary>数量を入れている。</summary>
     InputQuantity,
 
@@ -201,6 +204,16 @@ public sealed unsafe class RetainerRestockRunner(
     /// <summary>クリスタルの入れ物の読み取り状況を書き残したか。1 回の実行で 1 度だけ。</summary>
     private bool notedCrystalContainer;
 
+    /// <summary>メニューを開く操作を撃ったか。同じ操作を撃ち続けないための印。</summary>
+    private bool contextMenuRequested;
+
+    // いま開こうとしている枠。開く段と選ぶ段に分かれたので、間で持ち越す。
+    private InventoryType pendingInventory;
+    private int pendingSlot;
+    private int pendingTake;
+    private int pendingAvailable;
+    private bool pendingRetrieveAll;
+
     public RestockStep Step { get; private set; } = RestockStep.Idle;
 
     public string StatusDetail { get; private set; } = string.Empty;
@@ -285,6 +298,7 @@ public sealed unsafe class RetainerRestockRunner(
         this.bellMoveIssued = false;
         this.skippedKnownEmpty = 0;
         this.notedCrystalContainer = false;
+        this.contextMenuRequested = false;
         this.skippedHere.Clear();
 
         this.deadlineUtc = DateTime.UtcNow.Add(OverallLimit);
@@ -352,6 +366,10 @@ public sealed unsafe class RetainerRestockRunner(
 
                 case RestockStep.Withdraw:
                     this.TickWithdraw();
+                    break;
+
+                case RestockStep.OpenContextMenu:
+                    this.TickOpenContextMenu();
                     break;
 
                 case RestockStep.InputQuantity:
@@ -922,26 +940,120 @@ public sealed unsafe class RetainerRestockRunner(
         this.Note($"{request.Name} を {take} 個取り出します（このリテイナーに {available} 個）");
         this.anomalyLog.Info("Restock", $"{request.Name} を {take} 個取り出します（{this.currentRetainer}）");
 
-        if (!this.OpenContextAndRetrieve(inventory, slot, take, available, request.RetrieveAll, out var contextFailure))
+        // 開く操作と、開いたメニューから選ぶ操作は分ける。
+        //
+        // **同じフレームでは開いていない。**
+        // 撃った直後に探して見つからず「メニューが出ませんでした」と諦めていたため、
+        // 1 テンポ遅れて出たメニューが誰にも閉じられずに残っていた。
+        // 画面上では、取り出し中にサブメニューが数秒ちらつく形で見えていた。
+        this.pendingInventory = inventory;
+        this.pendingSlot = slot;
+        this.pendingTake = take;
+        this.pendingAvailable = available;
+        this.pendingRetrieveAll = request.RetrieveAll;
+        this.contextMenuRequested = false;
+
+        this.Move(RestockStep.OpenContextMenu, $"{request.Name} のメニューを開いています", 15);
+    }
+
+    /// <summary>
+    /// 品を右クリックしたメニューを開き、出たら「受け取る」を選ぶ。
+    ///
+    /// **開いたら必ず片づける。**
+    /// 選べずに諦めるときも閉じる。開きっぱなしにすると画面に残り、
+    /// 次の操作にも被さる。
+    /// </summary>
+    private void TickOpenContextMenu()
+    {
+        // **自分で開く前に、出ているメニューへ触らない。**
+        // 利用者が右クリックで開いたものに撃つと、意図しない操作になる。
+        if (!this.contextMenuRequested)
         {
-            this.Note($"取り出しの操作に失敗: {contextFailure}");
-            this.anomalyLog.Warn("Restock", $"取り出しの操作に失敗しました: {contextFailure}");
-            this.skippedHere.Add(request.ItemId);
-            this.activeRequest = null;
+            this.contextMenuRequested = true;
+
+            if (!this.RequestContextMenu(out var openFailure))
+            {
+                this.Note($"メニューを開けませんでした: {openFailure}");
+                this.GiveUpOnCurrentItem();
+            }
+
             return;
         }
 
-        // 全部取る場合は入力欄が出ない。一部だけ取る場合に出る。
-        // どちらを選んだかは OpenContextAndRetrieve が決める（無いほうへ倒すため）。
-        this.pendingQuantity = this.retrieveWithoutQuantity ? 0 : take;
-
-        if (this.pendingQuantity > 0)
+        // 出ている。選ぶ。
+        if (GenericHelpers.TryGetAddonByName<AtkUnitBase>("ContextMenu", out var contextMenu) &&
+            GenericHelpers.IsAddonReady(contextMenu))
         {
-            this.Move(RestockStep.InputQuantity, "個数を入れています", 15);
+            if (this.TrySelectRetrieve(contextMenu, out var selectFailure))
+            {
+                // 全部取る場合は入力欄が出ない。一部だけ取る場合に出る。
+                this.pendingQuantity = this.retrieveWithoutQuantity ? 0 : this.pendingTake;
+
+                this.Move(
+                    this.pendingQuantity > 0 ? RestockStep.InputQuantity : RestockStep.WaitWithdraw,
+                    this.pendingQuantity > 0 ? "個数を入れています" : "取り出しの反映を待っています",
+                    15);
+
+                return;
+            }
+
+            this.Note($"取り出しの操作に失敗: {selectFailure}");
+            this.anomalyLog.Warn("Restock", $"取り出しの操作に失敗しました: {selectFailure}");
+
+            this.CloseContextMenu(contextMenu);
+            this.GiveUpOnCurrentItem();
             return;
         }
 
-        this.Move(RestockStep.WaitWithdraw, "取り出しの反映を待っています", 15);
+        // 撃ったのに出てこない。開きかけを残さないよう、閉じてから諦める。
+        if (this.Expired())
+        {
+            this.Note("メニューが出ませんでした");
+            this.CloseContextMenu(null);
+            this.GiveUpOnCurrentItem();
+        }
+    }
+
+    /// <summary>この品はこのリテイナーでは諦める。探し続けて進まなくなるのを防ぐ。</summary>
+    private void GiveUpOnCurrentItem()
+    {
+        if (this.activeRequest is not null)
+        {
+            this.skippedHere.Add(this.activeRequest.ItemId);
+        }
+
+        this.activeRequest = null;
+        this.Move(RestockStep.Withdraw, "取り出しを続けます", 60);
+    }
+
+    /// <summary>
+    /// 開いてしまったメニューを閉じる。
+    ///
+    /// 選ばずに離れると画面に残る。次の操作にも被さるため、必ず通す。
+    /// </summary>
+    private void CloseContextMenu(AtkUnitBase* known)
+    {
+        try
+        {
+            var addon = known;
+
+            if (addon is null)
+            {
+                if (!GenericHelpers.TryGetAddonByName<AtkUnitBase>("ContextMenu", out addon))
+                {
+                    return;
+                }
+            }
+
+            if (addon is not null)
+            {
+                addon->Close(true);
+            }
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Warn("Restock", $"メニューを閉じられませんでした: {ex.Message}");
+        }
     }
 
     private void TickInputQuantity()
@@ -1106,13 +1218,7 @@ public sealed unsafe class RetainerRestockRunner(
     /// （`Artisan/Tasks/TaskSelectRetainer.cs` の `OpenItemContextMenu`）。
     /// 個数指定を探して見つからず、取り出せずに次の相手へ進んでいた。
     /// </param>
-    private bool OpenContextAndRetrieve(
-        InventoryType inventory,
-        int slot,
-        int take,
-        int available,
-        bool preferAll,
-        out string failure)
+    private bool RequestContextMenu(out string failure)
     {
         failure = string.Empty;
 
@@ -1132,14 +1238,26 @@ public sealed unsafe class RetainerRestockRunner(
             return false;
         }
 
-        context->OpenForItemSlot(inventory, slot, 0, retainerAgent->GetAddonId());
+        context->OpenForItemSlot(this.pendingInventory, this.pendingSlot, 0, retainerAgent->GetAddonId());
+        return true;
+    }
 
-        if (!GenericHelpers.TryGetAddonByName<AtkUnitBase>("ContextMenu", out var contextMenu) ||
-            !GenericHelpers.IsAddonReady(contextMenu))
+    /// <summary>開いているメニューから「受け取る」を選ぶ。</summary>
+    private bool TrySelectRetrieve(AtkUnitBase* contextMenu, out string failure)
+    {
+        failure = string.Empty;
+
+        var context = AgentInventoryContext.Instance();
+
+        if (context is null)
         {
-            failure = "メニューが出ませんでした";
+            failure = "メニューを読み取れません";
             return false;
         }
+
+        var take = this.pendingTake;
+        var available = this.pendingAvailable;
+        var preferAll = this.pendingRetrieveAll;
 
         // 98  すべて取る
         // 773 個数を指定して取る
@@ -1513,6 +1631,13 @@ public sealed unsafe class RetainerRestockRunner(
 
         // 自分が始めた移動を残さない。歩いたまま終わると、そのまま走り続ける。
         this.StopMoving();
+
+        // 開きかけのメニューも残さない。画面に居座って次の操作に被さる。
+        if (this.contextMenuRequested)
+        {
+            this.contextMenuRequested = false;
+            this.CloseContextMenu(null);
+        }
 
         this.Step = step;
         this.StatusDetail = detail;
