@@ -7,6 +7,7 @@ using Dalamud.Interface.Colors;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using ECommons.Configuration;
+using ECommons.DalamudServices;
 
 namespace AutoCollector.Ui;
 
@@ -732,6 +733,18 @@ public sealed partial class MainWindow
 
         ImGui.TextUnformatted(
             snap.FreeBagSlots is { } free ? $"所持枠の空き: {free}" : "所持枠の空き: 取得できません");
+
+        // 呼び鈴は素材の取り出しに要る。覚えているかどうかを常に見えるところに出す。
+        // プリセットを開かないと分からない状態だった。
+        var territory = Svc.ClientState.TerritoryType;
+        var knownBell = this.plugin.BellLocations.Get(territory);
+
+        ImGui.TextUnformatted(
+            knownBell is { } bell
+                ? $"呼び鈴: このエリア（{territory}）で覚えています {bell.X:F1}, {bell.Y:F1}, {bell.Z:F1}" +
+                  $" / 全 {this.plugin.BellLocations.Count} エリア"
+                : $"呼び鈴: このエリア（{territory}）ではまだ覚えていません" +
+                  $" / 全 {this.plugin.BellLocations.Count} エリア");
 
         var keeper = this.plugin.AutoDutyKeeper;
         ImGui.TextUnformatted($"周回の維持: 再開 {keeper.RestartCount} 回 / {keeper.Status} / 維持停止={keeper.GaveUp}");
