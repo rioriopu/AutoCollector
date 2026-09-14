@@ -65,6 +65,8 @@ public sealed class Plugin : IDalamudPlugin
 
     internal RetainerInventoryStore RetainerInventory { get; private set; } = null!;
 
+    internal BellLocationStore BellLocations { get; private set; } = null!;
+
     internal CollectableCycleRunner CollectableCycle { get; private set; } = null!;
 
     internal ShopService ShopService { get; private set; } = null!;
@@ -106,6 +108,20 @@ public sealed class Plugin : IDalamudPlugin
     internal AutoDutyKeeper AutoDutyKeeper { get; private set; } = null!;
 
     internal AutoDutySetup AutoDutySetup { get; private set; } = null!;
+
+    /// <summary>
+    /// エリアを移ってから呼び鈴を探し続ける時間。
+    ///
+    /// 着いた瞬間に 1 回だけでは足りない。呼び鈴が遠ければ、
+    /// その時点ではまだ読み込まれていない。歩いているうちに読み込まれる。
+    /// </summary>
+    private static readonly TimeSpan BellScanWindow = TimeSpan.FromMinutes(3);
+
+    /// <summary>いま探索の対象にしているエリア。変わったら探索をやり直す。</summary>
+    private uint bellScanTerritory;
+
+    /// <summary>この時刻まで呼び鈴を探す。</summary>
+    private DateTime bellScanUntilUtc = DateTime.MinValue;
 
     private FileLogWriter? fileLog;
 
@@ -172,6 +188,66 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         this.InclusionShopOrderStore.SaveIfDirty();
+    }
+
+    /// <summary>
+    /// 呼び鈴の場所を探して覚える。
+    ///
+    /// **街へ着いたときだけでは足りない。**
+    /// 呼び鈴は <c>Svc.Objects</c> に載っているものしか見えない。
+    /// 着いた地点から遠ければ、その時点ではまだ読み込まれていない。
+    /// 1 回だけ探しても見つからないことがある。
+    ///
+    /// そこで、エリアを移ったあとしばらくのあいだ、間隔を空けて探し続ける。
+    /// 歩いているうちに読み込まれた時点で覚える。
+    /// 覚えたらそのエリアでは探すのをやめる。
+    ///
+    /// エリアの種類では絞らない。呼び鈴が無い場所では見つからないだけで、
+    /// 探す手間はオブジェクト一覧を 1 周するだけなので害が無い。
+    /// </summary>
+    private void LearnBellLocation()
+    {
+        var territory = Svc.ClientState.TerritoryType;
+
+        // エリアが変わったら、そのエリアぶんの探索をやり直す。
+        if (territory != this.bellScanTerritory)
+        {
+            this.bellScanTerritory = territory;
+            this.bellScanUntilUtc = DateTime.UtcNow.Add(BellScanWindow);
+        }
+
+        this.BellLocations.SaveIfDirty();
+
+        // すでに覚えているなら探さない。
+        if (this.BellLocations.Get(territory) is not null)
+        {
+            return;
+        }
+
+        // 移ってからしばらくのあいだだけ探す。ずっと探し続けはしない。
+        if (DateTime.UtcNow > this.bellScanUntilUtc)
+        {
+            return;
+        }
+
+        if (!EzThrottler.Throttle("AutoCollector.ScanBell", 2000))
+        {
+            return;
+        }
+
+        try
+        {
+            var bell = RetainerRestockRunner.ScanForBell();
+
+            if (bell is not null)
+            {
+                this.BellLocations.Remember(territory, bell.Position, bell.Name.ToString());
+            }
+        }
+        catch (Exception ex)
+        {
+            this.AnomalyLog.Warn("Bell", $"呼び鈴を探せませんでした: {ex.Message}");
+        }
     }
 
     /// <summary>
@@ -356,6 +432,7 @@ public sealed class Plugin : IDalamudPlugin
             this.CurrencyService,
             this.SpecialCurrencyMap);
         this.RetainerInventory = new RetainerInventoryStore(this.AnomalyLog);
+        this.BellLocations = new BellLocationStore(this.AnomalyLog);
         this.RetainerRestock = new RetainerRestockRunner(
             this.AnomalyLog,
             this.CurrencyService,
@@ -365,7 +442,8 @@ public sealed class Plugin : IDalamudPlugin
 
             // 呼び鈴まで歩くための足。交換の移動とは別物にする。
             // 同時には走らない（GoalRunner が順番に動かす）ので取り合わない。
-            new NavigationService(this.AnomalyLog, this.Vnavmesh));
+            new NavigationService(this.AnomalyLog, this.Vnavmesh),
+            this.BellLocations);
         this.CraftRunner = new CraftRunner(this.AnomalyLog, this.CurrencyService, this.Artisan);
 
         // 目標から逆算する側。交換費用の取得に交換画面の一覧が要る。
@@ -518,6 +596,7 @@ public sealed class Plugin : IDalamudPlugin
             // 先に見ると、いま終わったばかりの処理を「まだ動いている」と数える。
             this.GoalRunner.Tick();
             this.LearnRetainerInventory();
+            this.LearnBellLocation();
 
             // 納品画面が開いた瞬間を捉えて自動でダンプする。読み取りのみ。
             this.CollectablesShopReader.Tick(ResolveLogDirectory());
@@ -682,6 +761,16 @@ public sealed class Plugin : IDalamudPlugin
         catch (Exception ex)
         {
             Svc.Log.Error($"[Auto Collector] リテイナーの持ち物を保存できませんでした: {ex}");
+        }
+
+        // 覚えた呼び鈴の場所を書き残す。
+        try
+        {
+            this.BellLocations?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            Svc.Log.Error($"[Auto Collector] 呼び鈴の場所を保存できませんでした: {ex}");
         }
 
         // 覚えた並び順を書き残す。
