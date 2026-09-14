@@ -76,6 +76,14 @@ public sealed class RestockRequest
     /// その場合は素材（黒麦）を取り出して自分で作ることになる。
     /// </summary>
     public IReadOnlyList<RestockRequest> Fallback { get; init; } = [];
+
+    /// <summary>
+    /// 個数を指定せず「すべて取る」で受け取る品か。
+    ///
+    /// **クリスタルには個数指定のメニューが出ない。**
+    /// 要るぶんより多く受け取ることになるが、クリスタルは鞄の枠を使わないため害がない。
+    /// </summary>
+    public bool RetrieveAll { get; init; }
 }
 
 /// <summary>
@@ -87,8 +95,8 @@ public sealed class RestockRequest
 ///
 /// <code>
 /// AutoRetainer を抑制
-///   → 呼び鈴に話しかける
-///     → リテイナーを選ぶ
+///   → 呼び鈴まで歩く → 話しかける
+///     → リテイナーを選ぶ（持っていると分かっている人から）
 ///       → アイテムの受け渡し
 ///         → 目的の品を右クリック → 個数を指定して取る
 ///           → 閉じる → 次のリテイナーへ
@@ -96,12 +104,13 @@ public sealed class RestockRequest
 /// </code>
 ///
 /// **Allagan Tools は使わない。**
-/// リテイナーを開けば持ち物は <c>InventoryType.RetainerPage1..7</c> から直接読める。
-/// どのリテイナーが何を持っているかを事前に知る必要はなく、
-/// 順に開いて、あるものを取り出し、足りたらやめればよい。
+/// リテイナーを開けば持ち物は <c>RetainerPage1..7</c> と <c>RetainerCrystals</c> から
+/// 直接読める。開いたついでに控えておけば、次からは持っている人へ直接行ける。
 /// 依存するプラグインを増やさずに済む。
 ///
-/// **呼び鈴の近くにいることが前提。** 呼び鈴まで移動する処理は持たない。
+/// **クリスタルは扱いが違う。**
+/// 入れ物が別で、鞄の枠を使わず、個数指定のメニューも出ない。
+/// 「すべて取る」で受け取る（<see cref="RestockRequest.RetrieveAll"/>）。
 /// </summary>
 public sealed unsafe class RetainerRestockRunner(
     AnomalyLog anomalyLog,
@@ -186,6 +195,12 @@ public sealed unsafe class RetainerRestockRunner(
     /// <summary>持っていないと分かっていて開かなかった人数。取り逃したときの手掛かりになる。</summary>
     private int skippedKnownEmpty;
 
+    /// <summary>直前の取り出しで「すべて取る」を選んだか。個数の入力欄が出るかが変わる。</summary>
+    private bool retrieveWithoutQuantity;
+
+    /// <summary>クリスタルの入れ物の読み取り状況を書き残したか。1 回の実行で 1 度だけ。</summary>
+    private bool notedCrystalContainer;
+
     public RestockStep Step { get; private set; } = RestockStep.Idle;
 
     public string StatusDetail { get; private set; } = string.Empty;
@@ -269,6 +284,7 @@ public sealed unsafe class RetainerRestockRunner(
         this.expandedFallback = false;
         this.bellMoveIssued = false;
         this.skippedKnownEmpty = 0;
+        this.notedCrystalContainer = false;
         this.skippedHere.Clear();
 
         this.deadlineUtc = DateTime.UtcNow.Add(OverallLimit);
@@ -830,6 +846,20 @@ public sealed unsafe class RetainerRestockRunner(
             && TryReadOpenRetainerItems(out var contents))
         {
             this.inventoryStore.Remember(this.currentRetainer, contents);
+
+            // クリスタルの入れ物だけ読めないことがあると、持っているのに
+            // 「持っていない」と覚えて以後ずっと飛ばすことになる。1 度だけ書き残す。
+            if (!this.notedCrystalContainer)
+            {
+                this.notedCrystalContainer = true;
+
+                var crystals = InventoryManager.Instance()->GetInventoryContainer(InventoryType.RetainerCrystals);
+
+                if (crystals is null || !crystals->IsLoaded)
+                {
+                    this.Note("クリスタルの入れ物を読めていません。クリスタルの記録は当てにできません");
+                }
+            }
         }
 
         if (!IsRetainerInventoryReady())
@@ -892,7 +922,7 @@ public sealed unsafe class RetainerRestockRunner(
         this.Note($"{request.Name} を {take} 個取り出します（このリテイナーに {available} 個）");
         this.anomalyLog.Info("Restock", $"{request.Name} を {take} 個取り出します（{this.currentRetainer}）");
 
-        if (!this.OpenContextAndRetrieve(inventory, slot, take, available, out var contextFailure))
+        if (!this.OpenContextAndRetrieve(inventory, slot, take, available, request.RetrieveAll, out var contextFailure))
         {
             this.Note($"取り出しの操作に失敗: {contextFailure}");
             this.anomalyLog.Warn("Restock", $"取り出しの操作に失敗しました: {contextFailure}");
@@ -902,7 +932,8 @@ public sealed unsafe class RetainerRestockRunner(
         }
 
         // 全部取る場合は入力欄が出ない。一部だけ取る場合に出る。
-        this.pendingQuantity = take < available ? take : 0;
+        // どちらを選んだかは OpenContextAndRetrieve が決める（無いほうへ倒すため）。
+        this.pendingQuantity = this.retrieveWithoutQuantity ? 0 : take;
 
         if (this.pendingQuantity > 0)
         {
@@ -1066,7 +1097,22 @@ public sealed unsafe class RetainerRestockRunner(
     /// 表示の並びは環境で変わるため、項目の位置を決め打ちにしない。
     /// 文字列と突き合わせて位置を求める。
     /// </summary>
-    private bool OpenContextAndRetrieve(InventoryType inventory, int slot, int take, int available, out string failure)
+    /// <param name="preferAll">
+    /// 個数を指定せず「すべて取る」を使う。
+    ///
+    /// **クリスタルには個数指定が出ない。**
+    /// Artisan の実装も、アイテム番号 19 以下（シャード・クリスタル・クラスター）と
+    /// 1 個しかない品は「すべて取る」だけを使っている
+    /// （`Artisan/Tasks/TaskSelectRetainer.cs` の `OpenItemContextMenu`）。
+    /// 個数指定を探して見つからず、取り出せずに次の相手へ進んでいた。
+    /// </param>
+    private bool OpenContextAndRetrieve(
+        InventoryType inventory,
+        int slot,
+        int take,
+        int available,
+        bool preferAll,
+        out string failure)
     {
         failure = string.Empty;
 
@@ -1127,14 +1173,33 @@ public sealed unsafe class RetainerRestockRunner(
         }
 
         // 全部取るなら「すべて取る」。一部なら「個数を指定して取る」。
-        var useAll = take >= available;
+        var useAll = preferAll || take >= available;
         var index = useAll ? indexAll : indexQuantity;
 
+        // 望んだほうが無ければ、もう一方へ倒す。
+        //
+        // 品によっては個数指定が出ない。探して見つからないからと諦めると、
+        // 目の前にあるのに取り出せずに次の相手へ進んでしまう。
         if (index < 0)
         {
-            failure = useAll ? "「すべて取る」が見つかりません" : "「個数を指定して取る」が見つかりません";
-            return false;
+            var alternative = useAll ? indexQuantity : indexAll;
+
+            if (alternative < 0)
+            {
+                failure = "「リテイナーから受け取る」がメニューに見つかりません";
+                return false;
+            }
+
+            this.Note(useAll
+                ? "「すべて取る」が無いため、個数を指定して取ります"
+                : "「個数を指定して取る」が無いため、すべて取ります");
+
+            index = alternative;
+            useAll = !useAll;
         }
+
+        // 入力欄が出るかどうかは、どちらを選んだかで決まる。
+        this.retrieveWithoutQuantity = useAll;
 
         Callback.Fire(contextMenu, true, 0, index, 0, 0, 0);
         return true;
@@ -1158,7 +1223,12 @@ public sealed unsafe class RetainerRestockRunner(
         {
             var container = manager->GetInventoryContainer(page);
 
-            if (container is null || !container->IsLoaded)
+            // **読み込み済みかどうかで飛ばさない。**
+            // クリスタルの入れ物がそう報告しないことがあり、目の前にあるのに
+            // 見つけられなくなる。Artisan の取り出しもここは見ていない
+            // （`Artisan/Tasks/TaskSelectRetainer.cs` の `OpenItemContextMenu`）。
+            // 枠ごとに中身を確かめるので、空の入れ物を読んでも害はない。
+            if (container is null || container->Size <= 0)
             {
                 continue;
             }

@@ -610,6 +610,9 @@ public sealed class GoalRunner(
                     Name = x.Name,
                     Remaining = x.Shortfall,
 
+                    // クリスタルは個数指定が出ない。すべて受け取る。
+                    RetrieveAll = x.IsCrystal,
+
                     // 作れる素材が手に入らなければ、その素材を取りに行く。
                     Fallback = x.SubMaterials
                         .Where(sub => sub.Shortfall > 0)
@@ -618,6 +621,7 @@ public sealed class GoalRunner(
                             ItemId = sub.ItemId,
                             Name = sub.Name,
                             Remaining = sub.Shortfall,
+                            RetrieveAll = sub.IsCrystal,
                         })
                         .ToList(),
                 })
