@@ -3485,6 +3485,21 @@ public sealed unsafe class ExchangeExecutor(
         this.StatusDetail = detail;
         this.anomalyLog.Warn("Exchange", $"{failure}: {detail}");
 
+        // **開いた窓を必ず閉じてから離れる。**
+        //
+        // 失敗のときだけ Cleanup を通していなかった。成功なら閉じるのに、
+        // 失敗すると交換画面が開いたまま残る。画面が開いている間は
+        // OccupiedInEvent が立ちっぱなしになり、安全判定が
+        // 「他の操作中です」を返し続けて、以後どの動作も始められなくなる。
+        //
+        // 2026-09-14 実測: 通貨不足で終わったあと、3 分放置しても復帰しなかった。
+        //
+        // Cleanup は returnContext を消すので、AutoDuty の再開に使うぶんは取っておく。
+        var context = this.returnContext;
+
+        this.Cleanup();
+
+        this.returnContext = context;
         this.ReleaseHeldControl();
     }
 
