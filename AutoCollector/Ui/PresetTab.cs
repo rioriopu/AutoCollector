@@ -922,6 +922,11 @@ public sealed class PresetTab(Plugin plugin)
             ImGui.TextColored(
                 ImGuiColors.DalamudGrey,
                 "このプリセットを有効にすると、素材の取り出しから交換までを通しで回します");
+
+            // **無効でも呼び鈴の状況は出す。**
+            // 有効にする前に「取りに行けるのか」を確かめたい場面なのに、
+            // ここで返していたため、覚えているかどうかを見る手段が無かった。
+            this.DrawKnownBell();
             return;
         }
 
