@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Linq;
 using AutoCollector.Diagnostics;
 using AutoCollector.Game;
+using Dalamud.Game.ClientState.Conditions;
+using ECommons.DalamudServices;
 
 namespace AutoCollector.Automation;
 
@@ -73,8 +75,19 @@ public sealed class GoalRunner(
     CurrencyService currency,
     CollectableRewardService rewards)
 {
-    /// <summary>暴走への歯止め。これを超えたら理由に関わらず打ち切る。</summary>
-    private const int MaxRounds = 300;
+    /// <summary>
+    /// 暴走への歯止め。これを超えたら理由に関わらず打ち切る。
+    ///
+    /// **止める役はこれではない。**
+    /// 普段は「何も動かない周が 2 回続いたら止める」が効く。
+    /// こちらは、その判定をすり抜けて回り続ける状態（進んでいるように見えるのに
+    /// 実は同じところを行き来している、など）への最後の受け皿。
+    ///
+    /// 300 にしていたため、素材が潤沢な上限なしの周回が
+    /// 途中で打ち切られていた。素材が尽きるまで回すのが本来の動き。
+    /// 歯止めとしての意味を保ちつつ、実用で当たらない数にする。
+    /// </summary>
+    private const int MaxRounds = 5000;
 
     /// <summary>何も動かない周がこれだけ続いたら止める。</summary>
     private const int MaxIdleRounds = 2;
@@ -224,6 +237,12 @@ public sealed class GoalRunner(
             return;
         }
 
+        // 製作中は始めない。移動やリテイナーへの操作が弾かれる。
+        if (IsCraftingNow())
+        {
+            return;
+        }
+
         // 目標の計算は所持数をひととおり数える。毎フレーム行う必要はない。
         if (DateTime.UtcNow < this.nextScanUtc)
         {
@@ -330,6 +349,15 @@ public sealed class GoalRunner(
         {
             this.observedBusy = true;
             this.StatusDetail = busyDetail;
+            return;
+        }
+
+        // **製作中は次を始めない。**
+        // 手が動いているあいだに移動やリテイナーへの操作を撃つと、ゲーム側で弾かれる。
+        // 数え終わり（所持数が目標に届いた時点）と、製作画面が閉じる時点はずれる。
+        if (IsCraftingNow())
+        {
+            this.StatusDetail = "製作が終わるのを待っています";
             return;
         }
 
@@ -583,7 +611,7 @@ public sealed class GoalRunner(
         if (blocking.Count > 0 && signature != this.lastRestockSignature)
         {
             // 文言ではなく真偽で判定する。画面の文言を直しても動作が変わらないように。
-            if (!RetainerRestockRunner.IsBellNearby())
+            if (!RetainerRestockRunner.IsBellReachable())
             {
                 var bell = this.restock.DescribeBell();
                 this.Note($"素材が {blocking.Count} 種類足りませんが、{bell}");
@@ -662,6 +690,18 @@ public sealed class GoalRunner(
 
         return this.StartCraft(plan, goal, out reason);
     }
+
+    /// <summary>
+    /// いま製作の最中か。
+    ///
+    /// 製作画面が開いているあいだは移動もリテイナーへの操作も弾かれる。
+    /// <c>CraftRunner</c> は所持数が目標に届いた時点で終わりと見なすため、
+    /// 画面が閉じるより先に次へ進もうとすることがある。
+    /// </summary>
+    private static bool IsCraftingNow()
+        => Svc.Condition[ConditionFlag.Crafting]
+        || Svc.Condition[ConditionFlag.PreparingToCraft]
+        || Svc.Condition[ConditionFlag.ExecutingCraftingAction];
 
     /// <summary>足りない素材を、名前と個数で並べる。上位 3 件まで。</summary>
     private static string DescribeShortfalls(IReadOnlyList<PlanMaterial> shortfalls)
