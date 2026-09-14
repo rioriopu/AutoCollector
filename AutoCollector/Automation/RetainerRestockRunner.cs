@@ -176,6 +176,9 @@ public sealed unsafe class RetainerRestockRunner(
     /// <summary>呼び鈴へ向かう経路を頼んだか。頼み直しを防ぐ。</summary>
     private bool bellMoveIssued;
 
+    /// <summary>持っていないと分かっていて開かなかった人数。取り逃したときの手掛かりになる。</summary>
+    private int skippedKnownEmpty;
+
     public RestockStep Step { get; private set; } = RestockStep.Idle;
 
     public string StatusDetail { get; private set; } = string.Empty;
@@ -258,6 +261,7 @@ public sealed unsafe class RetainerRestockRunner(
         this.activeRequest = null;
         this.expandedFallback = false;
         this.bellMoveIssued = false;
+        this.skippedKnownEmpty = 0;
         this.skippedHere.Clear();
 
         this.deadlineUtc = DateTime.UtcNow.Add(OverallLimit);
@@ -540,7 +544,14 @@ public sealed unsafe class RetainerRestockRunner(
                 return;
             }
 
-            this.Move(RestockStep.CloseList, "すべてのリテイナーを見終えました", 30);
+            // 飛ばした相手がいるなら、そう書く。「全員見た」と書くと、
+            // 記録が古くて取り逃した場合に原因へ辿り着けない。
+            this.Move(
+                RestockStep.CloseList,
+                this.skippedKnownEmpty > 0
+                    ? $"見る相手を見終えました（持っていないと分かっている {this.skippedKnownEmpty} 人は開いていません）"
+                    : "すべてのリテイナーを見終えました",
+                30);
             return;
         }
 
@@ -596,44 +607,81 @@ public sealed unsafe class RetainerRestockRunner(
     /// 覚えていない場合や記録が古い場合は絞らない。
     /// 当てにならない記録で飛ばすと、あるはずのものを取り逃す。
     /// </summary>
+    /// <summary>
+    /// 回る相手を、覚えている持ち物で絞る。
+    ///
+    /// 相手を 3 つに分ける。
+    ///
+    /// | 区分 | 扱い |
+    /// |---|---|
+    /// | 持っていると分かっている | 回る（多い順に先へ） |
+    /// | 持ち物を知らない・記録が古い | 回る（持っている人のあと） |
+    /// | **持っていないと分かっている** | **飛ばす** |
+    ///
+    /// **飛ばすのが肝心。**
+    /// 以前は「覚えている中に目的の品が無ければ全員を順に見る」としていたため、
+    /// 誰も持っていないと分かりきっている場合でも全員のメニューを開いていた。
+    /// 完成品から素材へ切り替えるときにもう一度全員を回るので、2 周ぶん無駄になる。
+    ///
+    /// 記録が古い相手は「知らない」側に入れる。開けばその場で覚え直す。
+    /// </summary>
     private void NarrowByKnownContents()
     {
-        if (!this.inventoryStore.IsUsable(out var reason))
+        var wanted = this.requests.Where(x => x.Remaining > 0).Select(x => x.ItemId).ToHashSet();
+
+        if (wanted.Count == 0 || this.pendingRetainers.Count == 0)
         {
-            this.Note($"{reason}。全員を順に見ます");
             return;
         }
 
-        var wanted = this.requests.Where(x => x.Remaining > 0).Select(x => x.ItemId).ToHashSet();
-
-        // 欲しい品を持っている人だけを、持っている数の多い順に。
-        var scored = new List<(string Name, int Score)>();
+        var holders = new List<(string Name, int Score)>();
+        var unknown = new List<string>();
+        var skipped = new List<string>();
 
         foreach (var name in this.pendingRetainers)
         {
-            var score = 0;
-
-            foreach (var itemId in wanted)
+            if (!this.inventoryStore.IsFresh(name))
             {
-                score += this.inventoryStore.WhoHas(itemId).FirstOrDefault(x => x.Name == name).Quantity;
+                unknown.Add(name);
+                continue;
             }
+
+            var score = wanted.Sum(itemId => this.inventoryStore.HeldBy(name, itemId));
 
             if (score > 0)
             {
-                scored.Add((name, score));
+                holders.Add((name, score));
+            }
+            else
+            {
+                skipped.Add(name);
             }
         }
 
-        if (scored.Count == 0)
+        this.pendingRetainers.Clear();
+        this.pendingRetainers.AddRange(holders.OrderByDescending(x => x.Score).Select(x => x.Name));
+        this.pendingRetainers.AddRange(unknown);
+
+        if (holders.Count > 0)
         {
-            this.Note("覚えている持ち物の中に目的の素材がありません。全員を順に見ます");
-            return;
+            this.Note($"持っている人から回ります: {string.Join(" / ", holders.OrderByDescending(x => x.Score).Select(x => $"{x.Name}({x.Score})"))}");
         }
 
-        this.pendingRetainers.Clear();
-        this.pendingRetainers.AddRange(scored.OrderByDescending(x => x.Score).Select(x => x.Name));
+        if (unknown.Count > 0)
+        {
+            this.Note($"持ち物をまだ知らない人も見ます: {string.Join(" / ", unknown)}");
+        }
 
-        this.Note($"持っている人だけを回ります: {string.Join(" / ", scored.OrderByDescending(x => x.Score).Select(x => $"{x.Name}({x.Score})"))}");
+        if (skipped.Count > 0)
+        {
+            this.skippedKnownEmpty = skipped.Count;
+            this.Note($"持っていないと分かっている {skipped.Count} 人は飛ばします");
+        }
+
+        if (this.pendingRetainers.Count == 0)
+        {
+            this.Note("覚えている持ち物では、この素材を持っている人がいません");
+        }
     }
 
     /// <summary>
@@ -750,14 +798,14 @@ public sealed unsafe class RetainerRestockRunner(
     private void TickWithdraw()
     {
         // 開いたついでに持ち物を控える。次からは総当たりせずに済む。
-        if (IsRetainerInventoryReady() && !string.IsNullOrEmpty(this.currentRetainer))
+        //
+        // **何も持っていない相手も控える。**
+        // 控えないと「知らない相手」のまま残り、取り出しのたびに開き直すことになる。
+        if (IsRetainerInventoryReady()
+            && !string.IsNullOrEmpty(this.currentRetainer)
+            && TryReadOpenRetainerItems(out var contents))
         {
-            var contents = ReadOpenRetainerItems();
-
-            if (contents.Count > 0)
-            {
-                this.inventoryStore.Remember(this.currentRetainer, contents);
-            }
+            this.inventoryStore.Remember(this.currentRetainer, contents);
         }
 
         if (!IsRetainerInventoryReady())
@@ -1152,8 +1200,20 @@ public sealed unsafe class RetainerRestockRunner(
     /// 読み取りだけで、状態は変えない。
     /// </summary>
     public static Dictionary<uint, int> ReadOpenRetainerItems()
+        => TryReadOpenRetainerItems(out var items) ? items : [];
+
+    /// <summary>
+    /// 開いているリテイナーの持ち物を読む。**読めたかどうかを返す。**
+    ///
+    /// 中身が空であることと、まだ読めないことは別物。
+    /// 区別しないと、何も持っていない相手をいつまでも「知らない」扱いにして、
+    /// 取り出しのたびに開き直すことになる。
+    /// </summary>
+    public static bool TryReadOpenRetainerItems(out Dictionary<uint, int> items)
     {
         var totals = new Dictionary<uint, int>();
+        items = totals;
+        var readAny = false;
 
         try
         {
@@ -1161,7 +1221,7 @@ public sealed unsafe class RetainerRestockRunner(
 
             if (manager is null)
             {
-                return totals;
+                return false;
             }
 
             foreach (var page in RetainerPages)
@@ -1172,6 +1232,8 @@ public sealed unsafe class RetainerRestockRunner(
                 {
                     continue;
                 }
+
+                readAny = true;
 
                 for (var i = 0; i < container->Size; i++)
                 {
@@ -1189,10 +1251,10 @@ public sealed unsafe class RetainerRestockRunner(
         }
         catch
         {
-            return totals;
+            return false;
         }
 
-        return totals;
+        return readAny;
     }
 
     /// <summary>

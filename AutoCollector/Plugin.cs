@@ -198,9 +198,9 @@ public sealed class Plugin : IDalamudPlugin
                 return;
             }
 
-            var contents = RetainerRestockRunner.ReadOpenRetainerItems();
-
-            if (contents.Count > 0)
+            // 何も持っていない相手も控える。控えないと「知らない相手」のまま残り、
+            // 取り出しのたびに開き直すことになる。
+            if (RetainerRestockRunner.TryReadOpenRetainerItems(out var contents))
             {
                 this.RetainerInventory.Remember(name, contents);
             }
