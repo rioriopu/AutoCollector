@@ -782,6 +782,8 @@ public sealed unsafe class RetainerRestockRunner(
             }
         }
 
+        var before = this.pendingRetainers.Count;
+
         this.pendingRetainers.Clear();
         this.pendingRetainers.AddRange(holders.OrderByDescending(x => x.Score).Select(x => x.Name));
         this.pendingRetainers.AddRange(unknown);
@@ -805,6 +807,20 @@ public sealed unsafe class RetainerRestockRunner(
         if (this.pendingRetainers.Count == 0)
         {
             this.Note("覚えている持ち物では、この素材を持っている人がいません");
+        }
+
+        // **判断の内訳をログにも残す。**
+        //
+        // これまで画面の記録にしか出していなかったため、
+        // 絞り込みが効いていないのか、効いた結果その人数なのかを
+        // あとから区別できなかった。減ったときだけ書く。
+        if (this.pendingRetainers.Count != before)
+        {
+            this.anomalyLog.Info(
+                "Restock",
+                $"回る相手を絞りました: {before} 人 → {this.pendingRetainers.Count} 人" +
+                $"（持っている {holders.Count} / 知らない {unknown.Count} / 飛ばす {skipped.Count}）" +
+                $" 対象: {string.Join(" / ", this.requests.Where(x => x.Remaining > 0).Select(x => x.Name))}");
         }
     }
 
@@ -853,7 +869,23 @@ public sealed unsafe class RetainerRestockRunner(
 
         this.expandedFallback = true;
 
+        // **切り替え先の無い不足を捨てない。**
+        //
+        // 以前は一覧を丸ごと差し替えていた。代わりの素材を持たない品が
+        // まだ足りていても、そこで消えてしまう。
+        // 消えた品は「取り終えた」ことになり、最後に
+        // 「必要なぶんをすべて取り出しました」と出してしまう。
+        var carried = this.requests
+            .Where(x => x.Remaining > 0 && x.Fallback.Count == 0)
+            .ToList();
+
+        if (carried.Count > 0)
+        {
+            this.Note($"切り替え先の無い不足はそのまま残します: {string.Join(" / ", carried.Select(x => $"{x.Name}×{x.Remaining}"))}");
+        }
+
         this.requests.Clear();
+        this.requests.AddRange(carried);
         this.requests.AddRange(replacements);
 
         this.Note($"取り出す対象を替えます: {string.Join(" / ", replacements.Select(x => $"{x.Name}×{x.Remaining}"))}");
@@ -956,7 +988,13 @@ public sealed unsafe class RetainerRestockRunner(
             return;
         }
 
-        if (!EzThrottler.Throttle("AutoCollector.Withdraw", 1200))
+        // 品 1 件ごとに効く床。
+        //
+        // 取り出せたかどうかは所持数の増加で確かめているので、時間で守る必要は薄い。
+        // ただし 0 にはしない。鞄側だけ先に増えて、リテイナー側の枠が
+        // 古い個数のままだと、同じ枠へもう一度撃つことになる。
+        // 1200 から半分に落とす。1 人から 3 種類取るなら約 1.8 秒縮む。
+        if (!EzThrottler.Throttle("AutoCollector.Withdraw", 600))
         {
             return;
         }
@@ -996,6 +1034,21 @@ public sealed unsafe class RetainerRestockRunner(
         if (take <= 0)
         {
             this.skippedHere.Add(request.ItemId);
+            return;
+        }
+
+        // **鞄の空きを確かめてから撃つ。**
+        //
+        // 見ずに撃つと、鞄が一杯のときゲームに弾かれる。
+        // こちらは所持数が増えるのを 15 秒待って「取り出せませんでした」と記録し、
+        // 次の相手でも同じ品を試して、また 15 秒待つ。
+        // 全体の制限時間（5 分）を使い切るまで、これを繰り返すことになる。
+        //
+        // クリスタルは鞄ではなく専用の入れ物に入るので、この判定に含めない。
+        if (!IsCrystalContainer(inventory) && !this.HasBagRoom(request.ItemId, out var roomDetail))
+        {
+            this.Note($"鞄に空きがないため取り出せません（{roomDetail}）");
+            this.Finish(RestockStep.Error, $"鞄に空きがありません（{roomDetail}）");
             return;
         }
 
@@ -1244,6 +1297,17 @@ public sealed unsafe class RetainerRestockRunner(
         {
             this.currentRetainer = string.Empty;
             this.skippedHere.Clear();
+
+            // **1 人終えるたびに、回る相手を絞り直す。**
+            //
+            // 絞り込みを始めに 1 回しか行っていなかった。
+            // 4 種類を頼んだ時点では、そのうち 1 つでも持っている人が全員残る。
+            // 最初の相手で目的の品が揃っても、残りの人を最後まで開き続けていた。
+            //
+            // 2026-09-14 実測: 1 人目で 2 種類を取り終えたのに、
+            // 残り 8 人を開いて何も取らずに閉じた（約 21 秒）。
+            this.NarrowByKnownContents();
+
             this.Move(RestockStep.SelectRetainer, "次のリテイナーへ移ります", 30);
             return;
         }
@@ -1510,9 +1574,25 @@ public sealed unsafe class RetainerRestockRunner(
             {
                 var container = manager->GetInventoryContainer(page);
 
-                if (container is null || !container->IsLoaded)
+                // **読めない入れ物が 1 つでもあれば、控えない。**
+                //
+                // 探す側（TryFindInRetainer）は読み込み済みかどうかを見ずに走るのに、
+                // 控える側だけ読み込み済みを求めていた。この食い違いが危ない。
+                //
+                // クリスタルの入れ物が読み込み済みと報告しないことがある。
+                // そのまま控えると「クリスタルを持っていない人」として記録され、
+                // 以後 3 日間その人を飛ばし続ける。持っているのに取りに行かなくなる。
+                //
+                // 一部だけ正しい記録より、記録しないほうがよい。
+                // 記録が無ければ「知らない人」として開きに行く。
+                if (container is null || container->Size <= 0)
                 {
                     continue;
+                }
+
+                if (!container->IsLoaded)
+                {
+                    return false;
                 }
 
                 readAny = true;
@@ -1712,6 +1792,77 @@ public sealed unsafe class RetainerRestockRunner(
     private bool Expired() => DateTime.UtcNow > this.stepDeadlineUtc;
 
     /// <summary>終わる。抑制の解除はここでしか行わないので、必ず通す。</summary>
+    /// <summary>
+    /// 自分が開いた画面を閉じる。終わり方に関わらず通す。
+    ///
+    /// 内側（数値入力・リテイナーの持ち物）から外側（一覧）の順に閉じる。
+    /// 逆にすると内側だけが孤立して残る。
+    /// </summary>
+    /// <summary>クリスタルの入れ物か。鞄の枠を使わないので、空きの判定から外す。</summary>
+    private static bool IsCrystalContainer(InventoryType inventory)
+        => inventory == InventoryType.RetainerCrystals;
+
+    /// <summary>
+    /// 鞄に受け取る余地があるか。
+    ///
+    /// すでに同じ品を持っていれば、その山に積めるので新しい枠は要らない。
+    /// 持っていなければ、空き枠が 1 つは要る。
+    /// </summary>
+    private bool HasBagRoom(uint itemId, out string detail)
+    {
+        detail = string.Empty;
+
+        if (!this.currency.TryGetEmptyBagSlots(out var free))
+        {
+            // 読めないなら止めない。撃ってみて、増えなければ従来どおり次へ進む。
+            return true;
+        }
+
+        if (free > 0)
+        {
+            return true;
+        }
+
+        // 空きが無くても、同じ品を持っていれば積み増せる。
+        if (this.currency.TryGetCount(itemId, out var held) && held > 0)
+        {
+            return true;
+        }
+
+        detail = $"空き {free} 枠 / この品は持っていません";
+        return false;
+    }
+
+    private void CloseLeftoverWindows()
+    {
+        try
+        {
+            if (GenericHelpers.TryGetAddonByName<AtkUnitBase>("InputNumeric", out var numeric) &&
+                GenericHelpers.IsAddonReady(numeric))
+            {
+                numeric->Close(true);
+            }
+
+            var agent = AgentModule.Instance()->GetAgentByInternalId(AgentId.Retainer);
+
+            if (agent is not null && agent->IsAgentActive())
+            {
+                agent->Hide();
+            }
+
+            if (GenericHelpers.TryGetAddonByName<AtkUnitBase>("RetainerList", out var list) &&
+                GenericHelpers.IsAddonReady(list))
+            {
+                // 一覧は -1 のコールバックで閉じる。
+                Callback.Fire(list, true, -1);
+            }
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Warn("Restock", $"開いた画面を閉じられませんでした: {ex.Message}");
+        }
+    }
+
     private void Finish(RestockStep step, string detail)
     {
         this.Note($"終了: {detail}");
@@ -1725,6 +1876,16 @@ public sealed unsafe class RetainerRestockRunner(
             this.contextMenuRequested = false;
             this.CloseContextMenu(null);
         }
+
+        // **開いた画面を、終わり方に関わらず閉じる。**
+        //
+        // 正常に終わるときは CloseRetainer → CloseList を通るが、
+        // 時間切れ・例外・利用者の停止では通らない。
+        // リテイナーの画面が開いたままだと OccupiedSummoningBell が立ち続け、
+        // 安全判定が「他の操作中です」を返して以後どの動作も始められなくなる。
+        //
+        // 交換側でまったく同じ壊れ方をしていた（docs/03 の F-44）。
+        this.CloseLeftoverWindows();
 
         this.Step = step;
         this.StatusDetail = detail;
