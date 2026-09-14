@@ -496,7 +496,12 @@ public sealed class GoalRunner(
         //
         // ここが無いと、素材が尽きた時点で貯めたスクリップが宙に浮く。
         // 「作れるぶんだけ作って進める」のだから、貯めたぶんも使い切る。
-        if (goal.CheapestCost > 0 && goal.HeldScrips >= goal.CheapestCost)
+        //
+        // **やり直す見込みがあるうちは使わない。**
+        // 呼び鈴へ行けないだけの一時的な理由で止まるとき、その場で交換所へ出発すると
+        // 「取りに行けないのに、なぜ交換所へ行ったのか」が分からなくなる。
+        // 近寄れば作れるのだから、貯めたぶんは残しておく。
+        if (this.retryAfterOnFinish is null && goal.CheapestCost > 0 && goal.HeldScrips >= goal.CheapestCost)
         {
             this.Note($"これ以上作れません: {craftReason}");
 

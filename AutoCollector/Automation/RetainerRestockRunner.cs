@@ -25,6 +25,9 @@ public enum RestockStep
 {
     Idle,
 
+    /// <summary>呼び鈴まで歩いている。</summary>
+    MoveToBell,
+
     /// <summary>呼び鈴に話しかけている。</summary>
     InteractBell,
 
@@ -105,8 +108,22 @@ public sealed unsafe class RetainerRestockRunner(
     CurrencyService currency,
     MenuService menu,
     AutoRetainerIpc autoRetainer,
-    RetainerInventoryStore inventoryStore)
+    RetainerInventoryStore inventoryStore,
+    NavigationService navigation)
 {
+    /// <summary>
+    /// 呼び鈴を探す範囲。
+    ///
+    /// **見えていれば拾う。足りないぶんは歩く。**
+    /// 以前は 10m 以内しか見ておらず、しかも歩かずにその場から話しかけていた。
+    /// 10m は話しかけられる距離より遠いため、実機では
+    /// 「距離が離れています」が出続けるだけで進まなかった（2026-09-14 実測）。
+    /// </summary>
+    private const float BellSearchRange = 30f;
+
+    /// <summary>この距離まで近づいてから話しかける。</summary>
+    private const float BellInteractRange = 3.5f;
+
     /// <summary>リテイナーの持ち物が入る入れ物。クリスタルは扱わない。</summary>
     private static readonly InventoryType[] RetainerPages =
     [
@@ -127,6 +144,7 @@ public sealed unsafe class RetainerRestockRunner(
     private readonly MenuService menu = menu;
     private readonly AutoRetainerIpc autoRetainer = autoRetainer;
     private readonly RetainerInventoryStore inventoryStore = inventoryStore;
+    private readonly NavigationService navigation = navigation;
 
     private readonly List<RestockRequest> requests = [];
 
@@ -154,6 +172,9 @@ public sealed unsafe class RetainerRestockRunner(
 
     /// <summary>代わりの素材へ切り替えたか。1 段だけにして、際限なく辿らないようにする。</summary>
     private bool expandedFallback;
+
+    /// <summary>呼び鈴へ向かう経路を頼んだか。頼み直しを防ぐ。</summary>
+    private bool bellMoveIssued;
 
     public RestockStep Step { get; private set; } = RestockStep.Idle;
 
@@ -236,6 +257,7 @@ public sealed unsafe class RetainerRestockRunner(
         this.pendingQuantity = 0;
         this.activeRequest = null;
         this.expandedFallback = false;
+        this.bellMoveIssued = false;
         this.skippedHere.Clear();
 
         this.deadlineUtc = DateTime.UtcNow.Add(OverallLimit);
@@ -246,7 +268,7 @@ public sealed unsafe class RetainerRestockRunner(
         this.anomalyLog.Info("Restock", $"リテイナーから取り出します（{targets.Count} 種）");
         this.Note($"AutoRetainer を抑制しました。{string.Join(" / ", targets.Select(x => $"{x.Name}×{x.Remaining}"))}");
 
-        this.Move(RestockStep.InteractBell, "呼び鈴に話しかけています", 30);
+        this.Move(RestockStep.MoveToBell, "呼び鈴へ向かっています", 60);
         reason = string.Empty;
         return true;
     }
@@ -281,6 +303,10 @@ public sealed unsafe class RetainerRestockRunner(
         {
             switch (this.Step)
             {
+                case RestockStep.MoveToBell:
+                    this.TickMoveToBell();
+                    break;
+
                 case RestockStep.InteractBell:
                     this.TickInteractBell();
                     break;
@@ -352,9 +378,112 @@ public sealed unsafe class RetainerRestockRunner(
             return;
         }
 
-        this.Note($"呼び鈴に話しかけます（{bell.Name}）");
+        // 離れたまま撃ち続けない。ゲームに「距離が離れています」を出させるだけで進まない。
+        var distance = Vector3.Distance(bell.Position, Player.Position);
+
+        if (distance > BellInteractRange)
+        {
+            this.Note($"呼び鈴から {distance:F1} 離れています。近寄り直します");
+            this.Move(RestockStep.MoveToBell, "呼び鈴へ向かっています", 60);
+            return;
+        }
+
+        this.Note($"呼び鈴に話しかけます（{bell.Name}・距離 {distance:F1}）");
         Svc.Targets.Target = bell;
         TargetSystem.Instance()->InteractWithObject((GameObjectStruct*)bell.Address, false);
+    }
+
+    /// <summary>
+    /// 呼び鈴まで歩く。
+    ///
+    /// **見えている ≠ 話しかけられる。**
+    /// 以前は探す範囲を 10m に取り、そこから動かずに話しかけていた。
+    /// 実際に話しかけられるのはもっと近い距離のため、
+    /// 「距離が離れています」が出続けるだけで永久に進まなかった。
+    /// </summary>
+    /// <summary>自分が始めた移動だけを止める。頼み直せるよう印も消す。</summary>
+    private void StopMoving()
+    {
+        if (!this.bellMoveIssued)
+        {
+            return;
+        }
+
+        this.bellMoveIssued = false;
+
+        try
+        {
+            this.navigation.Stop();
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Warn("Restock", $"移動を止められませんでした: {ex.Message}");
+        }
+    }
+
+    private void TickMoveToBell()
+    {
+        var bell = FindBell();
+
+        if (bell is null)
+        {
+            this.StopMoving();
+            this.Finish(RestockStep.Error, $"近くに呼び鈴がありません（{DescribeNearby()}）");
+            return;
+        }
+
+        var distance = Vector3.Distance(bell.Position, Player.Position);
+
+        // もう届く。歩かない。
+        if (distance <= BellInteractRange)
+        {
+            this.StopMoving();
+            this.Move(RestockStep.InteractBell, "呼び鈴に話しかけています", 30);
+            return;
+        }
+
+        if (!this.navigation.IsAvailable)
+        {
+            this.Finish(
+                RestockStep.Error,
+                $"呼び鈴まで {distance:F1} ありますが、vnavmesh が使えないため近寄れません");
+            return;
+        }
+
+        // 経路は 1 度だけ頼む。毎フレーム頼み直すと積み上がって動かなくなる。
+        if (!this.bellMoveIssued)
+        {
+            if (!this.navigation.BeginMove(bell.Position, BellInteractRange - 1f, out var failure))
+            {
+                this.Finish(RestockStep.Error, $"呼び鈴へ向かえません（{failure}）");
+                return;
+            }
+
+            this.bellMoveIssued = true;
+            this.Note($"呼び鈴へ向かいます（あと {distance:F1}）");
+            return;
+        }
+
+        var status = this.navigation.Tick(bell.Position, BellInteractRange - 1f);
+
+        switch (status)
+        {
+            case MoveStatus.Moving:
+                this.StatusDetail = $"呼び鈴へ向かっています（あと {distance:F1}）";
+                return;
+
+            case MoveStatus.Arrived:
+            case MoveStatus.ShortOfTarget:
+                // 届く距離まで来たかどうかは、着いたという報告ではなく距離で確かめる。
+                this.StopMoving();
+                this.Move(RestockStep.InteractBell, "呼び鈴に話しかけています", 30);
+                return;
+
+            default:
+                this.StopMoving();
+                this.Finish(RestockStep.Error, $"呼び鈴まで行けませんでした（あと {distance:F1}）");
+                return;
+        }
     }
 
     private void TickWaitRetainerList()
@@ -1164,9 +1293,8 @@ public sealed unsafe class RetainerRestockRunner(
                 continue;
             }
 
-            // 話しかけられる距離はものによって違う。
-            // 広めに取り、実際に届くかはゲームの応答で判断する。
-            if (Vector3.Distance(obj.Position, Player.Position) <= 10f)
+            // 見えている範囲まで拾う。足りないぶんは歩いて近寄る。
+            if (Vector3.Distance(obj.Position, Player.Position) <= BellSearchRange)
             {
                 return obj;
             }
@@ -1226,6 +1354,9 @@ public sealed unsafe class RetainerRestockRunner(
     private void Finish(RestockStep step, string detail)
     {
         this.Note($"終了: {detail}");
+
+        // 自分が始めた移動を残さない。歩いたまま終わると、そのまま走り続ける。
+        this.StopMoving();
 
         this.Step = step;
         this.StatusDetail = detail;
