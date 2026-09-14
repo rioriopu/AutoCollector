@@ -125,6 +125,17 @@ public sealed class CraftPlanService(
     private uint crystalCategoryRowId;
 
     /// <summary>
+    /// できあがる品 → レシピ の索引。
+    ///
+    /// **これが無いと表を毎回すべて走る。**
+    /// 素材 1 件ごとに Recipe シート（数万行）を端から探していた。
+    /// BuildPlan は個数を 1 つずつ下げながら BuildMaterials を呼ぶため、
+    /// 空き枠 95・素材 6 種なら 1 回の計算で 570 回の全件走査になる。
+    /// しかもフレームワークスレッドで動く。ここは必ず索引で引く。
+    /// </summary>
+    private Dictionary<uint, uint>? recipeByResult;
+
+    /// <summary>
     /// このスクリップを生む、作れる収集品の一覧。
     ///
     /// 並びは製作手帳の収集品欄と同じにする。
@@ -285,9 +296,8 @@ public sealed class CraftPlanService(
                 return list;
             }
 
-            var recipe = recipes.FirstOrDefault(x => x.ItemResult.RowId == intermediateItemId);
-
-            if (recipe.RowId == 0)
+            if (!this.TryFindRecipeByResult(intermediateItemId, out var recipeRowId)
+                || !recipes.TryGetRow(recipeRowId, out var recipe))
             {
                 return list;
             }
@@ -487,6 +497,46 @@ public sealed class CraftPlanService(
         return new CraftPlan(target, 0, freeSlots, keepFreeSlots, [], notes);
     }
 
+    /// <summary>
+    /// できあがる品からレシピを引く。索引が無ければ 1 度だけ作る。
+    ///
+    /// 同じ品を作るレシピが複数ある場合は、先に見つけたものを使う。
+    /// 元の実装（FirstOrDefault）と同じ選び方になるよう、行番号の小さい方を残す。
+    /// </summary>
+    private bool TryFindRecipeByResult(uint resultItemId, out uint recipeRowId)
+    {
+        recipeRowId = 0;
+
+        if (resultItemId == 0)
+        {
+            return false;
+        }
+
+        if (this.recipeByResult is null)
+        {
+            var map = new Dictionary<uint, uint>();
+            var sheet = Svc.Data.GetExcelSheet<Recipe>();
+
+            if (sheet is null)
+            {
+                return false;
+            }
+
+            foreach (var row in sheet)
+            {
+                if (row.ItemResult.RowId != 0)
+                {
+                    map.TryAdd(row.ItemResult.RowId, row.RowId);
+                }
+            }
+
+            this.recipeByResult = map;
+            this.anomalyLog.Info("Craft", $"できあがる品からレシピを引く索引を作りました（{map.Count} 件）");
+        }
+
+        return this.recipeByResult.TryGetValue(resultItemId, out recipeRowId) && recipeRowId != 0;
+    }
+
     /// <summary>この個数を作るのに要る素材と、新たに要る枠数。</summary>
     private List<PlanMaterial>? BuildMaterials(CraftableCollectable target, int crafts, out int totalNewSlots)
     {
@@ -536,8 +586,17 @@ public sealed class CraftPlanService(
 
             totalNewSlots += newSlots;
 
-            var subRecipe = recipes.FirstOrDefault(x => x.ItemResult.RowId == ingredient.RowId);
-            var isIntermediate = subRecipe.RowId != 0;
+            var isIntermediate = false;
+            var subAmountResult = 1;
+            uint subRecipeRowId = 0;
+
+            if (this.TryFindRecipeByResult(ingredient.RowId, out var foundRowId)
+                && recipes.TryGetRow(foundRowId, out var subRecipe))
+            {
+                isIntermediate = true;
+                subRecipeRowId = foundRowId;
+                subAmountResult = Math.Max(1, (int)subRecipe.AmountResult);
+            }
 
             // 作れる素材が足りないなら、その素材を作るのに要るものまで辿る。
             // リテイナーに完成品が無いとき、これが無いと手が止まる。
@@ -554,8 +613,8 @@ public sealed class CraftPlanService(
                 shortfall,
                 newSlots,
                 isIntermediate,
-                subRecipe.RowId,
-                isIntermediate ? Math.Max(1, (int)subRecipe.AmountResult) : 1,
+                isIntermediate ? subRecipeRowId : 0,
+                subAmountResult,
                 subMaterials));
         }
 

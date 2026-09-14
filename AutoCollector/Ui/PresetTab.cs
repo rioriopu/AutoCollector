@@ -110,6 +110,27 @@ public sealed class PresetTab(Plugin plugin)
             if (ImGui.Selectable(this.BuildSummary(preset, label), expanded))
             {
                 this.editingPresetId = expanded ? Guid.Empty : preset.Id;
+
+                // 別のプリセットを開いたら、探し途中と選び途中は持ち越さない。
+                this.categoryIndex = 0;
+                this.seriesIndex = 0;
+                this.rewardSearch = string.Empty;
+                this.searchResults = null;
+                this.goalCacheUntilUtc = DateTime.MinValue;
+            }
+
+            // 止まっていることは、畳んだままでも分かるようにする。
+            var blockedReason = this.plugin.GoalRunner.BlockedReason(preset.Id);
+
+            if (!string.IsNullOrEmpty(blockedReason))
+            {
+                var retry = this.plugin.GoalRunner.BlockedRetryInSeconds(preset.Id);
+
+                ImGui.TextColored(
+                    ImGuiColors.DalamudYellow,
+                    retry is null
+                        ? $"  止まっています: {blockedReason}"
+                        : $"  止まっています: {blockedReason}（{retry} 秒後にもう一度試します）");
             }
 
             if (!string.IsNullOrEmpty(preset.DisabledReason))
@@ -198,6 +219,17 @@ public sealed class PresetTab(Plugin plugin)
 
                             // 作る収集品も通貨ごとに違う。橙貨用の物で紫貨は貯まらない。
                             ClearCraftChoice(preset);
+
+                            // 通貨が変われば系統も種別も別物。選び直しにする。
+                            // 番号だけ残すと、無関係な系統の品が並んで「何も買えない」と読める。
+                            this.categoryIndex = 0;
+                            this.seriesIndex = 0;
+
+                            // 前の通貨で探した結果も捨てる。
+                            // 残っていると、別通貨の品をそのまま交換リストへ入れられてしまう。
+                            this.rewardSearch = string.Empty;
+                            this.searchResults = null;
+
                             changed = true;
                         }
 
@@ -380,26 +412,34 @@ public sealed class PresetTab(Plugin plugin)
         {
             this.searchResults ??= catalog.Search(this.rewardSearch, currencyItemId);
 
-            using var searchChild = ImRaii.Child("##searchlist", new Vector2(0, 150), true);
-            if (searchChild)
+            // using を宣言のまま置くと、この関数の最後まで枠が閉じない。
+            // 枠の外に出したい案内文まで、検索結果の中に描かれてしまう。
+            using (var searchChild = ImRaii.Child("##searchlist", new Vector2(0, 150), true))
             {
-                if (this.searchResults.Count == 0)
+                if (searchChild)
                 {
-                    ImGui.TextColored(ImGuiColors.DalamudGrey, "見つかりませんでした");
-                }
-
-                foreach (var (category, series, offer) in this.searchResults)
-                {
-                    var inList = preset.Rewards.Any(x => x.RewardItemId == offer.RewardItemId);
-
-                    if (ImGui.Selectable($"{offer.RewardName}  （{offer.CurrencyCost:N0}）##s{series.SpecialShopId}_{offer.RewardItemId}", inList))
+                    if (this.searchResults.Count == 0)
                     {
-                        Toggle(preset, offer.RewardItemId);
-                        changed = true;
+                        ImGui.TextColored(ImGuiColors.DalamudGrey, "見つかりませんでした");
                     }
 
-                    ImGui.SameLine();
-                    ImGui.TextColored(ImGuiColors.DalamudGrey, $"  {category.DisplayName} / {series.DisplayName}");
+                    foreach (var (category, series, offer) in this.searchResults)
+                    {
+                        var inList = preset.Rewards.Any(x => x.RewardItemId == offer.RewardItemId);
+
+                        if (ImGui.Selectable($"{offer.RewardName}  （{offer.CurrencyCost:N0}）##s{series.SpecialShopId}_{offer.RewardItemId}", inList))
+                        {
+                            Toggle(preset, offer.RewardItemId);
+                            changed = true;
+                        }
+
+                        ImGui.SameLine();
+
+                        // 系統名は長い。後半だけにして、右端が切れないようにする。
+                        ImGui.TextColored(
+                            ImGuiColors.DalamudGrey,
+                            $"  {ShortCategory(category.DisplayName)} / {series.DisplayName}");
+                    }
                 }
             }
 
@@ -575,12 +615,28 @@ public sealed class PresetTab(Plugin plugin)
     {
         if (preset.Rewards.Count == 0)
         {
+            // 作る収集品だけ選んで欲しいアイテムを選び忘れると、目標が立たない。
+            // 黙って何も出さないと、有効にしても動かない理由が分からなくなる。
+            if (preset.CraftCollectableItemId != 0)
+            {
+                ImGui.TextColored(
+                    ImGuiColors.DalamudYellow,
+                    "欲しいアイテムが選ばれていません。下の一覧から選ぶと、必要な個数を計算します");
+            }
+
             return;
         }
 
         var now = DateTime.UtcNow;
 
-        if (this.goalCachePresetId != preset.Id || now > this.goalCacheUntilUtc || changed)
+        // 設定を書き換えた直後は作り直す。間引いていると、収集品を選んでも
+        // 「作る収集品が選ばれていません」が 1 秒残り、押せていないように見える。
+        if (changed)
+        {
+            this.goalCacheUntilUtc = DateTime.MinValue;
+        }
+
+        if (this.goalCachePresetId != preset.Id || now > this.goalCacheUntilUtc)
         {
             this.goalCache = this.plugin.ScripGoalService.Build(preset);
             this.goalCachePresetId = preset.Id;
@@ -600,6 +656,21 @@ public sealed class PresetTab(Plugin plugin)
         if (goal.Endless)
         {
             this.DrawEndlessSummary(preset, goal);
+
+            // 注意書きは上限なしでも必ず出す。
+            // 交換費用が読めない・設定が食い違う、といった話は終わり方に関係なく効く。
+            foreach (var note in goal.Notes)
+            {
+                ImGui.TextColored(ImGuiColors.DalamudYellow, $"  {note}");
+            }
+
+            if (preset.CraftCollectableItemId != 0 && preset.Mode == ExchangeMode.UntilCurrencyReserve)
+            {
+                ImGui.TextColored(
+                    ImGuiColors.DalamudYellow,
+                    $"  「指定量の通貨を残すまで」のため、{preset.CurrencyReserve:N0} ぶんは交換されずに残ります");
+            }
+
             this.DrawKeepFreeSlots(preset, ref changed);
             this.DrawGoalRunState(preset);
             ImGui.Separator();
@@ -614,10 +685,15 @@ public sealed class PresetTab(Plugin plugin)
         // 要るスクリップ。届いていない品だけを並べる。
         foreach (var item in goal.Items.Where(x => !x.Unlimited && x.Remaining > 0))
         {
+            // 1 回で 2 個以上もらえる品があるので、回数で書く。
+            var trade = item.PerTrade > 1
+                ? $"{item.Trades} 回（1 回 {item.PerTrade} 個）× {item.Cost:N0}"
+                : $"{item.Trades} 個 × {item.Cost:N0}";
+
             ImGui.TextColored(
                 ImGuiColors.DalamudGrey,
                 $"  {item.Name}: {item.Want} 個まで（いま {item.Held} 個）" +
-                $" → あと {item.Remaining} 個 × {item.Cost:N0} = {item.Subtotal:N0}");
+                $" → あと {item.Remaining} 個 = {trade} = {item.Subtotal:N0}");
         }
 
         ImGui.TextUnformatted($"要る{goal.CurrencyName}: {goal.RequiredScrips:N0}");
@@ -694,9 +770,15 @@ public sealed class PresetTab(Plugin plugin)
                 ? "交換できる限り"
                 : $"1 回の移動で {entry.Quantity} 個ずつ";
 
+            // 上限ありの品が混ざっていても分かるようにする。
+            var cap = item.Unlimited ? "上限なし" : $"{item.Want} 個まで";
+            var unit = item.PerTrade > 1
+                ? $"1 回 {item.Cost:N0} で {item.PerTrade} 個"
+                : $"1 個 {item.Cost:N0}";
+
             ImGui.TextColored(
                 ImGuiColors.DalamudGrey,
-                $"  {item.Name}: {batch}（1 個 {item.Cost:N0} / いま {item.Held} 個）");
+                $"  {item.Name}: {cap} / {batch}（{unit} / いま {item.Held} 個）");
         }
 
         ImGui.TextUnformatted($"いまの{goal.CurrencyName}: {goal.HeldScrips:N0}");
@@ -773,15 +855,32 @@ public sealed class PresetTab(Plugin plugin)
 
         if (!string.IsNullOrEmpty(stopped))
         {
+            var retry = runner.BlockedRetryInSeconds(preset.Id);
+
             ImGui.TextColored(ImGuiColors.DalamudYellow, $"止まっています: {stopped}");
 
-            if (ImGui.Button("もう一度試す##retrygoal"))
+            if (retry is not null)
+            {
+                ImGui.TextColored(ImGuiColors.DalamudGrey, $"  {retry} 秒後にもう一度試します");
+            }
+
+            if (ImGui.Button("いますぐもう一度試す##retrygoal"))
             {
                 runner.ClearBlock(preset.Id);
             }
 
             ImGui.SameLine();
-            ImGui.TextColored(ImGuiColors.DalamudGrey, "（プリセットを入れ直しても同じです）");
+            ImGui.TextColored(ImGuiColors.DalamudGrey, "（チェックを入れ直しても、この理由を忘れてやり直します）");
+
+            // 呼び鈴が要るのは取り出しのときだけ。**止まっているときこそ出す。**
+            // ここで return していたため、原因を示す唯一の行が隠れていた。
+            var bellNow = this.plugin.RetainerRestock.DescribeBell();
+            ImGui.TextColored(
+                bellNow.StartsWith("呼び鈴が見つかりました", StringComparison.Ordinal)
+                    ? ImGuiColors.DalamudGrey
+                    : ImGuiColors.DalamudYellow,
+                $"  {bellNow}");
+
             return;
         }
 
@@ -893,9 +992,11 @@ public sealed class PresetTab(Plugin plugin)
         }
 
         // 帯が選ばれていなければ、いちばん上の帯にしておく。
+        // 書き換えたら保存する。保存しないと、開き直すたびにここへ戻ってくる。
         if (available.Count > 0 && !available.Any(x => x.Min == preset.CraftLevelBand))
         {
             preset.CraftLevelBand = available[^1].Min;
+            changed = true;
         }
 
         var filtered = craftable;

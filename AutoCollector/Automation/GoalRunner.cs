@@ -6,6 +6,13 @@ using AutoCollector.Game;
 
 namespace AutoCollector.Automation;
 
+/// <summary>目標に届かずに終わった記録。</summary>
+/// <param name="Reason">画面に出す理由。</param>
+/// <param name="RetryAtUtc">
+/// この時刻を過ぎたら自動でもう一度試す。null なら自動では試さない。
+/// </param>
+public sealed record GoalBlock(string Reason, DateTime? RetryAtUtc);
+
 public enum GoalStep
 {
     Idle,
@@ -78,6 +85,14 @@ public sealed class GoalRunner(
     /// <summary>止まっているあいだ、始める相手を探す間隔。</summary>
     private static readonly TimeSpan ScanInterval = TimeSpan.FromSeconds(2);
 
+    /// <summary>
+    /// 呼び鈴が無くて止まったあと、もう一度試すまでの時間。
+    ///
+    /// 呼び鈴の前まで歩けば解消する。歩く時間は取りつつ、
+    /// 2 秒ごとに試して記録を埋め尽くさない程度に空ける。
+    /// </summary>
+    private static readonly TimeSpan BellRetryInterval = TimeSpan.FromSeconds(30);
+
     private readonly AnomalyLog anomalyLog = anomalyLog;
     private readonly ScripGoalService goals = goals;
     private readonly CraftPlanService craftPlans = craftPlans;
@@ -106,8 +121,24 @@ public sealed class GoalRunner(
     ///
     /// 覚えておかないと、終わった 2 秒後に同じ条件でまた走り出す。
     /// プリセットを一度無効にすると忘れる。やり直したいときはそれで入り直せる。
+    ///
+    /// **理由には 2 種類ある。**
+    ///
+    /// | 種類 | 例 | 扱い |
+    /// |---|---|---|
+    /// | 変わらないもの | 素材が尽きた・利用者が止めた・打ち切り | 自動では試さない |
+    /// | いずれ解消するもの | 呼び鈴が近くにない | 時間を空けて自動で試す |
+    ///
+    /// 全部を「変わらないもの」として扱っていたため、呼び鈴の前まで歩いても
+    /// 二度と動き出さなかった。
     /// </summary>
-    private readonly Dictionary<Guid, string> blocked = [];
+    private readonly Dictionary<Guid, GoalBlock> blocked = [];
+
+    /// <summary>
+    /// 次に終わるとき、この時間だけ空けてから自動でもう一度試す。
+    /// null なら自動では試さない。<see cref="BeginNextAction"/> の頭で毎回消す。
+    /// </summary>
+    private TimeSpan? retryAfterOnFinish;
 
     public GoalStep Step { get; private set; } = GoalStep.Idle;
 
@@ -142,11 +173,21 @@ public sealed class GoalRunner(
         this.TryStartSomething();
     }
 
-    /// <summary>止める。外部プラグインの抑制も必ず解く。</summary>
+    /// <summary>
+    /// 止める。外部プラグインの抑制も必ず解く。
+    ///
+    /// **移動と交換も止める。**
+    /// 束ねている側だけ止めても、いま走っている移動は ExchangeExecutor が握っている。
+    /// CollectableCycleRunner.Stop は自分の状態を変えるだけで、移動は止めない。
+    /// ここで Abort を通さないと、「止める」を押しても歩き続ける。
+    /// </summary>
     public void Stop(string reason)
     {
         if (!this.IsRunning)
         {
+            // 走っていなくても、止まった記録だけは残っていることがある。
+            // 旗が残っていたら必ず解く。
+            this.ReleaseMonitor();
             return;
         }
 
@@ -154,7 +195,19 @@ public sealed class GoalRunner(
         this.craft.Stop(reason);
         this.cycle.Stop(reason);
 
+        if (this.executor.IsBusy)
+        {
+            this.executor.Abort(reason);
+        }
+
         this.Finish(GoalStep.Done, reason);
+    }
+
+    /// <summary>監視に預けた旗を解く。握ったままにすると、以後どのプリセットも動かない。</summary>
+    private void ReleaseMonitor()
+    {
+        this.monitor.PreferredPresetId = Guid.Empty;
+        this.monitor.SuppressAutoStart = false;
     }
 
     /// <summary>
@@ -188,9 +241,22 @@ public sealed class GoalRunner(
                 continue;
             }
 
-            if (!preset.CraftToEarn || this.blocked.ContainsKey(preset.Id))
+            // 欲しいアイテムが選ばれていなければ、目標が立たない。
+            // 走らせると、何も買えない交換へ 2 回行って打ち切られるだけになる。
+            if (!preset.CraftToEarn || preset.Rewards.Count == 0)
             {
                 continue;
+            }
+
+            if (this.blocked.TryGetValue(preset.Id, out var block))
+            {
+                // いずれ解消する理由なら、時間を空けてもう一度試す。
+                if (block.RetryAtUtc is null || DateTime.UtcNow < block.RetryAtUtc)
+                {
+                    continue;
+                }
+
+                this.blocked.Remove(preset.Id);
             }
 
             var goal = this.goals.Build(preset);
@@ -207,7 +273,21 @@ public sealed class GoalRunner(
 
     /// <summary>目標に届かずに止まった理由。届いている・走っている場合は空。</summary>
     public string BlockedReason(Guid presetId)
-        => this.blocked.TryGetValue(presetId, out var reason) ? reason : string.Empty;
+        => this.blocked.TryGetValue(presetId, out var block) ? block.Reason : string.Empty;
+
+    /// <summary>止まったが、いずれ自動でもう一度試す場合、あと何秒か。試さないなら null。</summary>
+    public int? BlockedRetryInSeconds(Guid presetId)
+    {
+        if (!this.blocked.TryGetValue(presetId, out var block) || block.RetryAtUtc is null)
+        {
+            return null;
+        }
+
+        return Math.Max(0, (int)(block.RetryAtUtc.Value - DateTime.UtcNow).TotalSeconds);
+    }
+
+    /// <summary>止まっているプリセットがあるか。状況タブの見出しで使う。</summary>
+    public bool HasBlocked => this.blocked.Count > 0;
 
     /// <summary>止まった理由を忘れて、もう一度走らせられるようにする。</summary>
     public void ClearBlock(Guid presetId) => this.blocked.Remove(presetId);
@@ -258,10 +338,27 @@ public sealed class GoalRunner(
         {
             if (DateTime.UtcNow > this.startDeadlineUtc)
             {
-                this.Finish(GoalStep.Error, $"{Describe(this.Step)}が始まりませんでした");
+                // 監視の判断を添える。これが無いと「始まりませんでした」だけが残り、
+                // 交換するものが無かったのか、索引が間に合わなかったのか区別できない。
+                var detail = this.Step == GoalStep.Exchanging && !string.IsNullOrEmpty(this.monitor.LastDecision)
+                    ? $"{Describe(this.Step)}が始まりませんでした（{this.monitor.LastDecision}）"
+                    : $"{Describe(this.Step)}が始まりませんでした";
+
+                this.Finish(GoalStep.Error, detail);
             }
 
             return;
+        }
+
+        // 取り出しの結果を見る。
+        //
+        // **1 個でも取れたなら、同じ不足でもう一度行く価値がある。**
+        // 覚えたままにしていたため、1 周目で取り出して使い切ったあと、
+        // 2 周目は同じ不足に見えて取りに行かず、リテイナーに素材が山ほどあるのに
+        // 「いま持っている素材では 1 個も作れません」で止まっていた。
+        if (this.Step == GoalStep.Restocking && this.restock.Withdrawn > 0)
+        {
+            this.lastRestockSignature = string.Empty;
         }
 
         this.Rounds++;
@@ -318,11 +415,20 @@ public sealed class GoalRunner(
     {
         reason = string.Empty;
 
+        // 自動でやり直すかどうかは、この 1 回の判断ごとに決め直す。
+        this.retryAfterOnFinish = null;
+
         var preset = this.Preset ?? Plugin.C.Presets.FirstOrDefault(x => x.Id == this.presetId);
 
         if (preset is null)
         {
             reason = "プリセットが見つかりません";
+            return false;
+        }
+
+        if (preset.Rewards.Count == 0)
+        {
+            reason = "欲しいアイテムが選ばれていません";
             return false;
         }
 
@@ -352,7 +458,10 @@ public sealed class GoalRunner(
         {
             if (this.monitor.RequestManualRun(preset, out var exchangeReason))
             {
-                this.BeginWaiting(GoalStep.Exchanging, $"交換へ向かいます（残り {TotalRemaining(goal)} 個）");
+                // 監視の判断も残す。始まらなかったときに理由をたどれるようにするため。
+                this.BeginWaiting(
+                    GoalStep.Exchanging,
+                    $"交換へ向かいます（残り {TotalRemaining(goal)} 個）… {exchangeReason}");
                 return true;
             }
 
@@ -459,12 +568,23 @@ public sealed class GoalRunner(
 
         if (shortfalls.Count > 0 && signature != this.lastRestockSignature)
         {
-            var bell = this.restock.DescribeBell();
-
-            if (!bell.StartsWith("呼び鈴が見つかりました", StringComparison.Ordinal))
+            // 文言ではなく真偽で判定する。画面の文言を直しても動作が変わらないように。
+            if (!RetainerRestockRunner.IsBellNearby())
             {
+                var bell = this.restock.DescribeBell();
                 this.Note($"素材が {shortfalls.Count} 種類足りませんが、{bell}");
-                return this.BeginCraftWithinMaterials(preset, goal, out reason);
+
+                // 呼び鈴はいずれ近くに来る。歩いて行けば解消するので、自動でやり直す。
+                this.retryAfterOnFinish = BellRetryInterval;
+
+                // **取りに行けなかったことを理由に残す。**
+                // ここを落とすと、止まった理由が「いま持っている素材では 1 個も作れません」
+                // だけになり、素材を買い足しに行くことになる。本当は呼び鈴の前に立てば動く。
+                return this.BeginCraftWithinMaterials(
+                    preset,
+                    goal,
+                    $"{bell}。呼び鈴の近くへ移動してから、もう一度試してください",
+                    out reason);
             }
 
             this.lastRestockSignature = signature;
@@ -504,10 +624,27 @@ public sealed class GoalRunner(
         // 取りに行っても足りなかった。作れるぶんだけ作る。
         if (shortfalls.Count > 0)
         {
-            return this.BeginCraftWithinMaterials(preset, goal, out reason);
+            return this.BeginCraftWithinMaterials(
+                preset,
+                goal,
+                $"リテイナーから取り出しても足りませんでした（{DescribeShortfalls(shortfalls)}）",
+                out reason);
         }
 
         return this.StartCraft(plan, goal, out reason);
+    }
+
+    /// <summary>足りない素材を、名前と個数で並べる。上位 3 件まで。</summary>
+    private static string DescribeShortfalls(IReadOnlyList<PlanMaterial> shortfalls)
+    {
+        var top = shortfalls
+            .OrderByDescending(x => x.Shortfall)
+            .Take(3)
+            .Select(x => $"{x.Name} があと {x.Shortfall}");
+
+        var text = string.Join(" / ", top);
+
+        return shortfalls.Count > 3 ? $"{text} ほか {shortfalls.Count - 3} 種類" : text;
     }
 
     /// <summary>
@@ -516,7 +653,11 @@ public sealed class GoalRunner(
     /// 取り出しても足りなかったときに通る。**途中まででも成果が残る。**
     /// 何もせず止めると、集めた素材がそのまま鞄を塞ぐだけになる。
     /// </summary>
-    private bool BeginCraftWithinMaterials(ExchangePreset preset, ScripGoal goal, out string reason)
+    /// <param name="cause">
+    /// なぜ手持ちだけで作ることになったか。
+    /// 0 個で失敗したときの理由に必ず混ぜる。**素材不足と呼び鈴不在は別の原因。**
+    /// </param>
+    private bool BeginCraftWithinMaterials(ExchangePreset preset, ScripGoal goal, string cause, out string reason)
     {
         var plan = this.craftPlans.BuildPlan(
             preset.CraftCollectableItemId,
@@ -526,10 +667,12 @@ public sealed class GoalRunner(
 
         if (plan is null || plan.Crafts == 0)
         {
-            reason = plan is not null && plan.Notes.Count > 0
+            var detail = plan is not null && plan.Notes.Count > 0
                 ? string.Join(" / ", plan.Notes)
                 : "素材が足りないため作れません";
 
+            // 本当の原因を先に書く。あとに書くと読み飛ばされる。
+            reason = string.IsNullOrEmpty(cause) ? detail : $"{cause}（{detail}）";
             return false;
         }
 
@@ -549,6 +692,19 @@ public sealed class GoalRunner(
             return false;
         }
 
+        // 頼めたことと、動き出したことは別。
+        // Artisan への依頼がその場で失敗すると、Start は true を返したのに
+        // 走っていない状態になる。そのまま待つと 90 秒後に「始まりませんでした」とだけ出て、
+        // 本当の理由が消える。
+        if (!this.craft.IsRunning)
+        {
+            reason = string.IsNullOrEmpty(this.craft.LastFailure)
+                ? "製作が始まりませんでした"
+                : this.craft.LastFailure;
+
+            return false;
+        }
+
         this.BeginWaiting(
             GoalStep.Crafting,
             goal.Endless
@@ -560,6 +716,9 @@ public sealed class GoalRunner(
     /// <summary>依頼を出した直後の状態にする。動き出すのを待つ。</summary>
     private void BeginWaiting(GoalStep step, string detail)
     {
+        // 何かを始められた。あとで終わるときに、やり直しの予約を持ち越さない。
+        this.retryAfterOnFinish = null;
+
         this.Step = step;
         this.StatusDetail = detail;
         this.observedBusy = false;
@@ -677,8 +836,7 @@ public sealed class GoalRunner(
     private void Finish(GoalStep step, string detail)
     {
         // 握ったままにしない。ここを通さないと、以後どのプリセットも自動発火しなくなる。
-        this.monitor.PreferredPresetId = Guid.Empty;
-        this.monitor.SuppressAutoStart = false;
+        this.ReleaseMonitor();
 
         // 届かずに終わったなら、同じ条件ですぐ走り出さないよう覚えておく。
         if (this.presetId != Guid.Empty)
@@ -688,10 +846,15 @@ public sealed class GoalRunner(
 
             if (goal is null || !goal.Achieved)
             {
-                this.blocked[this.presetId] = detail;
+                var retryAt = this.retryAfterOnFinish is null
+                    ? (DateTime?)null
+                    : DateTime.UtcNow.Add(this.retryAfterOnFinish.Value);
+
+                this.blocked[this.presetId] = new GoalBlock(detail, retryAt);
             }
         }
 
+        this.retryAfterOnFinish = null;
         this.lastRestockSignature = string.Empty;
 
         this.Note($"終了: {detail}");

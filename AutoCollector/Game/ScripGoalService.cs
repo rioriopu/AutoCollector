@@ -9,7 +9,9 @@ namespace AutoCollector.Game;
 /// <param name="Want">最終的に持っていたい数。0 は上限なし。</param>
 /// <param name="Held">いま持っている数。</param>
 /// <param name="Remaining">あと何個交換すればよいか。</param>
-/// <param name="Cost">1 個あたりのスクリップ。</param>
+/// <param name="Cost">1 回の交換あたりのスクリップ。**1 個あたりではない。**</param>
+/// <param name="PerTrade">1 回の交換でもらえる個数。たいてい 1 だが、まとめて渡す品もある。</param>
+/// <param name="Trades">残りをそろえるのに要る交換回数。</param>
 /// <param name="Subtotal">残りぶんに要るスクリップ。</param>
 public sealed record GoalItem(
     uint RewardItemId,
@@ -18,6 +20,8 @@ public sealed record GoalItem(
     int Held,
     int Remaining,
     uint Cost,
+    uint PerTrade,
+    int Trades,
     long Subtotal,
     bool Unlimited);
 
@@ -91,7 +95,7 @@ public sealed class ScripGoalService(
     /// 費用を引くには系統と種別を総なめする必要がある。毎フレーム引くと重い。
     /// 交換所の値段は遊んでいるあいだ変わらないので、1 度引けば使い回せる。
     /// </summary>
-    private readonly Dictionary<(uint Reward, uint Currency), uint> costCache = [];
+    private readonly Dictionary<(uint Reward, uint Currency), (uint Cost, uint PerTrade)> costCache = [];
 
     /// <summary>このプリセットの目標を逆算する。通貨を解決できなければ null。</summary>
     public ScripGoal? Build(ExchangePreset preset)
@@ -112,25 +116,26 @@ public sealed class ScripGoalService(
                 ? owned
                 : 0;
 
-            var cost = this.FindCost(entry.RewardItemId, currencyItemId);
+            var (cost, perTrade) = this.FindOffer(entry.RewardItemId, currencyItemId);
 
             // 上限なしは「いくつ欲しいか」が決まらない。終わりを決めずに回す。
             if (entry.OwnedLimit <= 0)
             {
-                items.Add(new GoalItem(entry.RewardItemId, name, 0, held, 0, cost, 0, true));
+                items.Add(new GoalItem(entry.RewardItemId, name, 0, held, 0, cost, perTrade, 0, 0, true));
                 continue;
             }
 
             var remaining = Math.Max(0, entry.OwnedLimit - held);
-            var subtotal = (long)remaining * cost;
+
+            // **交換 1 回で 2 個以上もらえる品がある。**
+            // 個数ぶん交換すると、要るスクリップも作る収集品もその倍数だけ多くなる。
+            // 要るのは回数であって個数ではない。
+            var trades = (remaining + (int)perTrade - 1) / (int)perTrade;
+            var subtotal = (long)trades * cost;
 
             required += subtotal;
-            items.Add(new GoalItem(entry.RewardItemId, name, entry.OwnedLimit, held, remaining, cost, subtotal, false));
-
-            if (cost == 0)
-            {
-                notes.Add($"{name} の交換費用が分かりません。交換候補の一覧を作り直してください");
-            }
+            items.Add(new GoalItem(
+                entry.RewardItemId, name, entry.OwnedLimit, held, remaining, cost, perTrade, trades, subtotal, false));
         }
 
         var heldScrips = this.currency.TryGetCount(currencyItemId, out var scrips) ? scrips : 0;
@@ -146,13 +151,21 @@ public sealed class ScripGoalService(
         if (collectable is not null && collectable.HighReward > 0 && missing > 0)
         {
             // 端数は切り上げる。足りないまま止まるより、1 個多く作るほうがよい。
-            needed = (int)((missing + collectable.HighReward - 1) / collectable.HighReward);
+            // 上限に桁の大きな数を入れられるため、int に収まるところで頭打ちにする。
+            // あふれて負になると「作る個数を計算できません」という的外れな理由で止まる。
+            var raw = (missing + collectable.HighReward - 1) / collectable.HighReward;
+            needed = (int)Math.Min(int.MaxValue, raw);
         }
 
-        // 所持の上限がどれにも入っていなければ、終わりを決めずに回す。
+        // **上限なしの品が 1 件でもあれば、終わりは無い。**
+        //
+        // 上限ありと混ぜたとき、上限ありのぶんだけで「届いた」と数えていた。
+        // 上限なしの品は 1 個も交換されないまま「目標に届いています」と出て、
+        // 二度と走らなくなっていた。
+        var hasUnlimited = items.Any(x => x.Unlimited);
         var hasGoal = items.Any(x => !x.Unlimited);
-        var endless = !hasGoal && preset.Rewards.Count > 0;
-        var achieved = hasGoal && items.Where(x => !x.Unlimited).All(x => x.Remaining == 0);
+        var endless = hasUnlimited;
+        var achieved = hasGoal && !hasUnlimited && items.Where(x => !x.Unlimited).All(x => x.Remaining == 0);
 
         // まだ買う必要がある品のうち、いちばん安い費用。
         // これだけ持っていれば 1 個は交換できる、という判断に使う。
@@ -165,7 +178,16 @@ public sealed class ScripGoalService(
 
         if (endless)
         {
-            notes.Add("所持の上限が 0 のため、終わりを決めずに回します（素材が尽きるまで）");
+            notes.Add(hasGoal
+                ? "上限なしの品があるため、終わりを決めずに回します（素材が尽きるまで）"
+                : "所持の上限が 0 のため、終わりを決めずに回します（素材が尽きるまで）");
+        }
+
+        // 費用が引けないと、要るスクリップが 0 になって「もう足りている」に化ける。
+        // 黙って進めず、はっきり出す。
+        foreach (var item in items.Where(x => x.Cost == 0))
+        {
+            notes.Add($"{item.Name} の交換費用を読み取れません。この品は計算に入っていません");
         }
 
         return new ScripGoal(
@@ -190,7 +212,7 @@ public sealed class ScripGoalService(
     /// 交換候補の索引（ExchangeResolver）は作るのに時間がかかるため、
     /// 費用を知りたいだけのここでは使わない。
     /// </summary>
-    private uint FindCost(uint rewardItemId, uint currencyItemId)
+    private (uint Cost, uint PerTrade) FindOffer(uint rewardItemId, uint currencyItemId)
     {
         var key = (rewardItemId, currencyItemId);
 
@@ -209,8 +231,9 @@ public sealed class ScripGoalService(
                     {
                         if (offer.RewardItemId == rewardItemId)
                         {
-                            this.costCache[key] = offer.CurrencyCost;
-                            return offer.CurrencyCost;
+                            var found = (offer.CurrencyCost, Math.Max(1u, offer.RewardQuantity));
+                            this.costCache[key] = found;
+                            return found;
                         }
                     }
                 }
@@ -221,7 +244,9 @@ public sealed class ScripGoalService(
             this.anomalyLog.Warn("Goal", $"ItemId {rewardItemId} の交換費用を引けませんでした: {ex.Message}");
         }
 
-        return 0;
+        // 引けなかったことは控えない。
+        // 交換画面の一覧はあとから作られることがあり、控えると 0 のまま固定されてしまう。
+        return (0, 1);
     }
 
     private static string ItemName(uint itemId)
