@@ -151,6 +151,68 @@ public sealed class CurrencyService(AnomalyLog anomalyLog)
         return row?.StackSize;
     }
 
+    /// <summary>
+    /// クリスタルの所持数。
+    ///
+    /// **クリスタルは鞄に入らない。** 専用の入れ物（<c>Crystals</c>）に入る。
+    /// 枠を使わない代わりに、鞄を見る数え方では 0 になる。
+    /// 収集品のときと同じで、入れ物を直接見るのが確実。
+    /// </summary>
+    public bool TryGetCrystalCount(uint itemId, out int count)
+    {
+        count = 0;
+
+        if (itemId == 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            unsafe
+            {
+                var manager = InventoryManager.Instance();
+
+                if (manager is null)
+                {
+                    return false;
+                }
+
+                var container = manager->GetInventoryContainer(InventoryType.Crystals);
+
+                if (container is null || !container->IsLoaded)
+                {
+                    return false;
+                }
+
+                var total = 0;
+
+                for (var i = 0; i < container->Size; i++)
+                {
+                    var slot = container->GetInventorySlot(i);
+
+                    if (slot is null || slot->ItemId == 0)
+                    {
+                        continue;
+                    }
+
+                    if (slot->GetBaseItemId() == itemId)
+                    {
+                        total += slot->Quantity;
+                    }
+                }
+
+                count = total;
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Error("Currency", $"ItemId {itemId} のクリスタル所持数を数えられませんでした: {ex.Message}");
+            return false;
+        }
+    }
+
     /// <summary>所持枠の空き数。</summary>
     /// <summary>
     /// 実効の所持上限。

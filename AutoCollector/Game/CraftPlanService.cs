@@ -39,6 +39,10 @@ public sealed record CraftJob(uint CraftType, string Name);
 /// </param>
 /// <param name="RecipeId">作れる素材の場合のレシピ。作れないなら 0。</param>
 /// <param name="AmountResult">そのレシピが 1 回で作る数。</param>
+/// <param name="IsCrystal">
+/// クリスタルか。**鞄ではなく専用の入れ物に入るため、枠を使わない。**
+/// 足りなければ引き出す点はほかの素材と同じ。
+/// </param>
 public sealed record PlanMaterial(
     uint ItemId,
     string Name,
@@ -50,7 +54,8 @@ public sealed record PlanMaterial(
     bool IsIntermediate,
     uint RecipeId,
     int AmountResult,
-    IReadOnlyList<PlanMaterial> SubMaterials)
+    IReadOnlyList<PlanMaterial> SubMaterials,
+    bool IsCrystal = false)
 {
     /// <summary>
     /// いま鞄にあるものだけで用意できるか。
@@ -347,14 +352,12 @@ public sealed class CraftPlanService(
                     continue;
                 }
 
-                // クリスタルは鞄を使わない。
-                if (this.crystalCategoryRowId != 0 && item.ItemUICategory.RowId == this.crystalCategoryRowId)
-                {
-                    continue;
-                }
+                // クリスタルは鞄を使わないが、足りなければ引き出す。
+                var isCrystal = this.crystalCategoryRowId != 0
+                    && item.ItemUICategory.RowId == this.crystalCategoryRowId;
 
                 var needed = perCraft * crafts;
-                var held = this.currency.TryGetCount(ingredient.RowId, out var have) ? have : 0;
+                var held = this.HeldOf(ingredient.RowId, isCrystal);
 
                 list.Add(new PlanMaterial(
                     ingredient.RowId,
@@ -367,7 +370,8 @@ public sealed class CraftPlanService(
                     false,
                     0,
                     1,
-                    []));
+                    [],
+                    isCrystal));
             }
         }
         catch (Exception ex)
@@ -568,6 +572,22 @@ public sealed class CraftPlanService(
         return this.recipeByResult.TryGetValue(resultItemId, out recipeRowId) && recipeRowId != 0;
     }
 
+    /// <summary>
+    /// 所持数。クリスタルは入れ物が違うので、そちらを見る。
+    ///
+    /// 鞄を見る数え方ではクリスタルは 0 になる。
+    /// 0 と読むと、持っているのに「足りない」と判断して引き出しに行くことになる。
+    /// </summary>
+    private int HeldOf(uint itemId, bool isCrystal)
+    {
+        if (isCrystal)
+        {
+            return this.currency.TryGetCrystalCount(itemId, out var crystals) ? crystals : 0;
+        }
+
+        return this.currency.TryGetCount(itemId, out var have) ? have : 0;
+    }
+
     /// <summary>この個数を作るのに要る素材と、新たに要る枠数。</summary>
     private List<PlanMaterial>? BuildMaterials(CraftableCollectable target, int crafts, out int totalNewSlots)
     {
@@ -598,22 +618,26 @@ public sealed class CraftPlanService(
                 continue;
             }
 
-            // クリスタルは鞄ではなく専用の入れ物に入る。枠にも引き出しにも数えない。
-            if (this.crystalCategoryRowId != 0 && item.ItemUICategory.RowId == this.crystalCategoryRowId)
-            {
-                continue;
-            }
+            // クリスタルは鞄ではなく専用の入れ物に入る。
+            // **枠は使わないが、足りなければ引き出す。** 数に入れないと製作が止まる。
+            var isCrystal = this.crystalCategoryRowId != 0
+                && item.ItemUICategory.RowId == this.crystalCategoryRowId;
 
             var needed = perCraft * crafts;
-            var held = this.currency.TryGetCount(ingredient.RowId, out var have) ? have : 0;
+            var held = this.HeldOf(ingredient.RowId, isCrystal);
             var shortfall = Math.Max(0, needed - held);
 
-            var stack = Math.Max(1, (int)item.StackSize);
+            var newSlots = 0;
 
-            // いま持っているぶんで埋まっている枠と、引き出したあとの枠の差。
-            var slotsNow = (held + stack - 1) / stack;
-            var slotsAfter = (held + shortfall + stack - 1) / stack;
-            var newSlots = Math.Max(0, slotsAfter - slotsNow);
+            if (!isCrystal)
+            {
+                var stack = Math.Max(1, (int)item.StackSize);
+
+                // いま持っているぶんで埋まっている枠と、引き出したあとの枠の差。
+                var slotsNow = (held + stack - 1) / stack;
+                var slotsAfter = (held + shortfall + stack - 1) / stack;
+                newSlots = Math.Max(0, slotsAfter - slotsNow);
+            }
 
             totalNewSlots += newSlots;
 
@@ -646,7 +670,8 @@ public sealed class CraftPlanService(
                 isIntermediate,
                 isIntermediate ? subRecipeRowId : 0,
                 subAmountResult,
-                subMaterials));
+                subMaterials,
+                isCrystal));
         }
 
         return list;
