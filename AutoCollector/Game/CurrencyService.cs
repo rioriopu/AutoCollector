@@ -180,7 +180,11 @@ public sealed class CurrencyService(AnomalyLog anomalyLog)
 
                 var container = manager->GetInventoryContainer(InventoryType.Crystals);
 
-                if (container is null || !container->IsLoaded)
+                // 読み込み済みかどうかでは判定しない。
+                // そう報告しないことがあり、持っているのに 0 と読むと、
+                // 足りている物をリテイナーへ取りに行くことになる。
+                // 枠ごとに中身を確かめるので、空を読んでも害はない。
+                if (container is null || container->Size <= 0)
                 {
                     return false;
                 }
