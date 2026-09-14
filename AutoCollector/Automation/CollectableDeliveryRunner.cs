@@ -35,6 +35,26 @@ public sealed class CollectableDeliveryRunner(
     /// <summary>納品ボタンが押せるようになるまでの確認回数の上限。</summary>
     private const int TradeReadyAttempts = 20;
 
+    /// <summary>
+    /// 撃ってから読みにいくまでの間。
+    ///
+    /// **ここだけは待つ。** 反映の途中を読むと、減る前の所持数を見て
+    /// 「納品できなかった」と誤判定し、同じ品をもう一度撃つことになる。
+    ///
+    /// 実測ではスクリップは撃ってから 0.2 秒ほどで入る。
+    /// 少し余裕を取り、それ以降は「変わったか」で進む。
+    /// </summary>
+    private static readonly TimeSpan VerifySettle = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>
+    /// 反映を待つ上限。
+    ///
+    /// 以前はここまで一律で待っていた（1200 ミリ秒）。
+    /// いまは変わったのを見た時点で進むので、これは「変わらなかった」と
+    /// 判断するまでの猶予でしかない。長めに取ってよい。
+    /// </summary>
+    private static readonly TimeSpan VerifyLimit = TimeSpan.FromMilliseconds(2500);
+
     private readonly AnomalyLog anomalyLog = anomalyLog;
     private readonly CollectablesShopService shop = shop;
     private readonly CurrencyService currency = currency;
@@ -59,7 +79,11 @@ public sealed class CollectableDeliveryRunner(
     private int ownedBefore;
     private IReadOnlyList<(uint ItemId, string Name, int Count)> scripBefore = [];
     private int tradeAttempts;
+    /// <summary>反映を待つ上限。ここを過ぎても変わらなければ原因を切り分ける。</summary>
     private DateTime waitUntilUtc;
+
+    /// <summary>この時刻までは読みにいかない。反映の途中を読むと取り違える。</summary>
+    private DateTime verifyFromUtc;
 
     public DeliveryStep Step { get; private set; } = DeliveryStep.Idle;
 
@@ -238,8 +262,16 @@ public sealed class CollectableDeliveryRunner(
 
             this.Step = DeliveryStep.Verify;
 
-            // 所持数への反映は同じフレームでは終わらない。
-            this.waitUntilUtc = DateTime.UtcNow.AddMilliseconds(1200);
+            // **固定で待たない。反映されたかどうかで進む。**
+            //
+            // 以前は一律 1200 ミリ秒待っていた。実測ではスクリップは
+            // 撃ってから 0.2 秒ほどで入っており、残りの 1 秒は無駄に待っていた。
+            // 納品 1 個あたり約 1.5 秒かかっていたのはこれが原因。
+            //
+            // 撃った直後は読みにいかない。反映の途中を読むと、
+            // 減る前の所持数を見て「納品できなかった」と誤判定する。
+            this.verifyFromUtc = DateTime.UtcNow.Add(VerifySettle);
+            this.waitUntilUtc = DateTime.UtcNow.Add(VerifyLimit);
             return;
         }
 
@@ -252,7 +284,8 @@ public sealed class CollectableDeliveryRunner(
     /// <summary>撃ったことではなく、所持数の変化で成否を判断する。</summary>
     private void TickVerify()
     {
-        if (DateTime.UtcNow < this.waitUntilUtc)
+        // 反映の途中を読まないぶんだけは待つ。
+        if (DateTime.UtcNow < this.verifyFromUtc)
         {
             return;
         }
@@ -296,6 +329,15 @@ public sealed class CollectableDeliveryRunner(
             {
                 break;
             }
+        }
+
+        // まだ反映されていないだけかもしれない。上限まではもう少し待つ。
+        //
+        // 変わったのを見た時点で進むので、速い環境ほど速く回る。
+        // 上限を過ぎても変わらなければ、以下のとおり原因を切り分ける。
+        if ((ownedAfter >= this.ownedBefore || gainedAmount <= 0) && DateTime.UtcNow < this.waitUntilUtc)
+        {
+            return;
         }
 
         if (ownedAfter >= this.ownedBefore || gainedAmount <= 0)
