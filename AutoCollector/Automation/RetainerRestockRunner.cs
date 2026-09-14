@@ -62,6 +62,19 @@ public enum RestockStep
     Error,
 }
 
+/// <summary>覚えている持ち物から見た、リテイナーの在庫の見立て。</summary>
+public enum RetainerStock
+{
+    /// <summary>覚えていない相手がいる。行ってみないと分からない。</summary>
+    Unknown,
+
+    /// <summary>頼みたい品を持っている相手がいる。行く価値がある。</summary>
+    Available,
+
+    /// <summary>全員の持ち物を覚えていて、どこにも無い。行っても無駄。</summary>
+    Depleted,
+}
+
 /// <summary>取り出したい品 1 件。</summary>
 public sealed class RestockRequest
 {
@@ -238,6 +251,94 @@ public sealed unsafe class RetainerRestockRunner(
 
     /// <summary>いま取り出そうとしているもの。表示用。</summary>
     public IReadOnlyList<RestockRequest> Requests => this.requests;
+
+    /// <summary>
+    /// 覚えている持ち物から、頼みたい品がリテイナーにあるかを見立てる。
+    ///
+    /// **行く前に判断するためのもの。**
+    /// 呼び鈴まで歩いて全員を開いて、何も無くて帰ってくるのは時間の無駄。
+    /// 覚えている範囲で「どこにも無い」と言い切れるなら、行かずに止める。
+    ///
+    /// 覚えていない相手が 1 人でもいれば <see cref="RetainerStock.Unknown"/>。
+    /// **知らないことを「無い」と決めつけない。** 行って確かめる。
+    /// </summary>
+    public RetainerStock JudgeStock(IReadOnlyList<RestockRequest> wanted, out string detail)
+    {
+        detail = string.Empty;
+
+        var targets = wanted.Where(x => x.ItemId != 0 && x.Remaining > 0).ToList();
+
+        if (targets.Count == 0)
+        {
+            return RetainerStock.Depleted;
+        }
+
+        // 覚えていない相手が 1 人でもいれば、言い切れない。
+        var known = 0;
+
+        try
+        {
+            for (uint i = 0; i < 10; i++)
+            {
+                var retainer = RetainerManager.Instance()->GetRetainerBySortedIndex(i);
+
+                if (retainer is null || retainer->RetainerId == 0)
+                {
+                    continue;
+                }
+
+                if (!this.inventoryStore.IsFresh(retainer->NameString))
+                {
+                    return RetainerStock.Unknown;
+                }
+
+                known++;
+            }
+        }
+        catch
+        {
+            return RetainerStock.Unknown;
+        }
+
+        // 1 人も数えられなかった。読めていないだけかもしれない。
+        // **数えられないことを「無い」と決めつけない。**
+        if (known == 0)
+        {
+            return RetainerStock.Unknown;
+        }
+
+        // 1 つでも持っている品があるなら、行く価値がある。
+        // 足りない品があっても、取れるだけ取って作れるぶんを作る。
+        var missing = new List<string>();
+
+        foreach (var target in targets)
+        {
+            if (this.inventoryStore.TotalHeld(target.ItemId) > 0)
+            {
+                return RetainerStock.Available;
+            }
+
+            // **代わりの素材も見る。**
+            //
+            // 中間素材は、完成品が無くても素材があれば取りに行く価値がある
+            // （TryExpandFallback が実際にそうする）。
+            // ここで完成品だけを見ていたため、黒麦粉が 0 というだけで
+            // 「枯渇」と判断し、黒麦が 500 個あっても取りに行かなくなっていた。
+            var fallbackHeld = target.Fallback.Sum(x => this.inventoryStore.TotalHeld(x.ItemId));
+
+            if (fallbackHeld > 0)
+            {
+                return RetainerStock.Available;
+            }
+
+            missing.Add(target.Fallback.Count > 0
+                ? $"{target.Name}（あと {target.Remaining}・代わりの素材もありません）"
+                : $"{target.Name}（あと {target.Remaining}）");
+        }
+
+        detail = string.Join(" / ", missing);
+        return RetainerStock.Depleted;
+    }
 
     /// <summary>取り出しを始める。</summary>
     public bool Start(IReadOnlyList<RestockRequest> wanted, out string reason)

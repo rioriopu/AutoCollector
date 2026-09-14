@@ -474,13 +474,6 @@ public sealed partial class MainWindow
             }
         }
 
-        if (snap.FreeBagSlots is { } free && free <= Plugin.C.KeepFreeInventorySlots)
-        {
-            Row(
-                ImGuiColors.DalamudYellow,
-                $"所持枠の空きが {free} しかないため交換できません（交換後に {Plugin.C.KeepFreeInventorySlots} 枠を残す設定です）。");
-        }
-
         foreach (var p in snap.Presets)
         {
             if (!p.Enabled && p.DisabledReason is { } reason)

@@ -2438,12 +2438,12 @@ public sealed unsafe class ExchangeExecutor(
         // 単に 1 枠空いていればよいのではない。
         // AutoRetainer は所持枠が空いていないキャラクタを処理対象から外して保存するため、
         // 交換で枠を使い切ると、あとでリテイナーが回らなくなる。
-        var keepFree = Math.Max(0, Plugin.C.KeepFreeInventorySlots);
+        var keepFree = this.KeepFreeSlots();
         if (!this.currencyService.TryGetEmptyBagSlots(out var freeSlots) || freeSlots <= keepFree)
         {
             this.Fail(
                 ExchangeFailure.NoBagSpace,
-                $"所持枠の空きが {freeSlots} です。{keepFree} 枠を残す設定のため交換しません");
+                $"所持枠の空きが {freeSlots} しかありません（{keepFree} 枠は残します）");
             return;
         }
 
@@ -2570,12 +2570,12 @@ public sealed unsafe class ExchangeExecutor(
             return;
         }
 
-        var keepFree = Math.Max(0, Plugin.C.KeepFreeInventorySlots);
+        var keepFree = this.KeepFreeSlots();
         if (!this.currencyService.TryGetEmptyBagSlots(out var freeSlots) || freeSlots <= keepFree)
         {
             this.Fail(
                 ExchangeFailure.NoBagSpace,
-                $"所持枠の空きが {freeSlots} です。{keepFree} 枠を残す設定のため交換しません");
+                $"所持枠の空きが {freeSlots} しかありません（{keepFree} 枠は残します）");
             return;
         }
 
@@ -3170,7 +3170,7 @@ public sealed unsafe class ExchangeExecutor(
         }
 
         // 所持枠が無ければ終わり。残す枠の設定も守る。
-        var keepFree = Math.Max(0, Plugin.C.KeepFreeInventorySlots);
+        var keepFree = this.KeepFreeSlots();
         if (!this.currencyService.TryGetEmptyBagSlots(out var freeSlots) || freeSlots <= keepFree)
         {
             stopReason = $"所持枠の空きが {freeSlots} になりました（{keepFree} 枠を残す設定）";
@@ -3478,6 +3478,36 @@ public sealed unsafe class ExchangeExecutor(
     /// 失敗しても握った制御は必ず手放す。
     /// ここで解放しないと、AutoRetainer を抑制したまま止まり続けることになる。
     /// </summary>
+    /// <summary>
+    /// 交換で埋めずに残しておく所持枠。
+    ///
+    /// **設定タブの項目は廃止した。** プリセットの「残す空き枠」だけで決める。
+    /// 2 つあると、片方を直しても交換の数が変わらず、理由が読めなくなる。
+    ///
+    /// ただし 0 にはしない。**鞄を空き 0 まで埋めてはいけない。**
+    /// AutoRetainer は所持枠が空いていないキャラクタを処理対象から外し、
+    /// その判断を設定へ保存する（既定の下限は 2 枠）。
+    /// 埋め切ると、手で戻すまでリテイナーが回らなくなる。
+    /// 次の周の製作も「空き枠が 0」で始められなくなる。
+    /// </summary>
+    private int KeepFreeSlots()
+    {
+        const int floor = 2;
+
+        var preset = this.session is { } session
+            ? Plugin.C.Presets.FirstOrDefault(x => x.Id == session.PresetId)
+            : null;
+
+        // 目標つきのプリセットは、そこで決めた枠を使う。
+        // 交換した品と、次に作る収集品の両方が同じ鞄へ入るため。
+        if (preset is { CraftCollectableItemId: not 0 })
+        {
+            return Math.Max(floor, preset.CraftKeepFreeSlots);
+        }
+
+        return floor;
+    }
+
     private void Fail(ExchangeFailure failure, string detail)
     {
         this.Step = ExchangeStep.Error;

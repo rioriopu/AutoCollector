@@ -129,6 +129,9 @@ public sealed class GoalRunner(
     /// <summary>直前に取りに行った不足の内訳。同じ不足で 2 度行かないために覚える。</summary>
     private string lastRestockSignature = string.Empty;
 
+    /// <summary>枯渇をチャットへ出したか。1 回の実行で 1 度だけにする。</summary>
+    private bool announcedDepletion;
+
     /// <summary>
     /// 目標に届かずに終わったプリセットと、その理由。
     ///
@@ -318,6 +321,7 @@ public sealed class GoalRunner(
         this.LastFailure = string.Empty;
         this.Rounds = 0;
         this.idleRounds = 0;
+        this.announcedDepletion = false;
         this.snapshot = this.TakeSnapshot(preset);
 
         // 走っているあいだは、この 1 件だけを相手にする。
@@ -655,6 +659,34 @@ public sealed class GoalRunner(
                 })
                 .ToList();
 
+            // **行く前に、あるかどうかを見立てる。**
+            //
+            // 呼び鈴まで歩いて全員を開いて、何も無くて帰ってくるのは時間の無駄。
+            // 覚えている持ち物で「どこにも無い」と言い切れるなら、行かずに止める。
+            //
+            // 覚えていない相手が 1 人でもいれば行って確かめる。
+            // 知らないことを「無い」と決めつけない。
+            var stock = this.restock.JudgeStock(requests, out var stockDetail);
+
+            if (stock == RetainerStock.Depleted)
+            {
+                // 取れるぶんがあるなら、まずそれを作ってから枯渇と判断する。
+                if (this.BeginCraftWithinMaterials(preset, goal, string.Empty, out reason))
+                {
+                    return true;
+                }
+
+                var depleted = string.IsNullOrEmpty(stockDetail)
+                    ? "素材が尽きました"
+                    : $"素材が尽きました（{stockDetail}）";
+
+                this.Note($"リテイナーにも残っていません: {stockDetail}");
+                this.AnnounceDepleted(preset, stockDetail);
+
+                reason = depleted;
+                return false;
+            }
+
             if (!this.restock.Start(requests, out var restockReason))
             {
                 reason = $"素材を取り出せません（{restockReason}）";
@@ -672,11 +704,20 @@ public sealed class GoalRunner(
         // 中間素材は数えない。素材が鞄にあれば、先に作ってから進む。
         if (blocking.Count > 0)
         {
-            return this.BeginCraftWithinMaterials(
-                preset,
-                goal,
-                $"リテイナーから取り出しても足りませんでした（{DescribeShortfalls(blocking)}）",
-                out reason);
+            var shortage = DescribeShortfalls(blocking);
+
+            if (this.BeginCraftWithinMaterials(
+                    preset,
+                    goal,
+                    $"リテイナーから取り出しても足りませんでした（{shortage}）",
+                    out reason))
+            {
+                return true;
+            }
+
+            // 取りに行っても足りず、手持ちでも 1 個も作れない。そこで打ち止め。
+            this.AnnounceDepleted(preset, shortage);
+            return false;
         }
 
         // 自分で作る素材があるなら、そう分かるように残す。
@@ -702,6 +743,39 @@ public sealed class GoalRunner(
         => Svc.Condition[ConditionFlag.Crafting]
         || Svc.Condition[ConditionFlag.PreparingToCraft]
         || Svc.Condition[ConditionFlag.ExecutingCraftingAction];
+
+    /// <summary>
+    /// 素材が尽きたことを、自分だけに見えるチャットへ出す。
+    ///
+    /// 画面を見ていないと止まったことに気づけない。
+    /// 放置して戻ってきたときに、何が起きたかがチャット欄に残っているようにする。
+    ///
+    /// **自分だけに見える。** ほかの人へは流れない。
+    /// </summary>
+    private void AnnounceDepleted(ExchangePreset preset, string detail)
+    {
+        // 1 回の実行で 1 度だけ。
+        // 止まるまでに何度かこの判断を通ることがあり、そのたびに出すと連呼になる。
+        if (this.announcedDepletion)
+        {
+            return;
+        }
+
+        this.announcedDepletion = true;
+
+        try
+        {
+            var body = string.IsNullOrEmpty(detail)
+                ? $"[Auto Collector] アイテムが枯渇した為、「{preset.Name}」を停止します"
+                : $"[Auto Collector] アイテムが枯渇した為、「{preset.Name}」を停止します（{detail}）";
+
+            Svc.Chat.Print(body);
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Warn("Goal", $"チャットへ出せませんでした: {ex.Message}");
+        }
+    }
 
     /// <summary>足りない素材を、名前と個数で並べる。上位 3 件まで。</summary>
     private static string DescribeShortfalls(IReadOnlyList<PlanMaterial> shortfalls)

@@ -1303,7 +1303,7 @@ public sealed class PresetTab(Plugin plugin)
                     if (ImGui.IsItemHovered())
                     {
                         ImGui.SetTooltip(
-                            "1 回の移動でこの数まで交換します。0 にすると上限なし（通貨か所持枠が尽きるまで）。\n" +
+                            "1 回の移動でこの数まで交換します。0 なら 1 回で交換できる最大数を交換します。\n" +
                             "所持の上限が 0 なら、交換所へ行くたびにこの数ずつ交換し続けます。");
                     }
 
@@ -1379,7 +1379,7 @@ public sealed class PresetTab(Plugin plugin)
 
         ImGui.TextColored(
             ImGuiColors.DalamudGrey,
-            "  一括交換する個数 … スクリップ交換窓口で交換する数量。0 で上限なし");
+            "  一括交換する個数 … スクリップ交換窓口で交換する数量。0 なら 1 回で交換できる最大数");
         ImGui.TextColored(ImGuiColors.DalamudGrey, "  所持の上限 … この数まで持つように交換する。0 で上限なし");
 
         if (remove is not null)
