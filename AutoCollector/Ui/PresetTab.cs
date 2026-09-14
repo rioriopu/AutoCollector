@@ -999,18 +999,6 @@ public sealed class PresetTab(Plugin plugin)
             ImGuiColors.HealerGreen,
             $"  覚えている呼び鈴: {known.Value.X:F1}, {known.Value.Y:F1}, {known.Value.Z:F1}" +
             $"（全 {this.plugin.BellLocations.Count} エリア）");
-
-        ImGui.SameLine();
-
-        if (ImGui.SmallButton("忘れる##forgetbell"))
-        {
-            this.plugin.BellLocations.Forget(territory);
-        }
-
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip("呼び鈴が動いた・別の場所を覚えさせたいときに押してください。次にこのエリアへ入り直すと探し直します。");
-        }
     }
 
     /// <summary>
@@ -1349,11 +1337,26 @@ public sealed class PresetTab(Plugin plugin)
                     {
                         var shortfall = entry.OwnedLimit - have;
 
-                        ImGui.TextColored(
-                            shortfall <= 0 ? ImGuiColors.DalamudYellow : ImGuiColors.DalamudGrey,
-                            shortfall <= 0
-                                ? $"{ownedText} / 上限 {entry.OwnedLimit} → 飛ばします"
-                                : $"{ownedText} / 上限 {entry.OwnedLimit} → あと {Math.Min(shortfall, entry.Quantity > 0 ? entry.Quantity : shortfall)} 個");
+                        if (shortfall <= 0)
+                        {
+                            ImGui.TextColored(
+                                ImGuiColors.DalamudYellow,
+                                $"{ownedText} / 上限 {entry.OwnedLimit} → 飛ばします");
+                        }
+                        else
+                        {
+                            // **2 つの数を混ぜない。**
+                            // 「あと N 個」に 1 回ぶんの数を入れていたため、
+                            // 上限 50・一括 10 のとき「あと 10 個」と出て、
+                            // 目標まであと何個なのかが読み取れなかった。
+                            var perTrip = entry.Quantity > 0 ? Math.Min(shortfall, entry.Quantity) : shortfall;
+
+                            ImGui.TextColored(
+                                ImGuiColors.DalamudGrey,
+                                entry.Quantity > 0 && perTrip < shortfall
+                                    ? $"{ownedText} / 上限 {entry.OwnedLimit} → 目標まで {shortfall} 個（1 回の移動で {perTrip} 個ずつ）"
+                                    : $"{ownedText} / 上限 {entry.OwnedLimit} → 目標まで {shortfall} 個");
+                        }
                     }
                     else
                     {
@@ -1368,7 +1371,7 @@ public sealed class PresetTab(Plugin plugin)
                     if (entry.Quantity == 0)
                     {
                         ImGui.SameLine();
-                        ImGui.TextColored(ImGuiColors.DalamudYellow, "1 回で交換できる限り");
+                        ImGui.TextColored(ImGuiColors.DalamudYellow, "1 回で交換できる最大数を交換します");
                     }
                 }
             }
@@ -1376,8 +1379,8 @@ public sealed class PresetTab(Plugin plugin)
 
         ImGui.TextColored(
             ImGuiColors.DalamudGrey,
-            "  一括交換する個数 … 1 回の移動でこの数まで交換する。0 で上限なし");
-        ImGui.TextColored(ImGuiColors.DalamudGrey, "  所持の上限 … この数まで持つように交換する。足りないぶんだけ。0 で上限なし");
+            "  一括交換する個数 … スクリップ交換窓口で交換する数量。0 で上限なし");
+        ImGui.TextColored(ImGuiColors.DalamudGrey, "  所持の上限 … この数まで持つように交換する。0 で上限なし");
 
         if (remove is not null)
         {
