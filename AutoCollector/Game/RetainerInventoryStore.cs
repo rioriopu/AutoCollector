@@ -172,6 +172,31 @@ public sealed class RetainerInventoryStore(AnomalyLog anomalyLog)
     public int TotalHeld(uint itemId) => this.WhoHas(itemId).Sum(x => x.Quantity);
 
     /// <summary>
+    /// この相手の持ち物を、当てにできる新しさで覚えているか。
+    ///
+    /// **1 人ずつ見る。** 全体でいちばん古い記録を基準にすると、
+    /// 1 人だけ古いせいで、ほかの全員ぶんの記録まで使えなくなる。
+    /// </summary>
+    public bool IsFresh(string retainerName)
+    {
+        var all = this.Load();
+
+        return all.TryGetValue(retainerName, out var contents)
+            && DateTime.Now - contents.SeenAt <= StaleAfter;
+    }
+
+    /// <summary>この相手がこの品を何個持っているか。覚えていなければ 0。</summary>
+    public int HeldBy(string retainerName, uint itemId)
+    {
+        var all = this.Load();
+
+        return all.TryGetValue(retainerName, out var contents)
+            && contents.Items.TryGetValue(itemId, out var quantity)
+            ? quantity
+            : 0;
+    }
+
+    /// <summary>
     /// 覚えている中身が当てにできるか。
     ///
     /// 1 人も覚えていない、または記録が古い場合は false。

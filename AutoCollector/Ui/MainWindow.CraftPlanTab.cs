@@ -414,6 +414,26 @@ public sealed partial class MainWindow
                 ImGuiColors.HealerGreen,
                 $"リテイナーの持ち物: {inventory.Count} 人分を覚えています" +
                 (inventory.OldestSeenAt is { } oldest ? $"（最も古い記録 {oldest:MM/dd HH:mm}）" : string.Empty));
+
+            ImGui.TextColored(
+                ImGuiColors.DalamudGrey,
+                "  持っていないと分かっている相手は開きません。");
+
+            ImGui.SameLine();
+
+            // 手で出し入れすると記録とずれる。ずれたときに覚え直させる手段を置く。
+            if (ImGui.SmallButton("覚えた持ち物を忘れる##forgetretainer"))
+            {
+                inventory.Clear();
+                this.plugin.AnomalyLog.Info("Retainer", "リテイナーの持ち物の記録を消しました");
+            }
+
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(
+                    "記録を消すと、次の取り出しで全員を順に開いて覚え直します。\n" +
+                    "手で出し入れして記録とずれたときに使ってください。");
+            }
         }
         else
         {
