@@ -130,15 +130,32 @@ public sealed unsafe class RetainerRestockRunner(
     /// <summary>
     /// 呼び鈴を探す範囲。
     ///
-    /// **見えていれば拾う。足りないぶんは歩く。**
-    /// 以前は 10m 以内しか見ておらず、しかも歩かずにその場から話しかけていた。
+    /// **足りないぶんは歩く。距離で諦めない。**
+    /// 実際の上限は、こちらが決める数ではなく
+    /// <c>Svc.Objects</c> に載っているかどうか（ゲームが読み込んでいる範囲）。
+    /// 載っていないものは場所が分からないので、そもそも向かえない。
+    /// ここは「載っていれば拾う」という意味で広く取る。
+    ///
+    /// 以前は 10m 以内しか見ず、しかも歩かずにその場から話しかけていた。
     /// 10m は話しかけられる距離より遠いため、実機では
     /// 「距離が離れています」が出続けるだけで進まなかった（2026-09-14 実測）。
     /// </summary>
-    private const float BellSearchRange = 30f;
+    private const float BellSearchRange = 200f;
 
     /// <summary>この距離まで近づいてから話しかける。</summary>
     private const float BellInteractRange = 3.5f;
+
+    /// <summary>
+    /// 前に使えた呼び鈴の場所。エリアごとに覚える。
+    ///
+    /// **遠いと <c>Svc.Objects</c> に載らない。** 載らなければ場所が分からず向かえない。
+    /// 一度でも使えた場所を覚えておけば、載っていなくてもそこへ歩ける。
+    /// 近づけば読み込まれるので、あとは普段どおり。
+    ///
+    /// 覚えるのはこの実行のあいだだけ。保存はしない。
+    /// 家具の呼び鈴は動かせるため、古い場所を当てにし続けるほうが危ない。
+    /// </summary>
+    private static readonly Dictionary<uint, Vector3> KnownBells = [];
 
     /// <summary>
     /// リテイナーの持ち物が入る入れ物。
@@ -277,7 +294,8 @@ public sealed unsafe class RetainerRestockRunner(
             return false;
         }
 
-        if (FindBell() is null)
+        // 読み込まれていなくても、覚えている場所があれば歩いて行ける。
+        if (!IsBellReachable())
         {
             reason = this.LastFailure = $"近くに呼び鈴がありません（{DescribeNearby()}）";
             this.Note(reason);
@@ -460,6 +478,50 @@ public sealed unsafe class RetainerRestockRunner(
         return Math.Max(bag, crystals);
     }
 
+    /// <summary>
+    /// その場所へ歩く。まだ頼んでいなければ経路を頼む。
+    ///
+    /// 経路は 1 度だけ頼む。毎フレーム頼み直すと積み上がって動かなくなる。
+    /// </summary>
+    private void MoveTowards(Vector3 destination, string detail)
+    {
+        if (!this.navigation.IsAvailable)
+        {
+            this.Finish(RestockStep.Error, "vnavmesh が使えないため呼び鈴へ近寄れません");
+            return;
+        }
+
+        if (!this.bellMoveIssued)
+        {
+            if (!this.navigation.BeginMove(destination, BellInteractRange - 1f, out var failure))
+            {
+                this.Finish(RestockStep.Error, $"呼び鈴へ向かえません（{failure}）");
+                return;
+            }
+
+            this.bellMoveIssued = true;
+            this.Note(detail);
+            return;
+        }
+
+        var status = this.navigation.Tick(destination, BellInteractRange - 1f);
+
+        if (status is MoveStatus.Moving)
+        {
+            this.StatusDetail = detail;
+            return;
+        }
+
+        // 着いた、または届かなかった。次のフレームで呼び鈴を探し直す。
+        // 近づいていれば読み込まれているので、そこから普段どおり進む。
+        this.StopMoving();
+
+        if (status is not (MoveStatus.Arrived or MoveStatus.ShortOfTarget))
+        {
+            this.Finish(RestockStep.Error, "呼び鈴の場所まで行けませんでした");
+        }
+    }
+
     /// <summary>自分が始めた移動だけを止める。頼み直せるよう印も消す。</summary>
     private void StopMoving()
     {
@@ -484,10 +546,17 @@ public sealed unsafe class RetainerRestockRunner(
     {
         var bell = FindBell();
 
+        // まだ読み込まれていないだけかもしれない。覚えている場所があればそこへ歩く。
         if (bell is null)
         {
-            this.StopMoving();
-            this.Finish(RestockStep.Error, $"近くに呼び鈴がありません（{DescribeNearby()}）");
+            if (RememberedBell() is not { } remembered)
+            {
+                this.StopMoving();
+                this.Finish(RestockStep.Error, $"近くに呼び鈴がありません（{DescribeNearby()}）");
+                return;
+            }
+
+            this.MoveTowards(remembered, "覚えている呼び鈴の場所へ向かっています");
             return;
         }
 
@@ -1496,7 +1565,13 @@ public sealed unsafe class RetainerRestockRunner(
     /// **判定はここを使う。<see cref="DescribeBell"/> の戻り文字列で分岐しないこと。**
     /// 画面へ出す文言を直した瞬間に動作が変わる。実機でしか現れない壊れ方になる。
     /// </summary>
-    public static bool IsBellNearby() => FindBell() is not null;
+    /// <summary>
+    /// 話しかけられる呼び鈴へ行けるか。
+    ///
+    /// **「いま話しかけられるか」ではない。** 歩いて行けるかどうか。
+    /// 読み込まれているものが無くても、このエリアで前に使えた場所を覚えていれば行ける。
+    /// </summary>
+    public static bool IsBellReachable() => FindBell() is not null || RememberedBell() is not null;
 
     public string DescribeBell()
     {
@@ -1568,15 +1643,26 @@ public sealed unsafe class RetainerRestockRunner(
                 continue;
             }
 
-            // 見えている範囲まで拾う。足りないぶんは歩いて近寄る。
+            // 読み込まれている範囲まで拾う。足りないぶんは歩いて近寄る。
             if (Vector3.Distance(obj.Position, Player.Position) <= BellSearchRange)
             {
+                // 見つけた場所は覚えておく。離れて読み込まれなくなっても向かえる。
+                KnownBells[Svc.ClientState.TerritoryType] = obj.Position;
                 return obj;
             }
         }
 
         return null;
     }
+
+    /// <summary>
+    /// このエリアで前に使えた呼び鈴の場所。覚えていなければ null。
+    ///
+    /// 読み込まれていない呼び鈴は <c>Svc.Objects</c> に載らない。
+    /// 場所さえ分かればそこへ歩ける。近づけば読み込まれる。
+    /// </summary>
+    private static Vector3? RememberedBell()
+        => KnownBells.TryGetValue(Svc.ClientState.TerritoryType, out var position) ? position : null;
 
     /// <summary>
     /// ゲームの表記を引く。日本語でも英語でも同じ番号で取れる。
