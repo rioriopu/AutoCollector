@@ -470,9 +470,18 @@ public sealed class PresetTab(Plugin plugin)
         // 選んでいる通貨で買えるものだけを出す。
         var categories = catalog.ListCategories(currencyItemId);
 
+        // **「アイテム交換」窓口に載らない通貨がある。**
+        //
+        // この一覧の元は InclusionShop（スクリップ交換所の画面）。
+        // トームストーンは SpecialShop に直接ぶら下がっており、そこには載らない
+        // （docs/01 の系統 B と系統 C）。
+        //
+        // 以前はここで「交換の一覧を作れませんでした」と出していたが、
+        // 一覧づくりは成功していて、この通貨に該当する系統が無いだけだった。
+        // 失敗と読めるうえ、品を選ぶ手段が無くなっていた。
         if (categories.Count == 0)
         {
-            ImGui.TextColored(ImGuiColors.DalamudRed, "交換の一覧を作れませんでした");
+            this.DrawSpecialShopRewardPicker(preset, currencyItemId, ref changed);
             return;
         }
 
@@ -600,6 +609,135 @@ public sealed class PresetTab(Plugin plugin)
             ImGui.SameLine();
             ImGui.TextColored(ImGuiColors.DalamudGrey, $"  {offer.CurrencyCost:N0}");
         }
+    }
+
+    /// <summary>
+    /// 「アイテム交換」窓口に載らない通貨の品を選ぶ。
+    ///
+    /// トームストーンのように、系統も種別も持たず SpecialShop へ直接ぶら下がる交換がある。
+    /// その場合は交換所を走査して、買える品を平らに並べる。
+    ///
+    /// **走査は押されたときだけ行う。**
+    /// ゲームデータ全体を見るため、画面を開いただけで始めると重い。
+    /// 一度作れば通貨ごとに覚えるので、次からはすぐ出る。
+    ///
+    /// **交換の最中に新しく走査を始めない。**
+    /// 索引づくりは毎フレーム数千行を読む。交換や周回が動いている横で始めると重くなる。
+    /// すでに作ってある通貨は、そのまま出してよい（解決は
+    /// <see cref="MonitorService"/> が使う直前に対象を向け直すため、表示で壊れない）。
+    /// </summary>
+    private void DrawSpecialShopRewardPicker(ExchangePreset preset, uint currencyItemId, ref bool changed)
+    {
+        // 一覧そのものが空なのか、この通貨に該当が無いだけなのかを分けて出す。
+        // 同じ見た目にすると、シートを読めていない不具合を見逃す。
+        if (this.plugin.InclusionShopCatalog.ListCategories().Count == 0)
+        {
+            ImGui.TextColored(
+                ImGuiColors.DalamudYellow,
+                "  「アイテム交換」窓口の一覧を作れていません。交換所を直接調べます");
+        }
+        else
+        {
+            ImGui.TextColored(
+                ImGuiColors.DalamudGrey,
+                "  この通貨は「アイテム交換」窓口では扱われないため、交換所を直接調べます");
+        }
+
+        var resolver = this.plugin.ExchangeResolver;
+
+        if (!resolver.IsBuiltFor(currencyItemId))
+        {
+            // 作っている最中なら進み具合を出す。押しても反応が無いように見せない。
+            if (resolver.TargetCurrencyItemId == currencyItemId &&
+                resolver.Stage is not (ResolverBuildStage.NotStarted or ResolverBuildStage.Failed))
+            {
+                ImGui.ProgressBar(resolver.BuildProgress, new Vector2(280f, 0f));
+                ImGui.SameLine();
+                ImGui.TextColored(ImGuiColors.DalamudGrey, "交換所を調べています");
+                return;
+            }
+
+            if (this.plugin.ExchangeExecutor.IsBusy)
+            {
+                ImGui.TextColored(
+                    ImGuiColors.DalamudYellow,
+                    "  いま交換を実行中です。終わってから読み込んでください");
+                return;
+            }
+
+            if (ImGui.Button("この通貨の交換候補を読み込む"))
+            {
+                resolver.BeginBuild(currencyItemId);
+            }
+
+            ImGui.SameLine();
+            ImGui.TextColored(ImGuiColors.DalamudGrey, "一度読み込めば、次からはすぐ出ます");
+            return;
+        }
+
+        // 構築済みの索引をこの通貨へ向ける。同じ通貨なら作り直しは起きない。
+        resolver.BeginBuild(currencyItemId);
+
+        ImGui.SetNextItemWidth(280f);
+        ImGui.InputTextWithHint("##rewardsearch", "アイテム名で絞り込み", ref this.rewardSearch, 64);
+
+        var groups = resolver.GroupByReward(true);
+
+        var filtered = string.IsNullOrWhiteSpace(this.rewardSearch)
+            ? groups
+            : groups
+                .Where(x => x.RewardName.Contains(this.rewardSearch, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+        if (filtered.Count == 0)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudGrey, "  見つかりませんでした");
+            return;
+        }
+
+        using (var child = ImRaii.Child("##rewardlist", new Vector2(0, 170), true))
+        {
+            if (!child)
+            {
+                return;
+            }
+
+            // 数千件になることがある。描き切ると開いた瞬間に固まる。
+            foreach (var group in filtered.Take(200))
+            {
+                // Definitions の並びは経路の単純さが先で、値段は同じ経路の中でしか揃っていない。
+                // 値段を出すなら、ここで安いものを選び直す。
+                var cheapest = group.Definitions.MinBy(x => x.CurrencyCost) ?? group.Definitions[0];
+
+                var label = cheapest.RewardQuantity > 1
+                    ? $"{group.RewardName} ×{cheapest.RewardQuantity}"
+                    : group.RewardName;
+
+                var already = preset.Rewards.Any(x => x.RewardItemId == group.RewardItemId);
+
+                if (ImGui.Selectable($"{label}##r{group.RewardItemId}", already))
+                {
+                    Toggle(preset, group.RewardItemId);
+                    changed = true;
+                }
+
+                ImGui.SameLine();
+
+                var area = NpcLocationService.GetTerritoryName(cheapest.TerritoryId);
+                ImGui.TextColored(
+                    ImGuiColors.DalamudGrey,
+                    $"  {cheapest.CurrencyCost:N0}  （{cheapest.NpcName} / {area}）");
+            }
+        }
+
+        if (filtered.Count > 200)
+        {
+            ImGui.TextColored(
+                ImGuiColors.DalamudYellow,
+                $"  {filtered.Count - 200} 件は出していません。名前で絞り込んでください");
+        }
+
+        ImGui.TextColored(ImGuiColors.DalamudGrey, "  値段と交換所は、いちばん安い窓口のものを出しています。交換所は下で選べます");
     }
 
     /// <summary>
