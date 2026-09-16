@@ -612,6 +612,16 @@ public sealed class PresetTab(Plugin plugin)
     }
 
     /// <summary>
+    /// 実際に交換できるエントリか。
+    ///
+    /// 報酬やコストが複数あるものは「通貨が減った AND アイテムが増えた」で
+    /// 検証しきれないため、<c>ExchangeExecutor</c> が実行を拒む。
+    /// 選ばせてはいけない。
+    /// </summary>
+    private static bool IsExecutable(ExchangeDefinition definition)
+        => definition.SingleReward && definition.SingleCost;
+
+    /// <summary>
     /// 「アイテム交換」窓口に載らない通貨の品を選ぶ。
     ///
     /// トームストーンのように、系統も種別も持たず SpecialShop へ直接ぶら下がる交換がある。
@@ -681,7 +691,21 @@ public sealed class PresetTab(Plugin plugin)
         ImGui.SetNextItemWidth(280f);
         ImGui.InputTextWithHint("##rewardsearch", "アイテム名で絞り込み", ref this.rewardSearch, 64);
 
-        var groups = resolver.GroupByReward(true);
+        // **撃てないものを一覧に出さない。**
+        //
+        // 索引には報酬やコストが複数あるエントリも入っている。
+        // ExchangeResolver は「定義としては残し、実行の事前条件で拒む」方針のため、
+        // 絞らずに出すとここだけが実行できない品を選択肢として並べることになる。
+        //
+        // 選ばれると、テレポートも移動も会話も全部こなしたあとで
+        // ExchangeExecutor の P-6 が拒み、2 回続けて失敗するとプリセットが
+        // 自動で無効化されて設定に保存される。移動し切ってから落ちるのが最悪の形。
+        //
+        // 「アイテム交換」窓口の一覧は ReadOffers が同じ条件で落としている
+        // （報酬が複数／コストが複数）。こちらも同じ判断に揃える。
+        var groups = resolver.GroupByReward(true)
+            .Where(x => x.Definitions.Any(IsExecutable))
+            .ToList();
 
         var filtered = string.IsNullOrWhiteSpace(this.rewardSearch)
             ? groups
@@ -707,7 +731,11 @@ public sealed class PresetTab(Plugin plugin)
             {
                 // Definitions の並びは経路の単純さが先で、値段は同じ経路の中でしか揃っていない。
                 // 値段を出すなら、ここで安いものを選び直す。
-                var cheapest = group.Definitions.MinBy(x => x.CurrencyCost) ?? group.Definitions[0];
+                //
+                // 撃てるものだけを見る。撃てないエントリの値段を出すと、
+                // 実際に交換したときの額と食い違う。
+                // 上で撃てるものがある品だけに絞ってあるので、ここは必ず 1 件以上ある。
+                var cheapest = group.Definitions.Where(IsExecutable).MinBy(x => x.CurrencyCost)!;
 
                 var label = cheapest.RewardQuantity > 1
                     ? $"{group.RewardName} ×{cheapest.RewardQuantity}"
@@ -779,14 +807,18 @@ public sealed class PresetTab(Plugin plugin)
 
         var group = resolver.GroupByReward(true).FirstOrDefault(x => x.RewardItemId == firstReward);
 
-        if (group is null || group.Definitions.Count == 0)
+        // 撃てない窓口は出さない。品は選べても、その窓口のエントリだけ
+        // 報酬やコストが複数ということがある。選ぶと移動し切ってから拒まれる。
+        var usable = group?.Definitions.Where(IsExecutable).ToList() ?? [];
+
+        if (usable.Count == 0)
         {
             ImGui.TextColored(ImGuiColors.DalamudYellow, "  この品を扱う交換所が見つかりません");
             return;
         }
 
         // 同じ NPC が複数のショップで同じ品を扱うことがある。1 行にまとめる。
-        var npcs = group.Definitions
+        var npcs = usable
             .GroupBy(x => x.NpcDataId)
             .Select(g => g.First())
             .ToList();
