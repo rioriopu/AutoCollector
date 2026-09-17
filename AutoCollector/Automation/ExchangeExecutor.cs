@@ -93,6 +93,14 @@ public enum ExchangeFailure
     Aborted,
     ShopNotOpen,
     BlockingAddonPresent,
+
+    /// <summary>
+    /// 交換の途中でショップが閉じた。
+    ///
+    /// 話しかけられる距離から外れると、ゲームがウィンドウを閉じる。
+    /// 品の問題ではないので、次の機会に試し直してよい。
+    /// </summary>
+    ShopClosedUnexpectedly,
     MultiCostOrMultiRewardEntry,
     ResolverNotReady,
     ShopMismatch,
@@ -2973,6 +2981,39 @@ public sealed unsafe class ExchangeExecutor(
 
         if (this.EvaluateOutcome(attempt))
         {
+            return;
+        }
+
+        // **ウィンドウが閉じたら、待ち続けても結果は出ない。**
+        //
+        // 交換の途中で話しかけられる距離から外れると、ゲームがショップを閉じる。
+        // 実測（2026-09-17 22:49）では、撃った 33 ミリ秒後に
+        // ShopExchangeCurrency が閉じ、続いて確認ダイアログも消えていた。
+        // AutoRetainer がベンチャーの回収で呼び鈴へ歩き出した場面。
+        //
+        // **これは「ゲームが購入を拒んだ」のとは別。**
+        // 品自体に問題は無いので、以後飛ばす対象にしてはいけない。
+        // 15 秒待ってから「所持数が動いていません」と誤診断し、
+        // その品を恒久的に除外していた。
+        // どちらの窓口で撃ったかは attempt に無いので、両方が閉じていることを見る。
+        if (!this.shopService.IsShopOpen() && !this.inclusionShop.IsOpen())
+        {
+            this.anomalyLog.Warn(
+                "Exchange",
+                $"{attempt.RewardName} の交換中にショップが閉じました。" +
+                "話しかけられる距離から外れた可能性があります（ほかのプラグインの移動など）");
+
+            attempt.Resolved = true;
+            attempt.Outcome = "交換の途中でショップが閉じました";
+            Plugin.C.InFlight = null;
+            EzConfig.Save();
+
+            // 残っている確認を片づけてから終わる。
+            this.CloseLeftoverDialogs();
+
+            this.Fail(
+                ExchangeFailure.ShopClosedUnexpectedly,
+                "交換の途中でショップが閉じました。話しかけられる距離から外れた可能性があります");
             return;
         }
 

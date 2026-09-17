@@ -18,6 +18,9 @@ namespace AutoCollector.Ui;
 /// </summary>
 public sealed partial class MainWindow(Plugin plugin)
 {
+    /// <summary>記録をコピーした結果。押しても無反応に見えないよう画面へ返す。</summary>
+    private string anomalyCopyNote = string.Empty;
+
     private readonly Plugin plugin = plugin;
 
     private bool onlyWithLocation = true;
@@ -1046,6 +1049,49 @@ public sealed partial class MainWindow(Plugin plugin)
         }
 
         var entries = this.plugin.AnomalyLog.Snapshot();
+
+        ImGui.SameLine();
+
+        // **不具合の報告に、こちらの状態遷移を添えられるようにする。**
+        //
+        // これまでは画面で読むことしかできなかった。報告を受けても
+        // どの段で止まったのかが分からず、callback の記録から推測するしかなかった。
+        // 詳細ログをファイルへ出す設定は既定で切ってあるため、なおさら届かない。
+        using (ImRaii.Disabled(entries.Count == 0))
+        {
+            if (ImGui.Button("記録をコピー##anomalycopy"))
+            {
+                var text = string.Join(
+                    Environment.NewLine,
+                    entries.Select(x => $"{x.At:HH:mm:ss.fff} [{x.Severity}] {x.Category}: {x.Message}"));
+
+                try
+                {
+                    var header = string.Join(
+                        Environment.NewLine,
+                        $"=== Auto Collector の記録（{DateTime.Now:yyyy-MM-dd HH:mm:ss}）===",
+                        $"版: {BuildStamp()}",
+                        $"いまの手順: {this.plugin.ExchangeExecutor.Step} / {this.plugin.ExchangeExecutor.StatusDetail}",
+                        $"監視の判断: {this.plugin.MonitorService.LastDecision}",
+                        string.Empty);
+
+                    ImGui.SetClipboardText(header + Environment.NewLine + text);
+
+                    this.anomalyCopyNote = $"{entries.Count} 件をコピーしました";
+                }
+                catch (Exception ex)
+                {
+                    this.anomalyCopyNote = $"コピーできませんでした: {ex.Message}";
+                }
+            }
+        }
+
+        if (!string.IsNullOrEmpty(this.anomalyCopyNote))
+        {
+            ImGui.SameLine();
+            ImGui.TextColored(ImGuiColors.DalamudGrey, $"  {this.anomalyCopyNote}");
+        }
+
         if (entries.Count == 0)
         {
             ImGui.TextUnformatted("記録はありません。");
