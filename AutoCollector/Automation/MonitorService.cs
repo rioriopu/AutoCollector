@@ -810,6 +810,21 @@ public sealed class MonitorService(
                 continue;
             }
 
+            // **撃つ側が弾く品では出かけない。**
+            //
+            // 撃つ側は「この 1 回で上限を超えるか」で見る。1 回で 2 個以上
+            // もらえる品があるため、残り 1 個のときに ×2 の品は撃てない。
+            // ここが「まだ足りない」と判断して出発すると、着いてから弾かれ、
+            // 所持数が変わらないので次の判定でもまた出発する。
+            // テレポートと AutoDuty の停止・再開を繰り返すだけになる。
+            if (!CanTradeAtLeastOnce(entry, definition, preset.Mode, out var blocked))
+            {
+                this.anomalyLog.Info(
+                    "Monitor",
+                    $"{ItemName(entry.RewardItemId)} は出かけても交換できないため見送ります（{blocked}）");
+                continue;
+            }
+
             targets.Add(new ExchangeTarget
             {
                 Definition = definition,
@@ -821,6 +836,64 @@ public sealed class MonitorService(
 
         return targets;
     }
+
+    /// <summary>
+    /// 出かけて 1 回でも交換できるか。
+    ///
+    /// **撃つ側と同じ条件で見る。**
+    /// 片方だけが緩いと、出かけては弾かれ、所持数が変わらないので
+    /// また出かける、という往復が止まらなくなる。
+    /// </summary>
+    private static bool CanTradeAtLeastOnce(
+        ExchangeEntry entry, ExchangeDefinition definition, ExchangeMode mode, out string reason)
+    {
+        reason = string.Empty;
+
+        var perTrade = Math.Max(1, (int)definition.RewardQuantity);
+
+        // **終わりを決める設定が 1 つも無いなら出かけない。**
+        //
+        // 個数も所持の上限も置かず、どこまで交換するかも「交換できる限り」だと、
+        // 通貨か所持枠が尽きるまで買い続けることになる。
+        // 実行時に止めるだけだと、1 回撃っては止まり、所持通貨が減らないので
+        // また出かける、という重い往復になる。出発の前で止める。
+        if (entry.Quantity <= 0 && entry.OwnedLimit <= 0 && mode == ExchangeMode.MaxExchange)
+        {
+            reason = "終わりを決める設定がありません（個数・所持の上限・どこまで交換するか のいずれかを設定してください）";
+            return false;
+        }
+
+        // 指定した個数が 1 回ぶんに満たない。
+        if (entry.Quantity > 0 && entry.Quantity < perTrade)
+        {
+            reason = $"1 回で {perTrade} 個入るため、一括交換する個数 {entry.Quantity} では交換できません";
+            return false;
+        }
+
+        if (entry.OwnedLimit <= 0)
+        {
+            return true;
+        }
+
+        if (!Plugin.P.CurrencyService.TryGetCount(
+                entry.RewardItemId, out var owned, includeEquipped: true, includeArmory: true))
+        {
+            // 数えられないなら判断しない。撃つ側の関門に任せる。
+            return true;
+        }
+
+        if (owned + perTrade > entry.OwnedLimit)
+        {
+            reason = $"1 回で {perTrade} 個入るため、所持 {owned} / 上限 {entry.OwnedLimit} では交換できません";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static string ItemName(uint itemId)
+        => ECommons.DalamudServices.Svc.Data.GetExcelSheet<Lumina.Excel.Sheets.Item>()
+            ?.GetRowOrDefault(itemId)?.Name.ExtractText() ?? $"ItemId {itemId}";
 
     /// <summary>この品を飛ばすか。上限まで持っている、またはゲームに拒まれた品。</summary>
     private bool IsSatisfied(ExchangeEntry entry)
