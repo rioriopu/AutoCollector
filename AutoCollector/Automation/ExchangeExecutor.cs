@@ -341,6 +341,14 @@ public sealed unsafe class ExchangeExecutor(
 
     /// <summary>外部プラグインの手が空くのを待ち始めた区間の期限。</summary>
     private DateTime suppressWaitDeadlineUtc = DateTime.MinValue;
+
+    /// <summary>
+    /// このセッションを丸ごと打ち切る理由が出たか。
+    ///
+    /// 「この品はもう買わない」と「この移動はもう終わり」は別物。
+    /// 混ぜると、高い品で通貨を使い切ったときに、まだ買える安い品まで見送る。
+    /// </summary>
+    private bool sessionExhausted;
     private static readonly TimeSpan DialogTimeout = TimeSpan.FromSeconds(10);
 
     /// <summary>
@@ -2829,23 +2837,27 @@ public sealed unsafe class ExchangeExecutor(
 
         var rewardName = Svc.Data.GetExcelSheet<Item>()?.GetRowOrDefault(definition.RewardItemId)?.Name.ExtractText() ?? string.Empty;
 
-        var amount = this.DecideBatchAmount(definition, entry, currencyBefore, rewardBefore, (int)freeSlots, keepFree);
+        var amount = this.DecideBatchAmount(
+            definition, entry, currencyBefore, rewardBefore, (int)freeSlots, keepFree, out var batchBlock);
 
-        // 所持の上限に達している。この品は撃たずに次へ。
+        // 利用者が決めた歯止めに触れた。この品は撃たずに次へ。
         if (amount <= 0)
         {
-            this.anomalyLog.Info(
-                "Exchange",
-                $"{rewardName} は所持の上限に達しているため交換しません（所持 {rewardBefore}）");
+            // **理由を決め打ちしない。**
+            // 以前は何で 0 になっても「所持の上限に達しています」と記録していた。
+            // 所持 0・上限なしの品でもその文言が出るため、原因を追えなかった。
+            var why = string.IsNullOrEmpty(batchBlock) ? "交換できる条件を満たしていません" : batchBlock;
 
-            if (this.TryAdvanceToNextTarget("所持の上限に達しています"))
+            this.anomalyLog.Info("Exchange", $"{rewardName} は交換しません: {why}（所持 {rewardBefore}）");
+
+            if (this.TryAdvanceToNextTarget(why))
             {
                 return;
             }
 
             this.Step = ExchangeStep.ResumeAutoDuty;
             this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(20);
-            this.StatusDetail = "所持の上限に達しました";
+            this.StatusDetail = why;
             return;
         }
 
@@ -3299,8 +3311,11 @@ public sealed unsafe class ExchangeExecutor(
         int currencyBefore,
         int rewardBefore,
         int freeSlots,
-        int keepFree)
+        int keepFree,
+        out string blockReason)
     {
+        blockReason = string.Empty;
+
         // **個数と回数を取り違えない。**
         //
         // 利用者が入れる数（一括交換する個数・所持の上限）はすべて**個数**。
@@ -3325,6 +3340,7 @@ public sealed unsafe class ExchangeExecutor(
         // 上限に達している。撃ってはいけない。
         if (roomTrades <= 0)
         {
+            blockReason = "所持の上限に達しています";
             return 0;
         }
 
@@ -3353,6 +3369,7 @@ public sealed unsafe class ExchangeExecutor(
 
         if (wantedTrades <= 0)
         {
+            blockReason = "指定した個数まで交換しました";
             return 0;
         }
 
@@ -3370,6 +3387,9 @@ public sealed unsafe class ExchangeExecutor(
 
         if (affordable <= 0)
         {
+            blockReason = this.session is { Mode: ExchangeMode.UntilCurrencyReserve } r
+                ? $"残す通貨量 {r.CurrencyReserve} を割り込みます"
+                : "通貨が足りません";
             return 0;
         }
 
@@ -3380,14 +3400,14 @@ public sealed unsafe class ExchangeExecutor(
             return 1;
         }
 
-        // 所持枠。品が重なるかどうかは分からないので 1 個 1 枠として見る。
+        // 所持枠。品が重なるかどうかは分からないので 1 回 1 枠として見る。
         // 重なる品ならこれより多く入るが、少なく見積もるぶんには害がない。
-        var bagRoom = Math.Max(0, freeSlots - keepFree) / perTrade;
-
-        if (bagRoom <= 0)
-        {
-            return 0;
-        }
+        //
+        // **ここを 0 にしない。**
+        // 撃つ前に「空きが残す枠より多い」ことは確かめてある（P-16）。
+        // ここで 1 回ぶんも取れないと、実際には入る品まで交換せずに捨てることになる。
+        // 0 を返してよいのは、利用者が決めた上限に触れたときだけ。
+        var bagRoom = Math.Max(1, freeSlots - keepFree);
 
         var amount = Math.Min(Math.Min(affordable, wantedTrades), Math.Min(bagRoom, MaxBatchAmount));
         amount = Math.Min(amount, roomTrades);
@@ -3418,10 +3438,15 @@ public sealed unsafe class ExchangeExecutor(
 
         // **セッション全体の打ち切りなら、次の品へ進まない。**
         //
-        // 止まった理由を見ずに進んでいたため、「通貨が足りません」
-        // 「残す通貨量に達しました」で終わった直後に次の品を撃ち直していた。
+        // 止まった理由を見ずに進んでいたため、「残す通貨量に達しました」で
+        // 終わった直後に次の品を撃ち直していた。
         // 予備として残すはずの通貨を、品の数だけ削っていくことになる。
-        if (previousStopReason.Contains("通貨", StringComparison.Ordinal))
+        //
+        // **文字列で判断しない。**
+        // 「通貨」を含むかどうかで見ていたが、「通貨が足りません」は
+        // いま扱っている品の値段に対する判断で、セッション全体の話ではない。
+        // 高い品で使い切ると、安い品がまだ買えるのに全部見送っていた。
+        if (this.sessionExhausted)
         {
             this.anomalyLog.Info("Exchange", $"次の品へは進みません（{previousStopReason}）");
             return false;
@@ -3495,6 +3520,7 @@ public sealed unsafe class ExchangeExecutor(
     private bool ShouldContinueSession(int currencyAfter, int rewardAfter, out string stopReason)
     {
         stopReason = string.Empty;
+        this.sessionExhausted = false;
 
         var current = this.session;
         var definition = this.travelTarget;
@@ -3511,12 +3537,14 @@ public sealed unsafe class ExchangeExecutor(
         if (current.Completed >= ExchangeSession.HardLimit)
         {
             stopReason = $"上限の {ExchangeSession.HardLimit} 回に達しました";
+            this.sessionExhausted = true;
             return false;
         }
 
         if (this.aborted)
         {
             stopReason = "停止が要求されました";
+            this.sessionExhausted = true;
             return false;
         }
 
@@ -3532,6 +3560,7 @@ public sealed unsafe class ExchangeExecutor(
         if (!this.currencyService.TryGetEmptyBagSlots(out var freeSlots) || freeSlots <= keepFree)
         {
             stopReason = $"所持枠の空きが {freeSlots} になりました（{keepFree} 枠を残す設定）";
+            this.sessionExhausted = true;
             return false;
         }
 
@@ -3577,10 +3606,14 @@ public sealed unsafe class ExchangeExecutor(
             // 個数も上限も置かず、モードも「交換できる限り」だと、
             // 通貨か所持枠が尽きるまで買い続けることになる。
             // 判断材料が欠けたら撃たない、という方針に倒す。
+            //
+            // 通常は出発の前（MonitorService.CanTradeAtLeastOnce）で弾かれる。
+            // ここは手動実行など、そこを通らない経路のための受け皿。
             if (target.Unlimited && target.OwnedLimit <= 0 &&
                 current.Mode == ExchangeMode.MaxExchange)
             {
                 stopReason = "終わりを決める設定がありません（個数・所持の上限・どこまで交換するか のいずれかを設定してください）";
+                this.sessionExhausted = true;
                 return false;
             }
         }
