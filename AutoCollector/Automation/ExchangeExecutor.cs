@@ -187,7 +187,14 @@ public sealed class ExchangeTarget
     /// <summary>上限を設けないか。true なら回数では止めない。</summary>
     public bool Unlimited { get; init; }
 
-    /// <summary>残りの交換回数。<see cref="Unlimited"/> が true のときは見ない。</summary>
+    /// <summary>
+    /// 残りの**個数**。<see cref="Unlimited"/> が true のときは見ない。
+    ///
+    /// **回数ではない。** 利用者が入れる「一括交換する個数」がそのまま入る。
+    /// 1 回の交換で 2 個以上もらえる品があるため、
+    /// 撃つ回数へ直すときは 1 回あたりの個数で割ること。
+    /// 混ぜていたため、1 回で 3 個もらえる品で 3 倍の数を交換していた。
+    /// </summary>
     public int Remaining { get; set; }
 
     /// <summary>
@@ -202,8 +209,20 @@ public sealed class ExchangeTarget
 
 public sealed class ExchangeSession
 {
-    /// <summary>暴走への歯止め。この回数を超えたら理由に関わらず打ち切る。</summary>
-    public const int HardLimit = 200;
+    /// <summary>
+    /// 暴走への歯止め。この回数を超えたら理由に関わらず打ち切る。
+    ///
+    /// **1 回の移動で 200 回は買いすぎ。**
+    /// 交換は取り返しがつかない。条件の判定をすり抜けたとき、
+    /// 利用者が気づいて止めるまでに何個買われるかがこの数で決まる。
+    ///
+    /// 実際に上限を見ていない不具合があり、通貨が尽きるまで買い続けた。
+    /// そのとき止めたのは利用者の手で、この歯止めではなかった。
+    ///
+    /// 1 回の移動で 30 回も交換すれば普通の用は足りる。
+    /// 足りなければ次の周回でまた出かける。
+    /// </summary>
+    public const int HardLimit = 30;
 
     public required ExchangeMode Mode { get; init; }
 
@@ -2627,6 +2646,58 @@ public sealed unsafe class ExchangeExecutor(
 
         var rewardName = Svc.Data.GetExcelSheet<Item>()?.GetRowOrDefault(definition.RewardItemId)?.Name.ExtractText() ?? string.Empty;
 
+        // P-18: 利用者が決めた歯止め。**撃つ前に必ず見る。**
+        //
+        // ここに関門が無かった。アイテム交換画面の経路（DecideBatchAmount）には
+        // あるが、こちらの経路には無く、繰り返しの判断（ShouldContinueSession）も
+        // 所持の上限を見ていなかった。
+        //
+        // その結果、一括交換する個数を 0（上限なし）にすると、
+        // 所持の上限 10 を超えても 1 個ずつ延々と交換し続けた。
+        // 通貨か所持枠が尽きるまで止まらない。取り返しがつかない。
+        //
+        // **「いま超えているか」ではなく「この 1 回で超えるか」で見る。**
+        // 1 回で複数個もらえる品があるため、達する手前から止める必要がある。
+        var perTrade = Math.Max(1, (int)definition.RewardQuantity);
+        var blockReason = string.Empty;
+
+        if (this.session?.Current is { OwnedLimit: > 0 } limit &&
+            rewardBefore + perTrade > limit.OwnedLimit)
+        {
+            blockReason = $"所持の上限に達しています（所持 {rewardBefore} / 上限 {limit.OwnedLimit}）";
+        }
+        else if (this.session?.Current is { Unlimited: false } counted && counted.Remaining < perTrade)
+        {
+            blockReason = $"指定した個数まで交換しました（残り {counted.Remaining}）";
+        }
+        else if (this.session is { Mode: ExchangeMode.UntilCurrencyReserve } reserve &&
+                 currencyBefore - (int)definition.CurrencyCost < reserve.CurrencyReserve)
+        {
+            // **残す通貨量は撃つ前に一度も見ていなかった。**
+            // 繰り返しの判断にはあるが、移動 1 回ごとの最初の 1 回は素通りしていた。
+            blockReason = $"残す通貨量 {reserve.CurrencyReserve} を割り込みます（所持 {currencyBefore}）";
+        }
+        else if (this.session is { Mode: ExchangeMode.UntilTargetQuantity } goal &&
+                 rewardBefore + perTrade > goal.TargetQuantity)
+        {
+            blockReason = $"目標の {goal.TargetQuantity} 個に達しています（所持 {rewardBefore}）";
+        }
+
+        if (blockReason.Length > 0)
+        {
+            this.anomalyLog.Info("Exchange", $"{rewardName} は交換しません: {blockReason}");
+
+            if (this.TryAdvanceToNextTarget(blockReason))
+            {
+                return;
+            }
+
+            this.Step = ExchangeStep.ResumeAutoDuty;
+            this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(20);
+            this.StatusDetail = blockReason;
+            return;
+        }
+
         // ここから先は不可逆。記録を先に立ててから撃つ。順序を逆にしない。
         Plugin.C.InFlight = new PurchaseAttempt
         {
@@ -3151,13 +3222,20 @@ public sealed unsafe class ExchangeExecutor(
 
                 if (current.Current is { } finishedTarget)
                 {
-                    // まとめ買いでは 1 回の発火で複数個を交換している。
+                    // **回数と個数を混ぜない。**
+                    // fired は撃った回数。Remaining は利用者が入れた個数。
+                    //
+                    // attempt.RewardQuantity は「この発火で受け取る合計個数」で、
+                    // まとめ買いのときは既に回数を掛けた値が入っている
+                    // （FireInclusionExchange で definition.RewardQuantity * amount）。
+                    // ここで回数を掛け直すと二重になる。
                     var fired = Math.Max(1, attempt.Amount);
+                    var gained = Math.Max(1, (int)attempt.RewardQuantity);
 
                     finishedTarget.Completed += fired;
                     if (!finishedTarget.Unlimited && finishedTarget.Remaining > 0)
                     {
-                        finishedTarget.Remaining = Math.Max(0, finishedTarget.Remaining - fired);
+                        finishedTarget.Remaining = Math.Max(0, finishedTarget.Remaining - gained);
                     }
                 }
             }
@@ -3223,50 +3301,101 @@ public sealed unsafe class ExchangeExecutor(
         int freeSlots,
         int keepFree)
     {
+        // **個数と回数を取り違えない。**
+        //
+        // 利用者が入れる数（一括交換する個数・所持の上限）はすべて**個数**。
+        // ここが返すのはゲームへ渡す**交換の回数**。
+        // 1 回の交換で受け取る個数は品によって違う。
+        //
+        // 取り違えていたため、1 回で 3 個もらえる品に上限 10 を設定すると
+        // 10 回撃って 30 個になっていた。上限の 3 倍。
+        //
+        // 端数は切り捨てる。1 回撃つと超えてしまうなら撃たない。
+        // 買いすぎは取り返しがつかない。
+        var perTrade = Math.Max(1, (int)definition.RewardQuantity);
+
         // 所持の上限。足りないぶんだけ交換する。
         // 画面が数量を選べない品でも、この判定だけは効かせる必要がある。
-        var room = int.MaxValue;
+        var roomTrades = int.MaxValue;
         if (this.session?.Current is { OwnedLimit: > 0 } limited)
         {
-            room = Math.Max(0, limited.OwnedLimit - rewardBefore);
+            roomTrades = Math.Max(0, limited.OwnedLimit - rewardBefore) / perTrade;
         }
 
         // 上限に達している。撃ってはいけない。
-        if (room <= 0)
+        if (roomTrades <= 0)
         {
             return 0;
         }
 
-        // 数量を選べない品は 1 個ずつ。
-        if (!entry.CanSelectAmount || definition.CurrencyCost == 0)
+        // この品の残りの必要数（個数）を回数へ直す。
+        var wantedTrades = int.MaxValue;
+        if (this.session?.Current is { Unlimited: false } target)
         {
-            return 1;
+            wantedTrades = Math.Max(0, target.Remaining) / perTrade;
         }
 
-        var affordable = currencyBefore / (int)definition.CurrencyCost;
+        // 交換リストを使わないセッション（手動実行など）は、
+        // プリセットのモードが唯一の歯止めになる。ここで効かせる。
+        //
+        // 見ていなかったため、「1 個だけ交換する」つもりの手動実行が
+        // 最大 20 個買っていた。
+        if (this.session is { } plain && plain.Current is null)
+        {
+            wantedTrades = plain.Mode switch
+            {
+                ExchangeMode.FixedQuantity => Math.Max(0, plain.RemainingCount),
+                ExchangeMode.UntilTargetQuantity =>
+                    Math.Max(0, plain.TargetQuantity - rewardBefore) / perTrade,
+                _ => wantedTrades,
+            };
+        }
+
+        if (wantedTrades <= 0)
+        {
+            return 0;
+        }
 
         // 残す通貨量の設定を守る。
-        if (this.session is { Mode: ExchangeMode.UntilCurrencyReserve } reserve)
+        var affordable = definition.CurrencyCost == 0
+            ? int.MaxValue
+            : currencyBefore / (int)definition.CurrencyCost;
+
+        if (this.session is { Mode: ExchangeMode.UntilCurrencyReserve } reserve &&
+            definition.CurrencyCost > 0)
         {
             var spendable = currencyBefore - reserve.CurrencyReserve;
             affordable = Math.Min(affordable, spendable > 0 ? spendable / (int)definition.CurrencyCost : 0);
         }
 
-        // この品の残りの必要数。
-        var wanted = int.MaxValue;
-        if (this.session?.Current is { Unlimited: false } target)
+        if (affordable <= 0)
         {
-            wanted = Math.Max(1, target.Remaining);
+            return 0;
+        }
+
+        // 数量を選べない品は 1 回ずつ。
+        // ただし上の関門は通っているので、1 回撃っても超えないことは確かめてある。
+        if (!entry.CanSelectAmount || definition.CurrencyCost == 0)
+        {
+            return 1;
         }
 
         // 所持枠。品が重なるかどうかは分からないので 1 個 1 枠として見る。
         // 重なる品ならこれより多く入るが、少なく見積もるぶんには害がない。
-        var bagRoom = Math.Max(1, freeSlots - keepFree);
+        var bagRoom = Math.Max(0, freeSlots - keepFree) / perTrade;
 
-        var amount = Math.Min(Math.Min(affordable, wanted), Math.Min(bagRoom, MaxBatchAmount));
-        amount = Math.Min(amount, room);
+        if (bagRoom <= 0)
+        {
+            return 0;
+        }
 
-        return Math.Max(1, amount);
+        var amount = Math.Min(Math.Min(affordable, wantedTrades), Math.Min(bagRoom, MaxBatchAmount));
+        amount = Math.Min(amount, roomTrades);
+
+        // **0 を 1 に押し上げない。**
+        // 以前は Math.Max(1, amount) としていたため、残す通貨量や所持枠の
+        // 計算で 0 になっても必ず 1 回撃っていた。関門の意味が消える。
+        return Math.Max(0, amount);
     }
 
     /// <summary>
@@ -3284,6 +3413,17 @@ public sealed unsafe class ExchangeExecutor(
 
         if (current is null || current.Targets.Count == 0)
         {
+            return false;
+        }
+
+        // **セッション全体の打ち切りなら、次の品へ進まない。**
+        //
+        // 止まった理由を見ずに進んでいたため、「通貨が足りません」
+        // 「残す通貨量に達しました」で終わった直後に次の品を撃ち直していた。
+        // 予備として残すはずの通貨を、品の数だけ削っていくことになる。
+        if (previousStopReason.Contains("通貨", StringComparison.Ordinal))
+        {
+            this.anomalyLog.Info("Exchange", $"次の品へは進みません（{previousStopReason}）");
             return false;
         }
 
@@ -3312,10 +3452,13 @@ public sealed unsafe class ExchangeExecutor(
                 continue;
             }
 
-            // すでに上限まで持っているものは飛ばす。装備はアーマリーに入るため、そちらも数える。
+            // すでに上限まで持っているものは飛ばす。
+            // 数え方は撃つ側と揃える（装備中もアーマリーも数える）。
+            // 揃えないと、行ってから「上限に達している」で引き返すことになる。
             if (next.OwnedLimit > 0 &&
-                this.currencyService.TryGetCount(next.Definition.RewardItemId, out var owned, false, true) &&
-                owned >= next.OwnedLimit)
+                this.currencyService.TryGetCount(
+                    next.Definition.RewardItemId, out var owned, includeEquipped: true, includeArmory: true) &&
+                owned + Math.Max(1, (int)next.Definition.RewardQuantity) > next.OwnedLimit)
             {
                 this.anomalyLog.Info(
                     "Exchange",
@@ -3392,8 +3535,15 @@ public sealed unsafe class ExchangeExecutor(
             return false;
         }
 
-        // 交換リストを使っている場合、回数はその品ごとに数える。
-        // プリセット全体のモードは「残す通貨量」の歯止めとしてだけ効かせる。
+        // 1 回の交換で受け取る個数。上限は個数で、判定は回数で行うため、必ず換算する。
+        var perTrade = Math.Max(1, (int)definition.RewardQuantity);
+
+        // 交換リストを使っている場合は、その品ごとの条件を先に見る。
+        //
+        // **見たあと必ずモードの判定へ進む。**
+        // 以前はここで return true しており、プリセットの「どこまで交換するか」が
+        // 交換リストを使う限り一度も評価されなかった。
+        // 「交換する回数」も「目標の所持数」も実行時には効いていなかった。
         if (target is not null)
         {
             if (!target.Unlimited && target.Remaining <= 0)
@@ -3402,14 +3552,37 @@ public sealed unsafe class ExchangeExecutor(
                 return false;
             }
 
-            if (current.Mode == ExchangeMode.UntilCurrencyReserve &&
-                currencyAfter - definition.CurrencyCost < current.CurrencyReserve)
+            // 次の 1 回で指定数を超えるなら、そこで止める。
+            if (!target.Unlimited && target.Remaining < perTrade)
             {
-                stopReason = $"残す通貨量 {current.CurrencyReserve} に達しました";
+                stopReason = $"あと {target.Remaining} 個ですが、1 回で {perTrade} 個入るため止めます";
                 return false;
             }
 
-            return true;
+            // **所持の上限。次の 1 回で超えるかどうかで見る。**
+            //
+            // ここを見ていなかった。「一括交換する個数」が 0（上限なし）だと
+            // 上の判定は一生止まらないため、所持の上限 10 を超えても
+            // 1 個ずつ交換し続けていた。通貨か所持枠が尽きるまで止まらない。
+            //
+            // 交換は取り返しがつかない。上限は必ずここで守る。
+            if (target.OwnedLimit > 0 && rewardAfter + perTrade > target.OwnedLimit)
+            {
+                stopReason = $"所持の上限 {target.OwnedLimit} に達しました（所持 {rewardAfter}）";
+                return false;
+            }
+
+            // **終わりを決める条件が 1 つも無いなら止める。**
+            //
+            // 個数も上限も置かず、モードも「交換できる限り」だと、
+            // 通貨か所持枠が尽きるまで買い続けることになる。
+            // 判断材料が欠けたら撃たない、という方針に倒す。
+            if (target.Unlimited && target.OwnedLimit <= 0 &&
+                current.Mode == ExchangeMode.MaxExchange)
+            {
+                stopReason = "終わりを決める設定がありません（個数・所持の上限・どこまで交換するか のいずれかを設定してください）";
+                return false;
+            }
         }
 
         switch (current.Mode)
@@ -3433,9 +3606,9 @@ public sealed unsafe class ExchangeExecutor(
                 return true;
 
             case ExchangeMode.UntilTargetQuantity:
-                if (rewardAfter >= current.TargetQuantity)
+                if (rewardAfter + perTrade > current.TargetQuantity)
                 {
-                    stopReason = $"目標の {current.TargetQuantity} 個に達しました";
+                    stopReason = $"目標の {current.TargetQuantity} 個に達しました（所持 {rewardAfter}）";
                     return false;
                 }
 

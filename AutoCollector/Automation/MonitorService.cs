@@ -644,7 +644,16 @@ public sealed class MonitorService(
         var cap = (int?)this.currencyService.GetEffectiveCap(currencyItemId);
         var trigger = this.currencyService.CalculateTriggerAmount(preset.Threshold, currencyItemId);
 
-        if (preset.Mode == ExchangeMode.UntilTargetQuantity && ownedReward is { } have && have >= preset.Quantity)
+        // **目標に達したかは、交換リストの全部を見る。**
+        //
+        // 1 件目の所持数だけで判断していたため、複数の品を並べたプリセットでは
+        // 1 件目が目標に達した時点で残りを無視して「達成」になっていた。
+        if (preset.Mode == ExchangeMode.UntilTargetQuantity &&
+            preset.Rewards.Count > 0 &&
+            preset.Rewards.All(x =>
+                this.currencyService.TryGetCount(
+                    x.RewardItemId, out var held, includeEquipped: true, includeArmory: true) &&
+                held >= preset.Quantity))
         {
             return New(current, cap, trigger, PresetReadiness.TargetReached);
         }
@@ -827,7 +836,16 @@ public sealed class MonitorService(
             return false;
         }
 
-        return this.currencyService.TryGetCount(entry.RewardItemId, out var owned, false, true) &&
+        // **数え方は交換の実行側と揃える。**
+        //
+        // 実行側は装備中もアーマリーも数える（includeEquipped: true）。
+        // ここだけ装備を数えないでいると、装備している品について
+        // 「まだ足りない」と判断して出かけ、着いてから「上限に達している」で
+        // 引き返すことになる。
+        //
+        // 揃えるなら厳しい側に揃える。多く数えるほうが買いすぎない。
+        return this.currencyService.TryGetCount(
+                   entry.RewardItemId, out var owned, includeEquipped: true, includeArmory: true) &&
                owned >= entry.OwnedLimit;
     }
 }
