@@ -114,7 +114,10 @@ public sealed class MonitorService(
     private readonly ExternalAutomationGate automationGate = automationGate;
 
     private DateTime nextCheckUtc = DateTime.MinValue;
-    private Guid buildingForPreset;
+    /// <summary>
+    /// 索引の構築を頼んだ時刻。進まないときに頼み直す判断に使う。
+    /// </summary>
+    private DateTime buildStartedUtc = DateTime.MinValue;
     private Guid lastRunPreset;
     private int consecutiveFailures;
 
@@ -139,6 +142,46 @@ public sealed class MonitorService(
     /// <summary>UI 表示用のまとまり。1 秒ごとに更新する。</summary>
     public MonitorSnapshot Snapshot { get; private set; } = MonitorSnapshot.Empty;
 
+    /// <summary>
+    /// 閾値に達したのに、まだ交換へ渡せていないプリセットがあるか。
+    ///
+    /// **交換が「始まっていない」ことと「用が無い」ことは違う。**
+    /// 索引ができていない・移動できないなどで渡せずにいるあいだ、
+    /// ExchangeExecutor は止まったままに見える。
+    /// それを「交換の予定は無い」と読んで周回を再開させると、
+    /// 交換されないままコンテンツへ戻ってしまう。
+    /// </summary>
+    public bool HasPendingExchange
+    {
+        get
+        {
+            if (this.manualPresetId != Guid.Empty)
+            {
+                return true;
+            }
+
+            if (this.Snapshot.ReachedCount <= 0)
+            {
+                return false;
+            }
+
+            // **閾値に達しただけでは「渡せる」ことにならない。**
+            //
+            // 交換する品が無い・交換先を解決できない、という理由で毎回戻るプリセットは
+            // 永久に閾値を超えたままになる。それを待ち続けると周回が 1 周ごとに止まる。
+            // 一度「渡せなかった」と分かったものは、所持数が変わるまで数えない。
+            return DateTime.UtcNow > this.pendingMuteUntilUtc;
+        }
+    }
+
+    /// <summary>
+    /// 渡せないと分かったプリセットを、しばらく「交換待ち」に数えない期限。
+    ///
+    /// 恒久的に渡せない設定で周回まで止めないための逃げ道。
+    /// 所持数や設定が変われば次の判断でまた数えられる。
+    /// </summary>
+    private DateTime pendingMuteUntilUtc = DateTime.MinValue;
+
     private DateTime nextSnapshotUtc = DateTime.MinValue;
 
     /// <summary>手動で押されたが、まだ始められていないプリセット。</summary>
@@ -149,6 +192,28 @@ public sealed class MonitorService(
 
     /// <summary>手動で押されたぶんを待つ上限。索引づくりはこれより早く終わる。</summary>
     private static readonly TimeSpan ManualWaitLimit = TimeSpan.FromSeconds(60);
+
+    /// <summary>
+    /// 索引の構築が進まないと見なすまでの時間。超えたら頼み直す。
+    ///
+    /// 実測では 60,000 行弱の NPC を 1 フレーム 4,000 行で走査するため、
+    /// 数秒で終わる。分を待つ必要はない。
+    /// </summary>
+    private static readonly TimeSpan BuildStallLimit = TimeSpan.FromSeconds(45);
+
+    /// <summary>
+    /// 構築に失敗したあと、もう一度試すまで空ける時間。
+    ///
+    /// 構築は 6 万行近い走査で、そのあいだ他の処理が止まる。
+    /// 失敗し続ける環境で撃ち直すと、その時間ごとに固まることになる。
+    /// </summary>
+    private static readonly TimeSpan BuildRetryInterval = TimeSpan.FromMinutes(5);
+
+    /// <summary>構築に失敗したあと、次に試してよい時刻。</summary>
+    private DateTime buildRetryAfterUtc = DateTime.MinValue;
+
+    /// <summary>渡せなかったプリセットを交換待ちに数えない時間。</summary>
+    private static readonly TimeSpan PendingMute = TimeSpan.FromMinutes(2);
 
     public void Tick()
     {
@@ -292,9 +357,14 @@ public sealed class MonitorService(
         this.manualPresetId = preset.Id;
         this.manualDeadlineUtc = DateTime.UtcNow.Add(ManualWaitLimit);
 
-        this.TryStart(preset);
+        // **始まらなかったことを黙って成功にしない。**
+        // 以前は常に true を返していたため、索引が無くて何も起きていなくても
+        // 押した側には成功として伝わっていた。押しても無反応に見える。
+        var started = this.TryStart(preset);
         reason = this.LastDecision;
-        return true;
+
+        // 始まらなくても、索引ができたら自分で始める。そこまでは受け付けたと伝える。
+        return started || this.manualPresetId != Guid.Empty;
     }
 
     /// <summary>
@@ -336,28 +406,81 @@ public sealed class MonitorService(
         return true;
     }
 
-    /// <summary>索引を用意し、交換先を決めて開始する。</summary>
-    private void TryStart(ExchangePreset preset)
+    /// <summary>
+    /// 索引を用意し、交換先を決めて開始する。
+    /// **実際に交換を始められたときだけ true。** 押した結果を画面へ返すために要る。
+    /// </summary>
+    private bool TryStart(ExchangePreset preset)
     {
         if (!this.currencyCatalog.TryResolve(preset, out var currencyItemId))
         {
-            return;
+            this.LastDecision = $"{preset.Name}: 監視する通貨を解決できません";
+            return false;
         }
 
         // 索引ができていなければ構築を始める。完了は次回以降の呼び出しで拾う。
         if (!this.resolver.IsBuiltFor(currencyItemId))
         {
-            if (this.buildingForPreset != preset.Id)
+            // **「このプリセットで 1 度頼んだか」で判断してはいけない。**
+            //
+            // 以前はプリセットの Id を控えて、同じ Id なら二度と頼み直さない作りだった。
+            // 控えを戻すのは索引ができたときだけなので、構築が完走しないと
+            // 永久に頼み直されず、閾値を超えていても交換が一度も始まらなかった。
+            //
+            // 構築は途中で横取りされる。索引は 1 通貨ぶんしか持てず、
+            // 別の通貨で BeginBuild が呼ばれると、作りかけは捨てられる。
+            // 通貨の違うプリセットが並んでいるだけで起きる。
+            //
+            // 頼み直すかどうかは、相手の実際の状態で決める。
+            var building =
+                this.resolver.TargetCurrencyItemId == currencyItemId &&
+                this.resolver.Stage is ResolverBuildStage.ScanningShops
+                    or ResolverBuildStage.ScanningNpcs
+                    or ResolverBuildStage.ResolvingLocations;
+
+            // 進んでいないまま長く経ったら、もう一度頼む。
+            var stalled = this.buildStartedUtc != DateTime.MinValue &&
+                          DateTime.UtcNow - this.buildStartedUtc > BuildStallLimit;
+
+            // **失敗したものを即座に撃ち直さない。**
+            //
+            // 構築は 6 万行近い走査で十数フレームかかり、そのあいだ他の処理が全部止まる。
+            // 失敗する環境（シートを読めない等）で撃ち直し続けると、
+            // 1 秒ごとにプラグイン全体が固まることになる。
+            var failed = this.resolver.TargetCurrencyItemId == currencyItemId &&
+                         this.resolver.Stage == ResolverBuildStage.Failed;
+
+            var cooling = failed && DateTime.UtcNow < this.buildRetryAfterUtc;
+
+            if (failed && !cooling)
             {
-                this.buildingForPreset = preset.Id;
-                this.resolver.BeginBuild(currencyItemId);
-                this.LastDecision = $"{preset.Name}: 交換候補を構築しています";
+                this.buildRetryAfterUtc = DateTime.UtcNow.Add(BuildRetryInterval);
+                this.anomalyLog.Warn(
+                    "Monitor",
+                    $"{preset.Name}: 交換候補を構築できませんでした。{BuildRetryInterval.TotalMinutes:F0} 分後にもう一度試します");
             }
 
-            return;
+            if (!cooling && (!building || stalled))
+            {
+                this.buildStartedUtc = DateTime.UtcNow;
+                this.resolver.BeginBuild(currencyItemId, forceRebuild: stalled);
+
+                this.anomalyLog.Info(
+                    "Monitor",
+                    stalled
+                        ? $"{preset.Name}: 交換候補の構築が進まないため、やり直します"
+                        : $"{preset.Name}: 交換候補の構築を始めます");
+            }
+
+            // 固まっていることが画面から分かるようにする。
+            // 「構築しています」で固定すると、止まっているのか進んでいるのか読めない。
+            this.LastDecision =
+                $"{preset.Name}: 交換候補を構築しています（{this.resolver.Stage} / {this.resolver.BuildProgress:P0}）";
+
+            return false;
         }
 
-        this.buildingForPreset = Guid.Empty;
+        this.buildStartedUtc = DateTime.MinValue;
         this.resolver.BeginBuild(currencyItemId);
 
         // 交換リストから、いま交換すべき品を並べる。
@@ -374,7 +497,9 @@ public sealed class MonitorService(
                 this.LastDecision = $"{preset.Name}: 交換するものがありません";
             }
 
-            return;
+            // 渡せなかった。周回の維持がこれを待ち続けないようにする。
+            this.pendingMuteUntilUtc = DateTime.UtcNow.Add(PendingMute);
+            return false;
         }
 
         var definition = targets[0].Definition;
@@ -392,12 +517,15 @@ public sealed class MonitorService(
         if (!this.executor.RequestWithTravel(definition, session, out var reason))
         {
             this.LastDecision = $"{preset.Name}: {reason}";
-            return;
+            this.pendingMuteUntilUtc = DateTime.UtcNow.Add(PendingMute);
+            return false;
         }
 
+        this.pendingMuteUntilUtc = DateTime.MinValue;
         this.lastRunPreset = preset.Id;
         this.LastDecision = $"{preset.Name}: 交換を開始しました";
         this.anomalyLog.Info("Monitor", $"{preset.Name}: 閾値に達したため交換を開始します");
+        return true;
     }
 
     /// <summary>

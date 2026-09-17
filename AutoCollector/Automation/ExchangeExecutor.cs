@@ -587,6 +587,10 @@ public sealed unsafe class ExchangeExecutor(
     /// <summary>手動で AutoDuty を再開する。</summary>
     public bool TryResumeAutoDutyManually(out string reason)
     {
+        // 手で起こしたなら、止めたときの旗も全部下ろす。
+        // 維持だけ戻すと、周回は回るのに交換が「停止中です」で弾かれ続ける。
+        Plugin.P.ResumeAfterStop();
+
         var territory = this.LastResumeTerritoryId;
 
         if (territory == 0)

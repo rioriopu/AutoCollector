@@ -61,6 +61,37 @@ public sealed class AutoDutyIpc(AnomalyLog anomalyLog) : IpcGateBase("AutoDuty",
         => this.TryInvoke("ContentHasPath", () => this.Func<uint, bool>("AutoDuty.ContentHasPath").InvokeFunc(territoryType), out hasPath);
 
     /// <summary>
+    /// 画面に出すための状態。取得できなければ null。
+    ///
+    /// **<see cref="IsRunningFailClosed"/> を画面から呼んではいけない。**
+    /// あちらは取得できないたびに間引き無しで警告を書く。毎フレーム呼ぶと
+    /// 記録が同じ 1 行で埋まり、ほかの警告が押し流される。
+    ///
+    /// こちらは読めなければ「分からない」を返すだけで、記録には何も書かない。
+    /// UI から毎フレーム呼ばれるため、短時間だけ使い回す。
+    /// </summary>
+    public bool? IsRunningForDisplay()
+    {
+        if (!this.IsLoaded)
+        {
+            return false;
+        }
+
+        var now = DateTime.UtcNow;
+        if (now <= this.displayCacheExpiry)
+        {
+            return this.displayCache;
+        }
+
+        this.displayCacheExpiry = now.AddMilliseconds(500);
+        this.displayCache = this.TryIsStopped(out var stopped) ? !stopped : null;
+        return this.displayCache;
+    }
+
+    private bool? displayCache;
+    private DateTime displayCacheExpiry = DateTime.MinValue;
+
+    /// <summary>
     /// 動作中か。取得できない場合は「動作中」とみなす。
     /// 停止していないものを停止済みと誤認して割り込む方が危険なため。
     /// </summary>

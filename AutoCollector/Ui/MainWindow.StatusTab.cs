@@ -470,7 +470,20 @@ public sealed partial class MainWindow
 
             if (ImGui.SmallButton("維持を再開##keeperresume"))
             {
-                this.plugin.AutoDutyKeeper.Resume();
+                this.plugin.ResumeAfterStop();
+            }
+        }
+
+        // **止めたことが画面に出ないと、戻し方が分からない。**
+        // 止めたあと AutoDuty を手で動かしても、維持が止まったままなので 1 周で終わる。
+        // その理由がどこにも出ていなかった。
+        if (this.plugin.AutoDutyKeeper.Suspended)
+        {
+            Row(ImGuiColors.DalamudYellow, "周回の維持を止めています。1 周したらそこで終わります。");
+
+            if (ImGui.SmallButton("維持を再開##keeperunsuspend"))
+            {
+                this.plugin.ResumeAfterStop();
             }
         }
 
