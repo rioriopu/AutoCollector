@@ -1287,9 +1287,39 @@ public sealed unsafe class ExchangeExecutor(
 
         if (!this.artisan.StoppedByUs)
         {
+            // **動いていないなら止める必要が無い。**
+            //
+            // 製作していない人の交換まで、Artisan の都合で止めていた。
+            // 止めるのは操作を取り合わないためなので、相手が何もしていないなら用が無い。
+            if (!this.artisan.IsRunning())
+            {
+                return true;
+            }
+
             if (!this.artisan.Stop())
             {
-                this.Fail(ExchangeFailure.ExternalPluginError, "Artisan へ停止を依頼できませんでした");
+                // **止められなかったことを、交換の失敗にしない。**
+                //
+                // ここで Fail していたため、2 回続くとプリセットが自動で無効化された。
+                // 実際の報告では、製作と無関係な周回の交換がこれで丸ごと止まっていた。
+                //
+                // 相手が手を離すのを待つ。待ちには上限があり
+                // （SuppressWaitLimit）、超えれば中止として終わる。
+                // 中止は設定の誤りではないので、プリセットは無効化されない。
+                this.StatusDetail = "Artisan へ停止を依頼できません。手が空くのを待っています";
+
+                if (DateTime.UtcNow - this.lastWaitLogUtc > TimeSpan.FromSeconds(60))
+                {
+                    this.lastWaitLogUtc = DateTime.UtcNow;
+                    var detail = string.IsNullOrEmpty(this.artisan.LastError)
+                        ? string.Empty
+                        : $"（{this.artisan.LastError}）";
+
+                    this.anomalyLog.Warn(
+                        "Suppress",
+                        $"Artisan へ停止を依頼できませんでした{detail}。手が空くのを待っています");
+                }
+
                 return false;
             }
 
