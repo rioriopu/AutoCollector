@@ -74,6 +74,43 @@ public sealed unsafe class AddonOwnershipTracker : IDisposable
     }
 
     /// <summary>
+    /// 指定した名前のウィンドウが、<paramref name="sinceUtc"/> より**あとに**開いたもので、
+    /// かつ自分が開いたものなら true。
+    ///
+    /// <see cref="TryGetOwned"/> は「自分の操作中に開いた」までしか見ない。
+    /// 自分の操作は移動や会話を含めて何分も続くため、その間に利用者が出した
+    /// 別の確認ウィンドウまで「自分のもの」になる。
+    ///
+    /// 押してよいのは「いま撃った操作の結果として出たもの」だけ。
+    /// そこまで絞りたいときはこちらを使う。
+    ///
+    /// **記録は延長しない。** 延長すると開いた時刻が今になり、この判定の意味が消える。
+    /// </summary>
+    public bool TryGetOwnedSince(string addonName, DateTime sinceUtc, out AtkUnitBase* addon)
+    {
+        addon = null;
+
+        if (!GenericHelpers.TryGetAddonByName<AtkUnitBase>(addonName, out var candidate) ||
+            !GenericHelpers.IsAddonReady(candidate))
+        {
+            return false;
+        }
+
+        if (!this.owned.TryGetValue((nint)candidate, out var claimedAt))
+        {
+            return false;
+        }
+
+        if (claimedAt < sinceUtc)
+        {
+            return false;
+        }
+
+        addon = candidate;
+        return true;
+    }
+
+    /// <summary>
     /// 指定した名前のウィンドウが開いていて、かつ自分が開いたものなら true。
     /// 自分のものでなければ触ってはいけない。
     /// </summary>

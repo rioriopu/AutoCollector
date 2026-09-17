@@ -351,6 +351,23 @@ public sealed class Plugin : IDalamudPlugin
             changed = true;
         }
 
+        if (C.ConfigVersion < 4)
+        {
+            // 詳細ログの保存先を、開発機の共有から各自の設定フォルダへ移す。
+            //
+            // 既定のまま保存されている設定だけを直す。
+            // 自分で別の場所を入れている人の設定は触らない。
+            const string oldDefault = @"\\rio-pc\DevPlugins\AutoCollectorLogs";
+
+            if (string.Equals(C.LogDirectory, oldDefault, StringComparison.OrdinalIgnoreCase))
+            {
+                C.LogDirectory = string.Empty;
+            }
+
+            C.ConfigVersion = 4;
+            changed = true;
+        }
+
         if (changed)
         {
             EzConfig.Save();
@@ -456,7 +473,8 @@ public sealed class Plugin : IDalamudPlugin
             this.CurrencyService,
             this.InclusionShopCatalog,
             this.CraftPlanService,
-            this.CurrencyCatalog);
+            this.CurrencyCatalog,
+            this.ExchangeResolver);
 
         // ①〜⑤ を 1 本に束ねる。ここより先に、束ねる相手が全部そろっている必要がある。
         this.GoalRunner = new GoalRunner(
@@ -685,14 +703,17 @@ public sealed class Plugin : IDalamudPlugin
     {
         this.StopFileLog();
 
-        if (!C.DetailedLogActive || string.IsNullOrWhiteSpace(C.LogDirectory))
+        if (!C.DetailedLogActive)
         {
             return;
         }
 
+        // 保存先が空なら設定フォルダへ書く。
+        // 以前は空だと何も記録しなかった。既定を空にしたため、それでは
+        // 詳細ログを入れても 1 行も残らなくなる。
         try
         {
-            this.fileLog = new FileLogWriter(C.LogDirectory);
+            this.fileLog = new FileLogWriter(ResolveLogDirectory());
             this.AnomalyLog.SetFileWriter(this.fileLog);
 
             this.AnomalyLog.Info(

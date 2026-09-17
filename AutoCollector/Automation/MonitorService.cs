@@ -550,6 +550,23 @@ public sealed class MonitorService(
         {
             var preset = Plugin.C.Presets.FirstOrDefault(x => x.Id == this.lastRunPreset);
             this.lastRunPreset = Guid.Empty;
+
+            // **プリセットの誤りでない失敗は数えない。**
+            //
+            // 自動で無効にするのは「この設定では何度やっても交換できない」ときだけ。
+            // 中止（利用者が止めた・制限時間・外部プラグインの待ちぼうけ）は
+            // 設定の誤りではない。数えると、環境の都合で利用者の設定が消える。
+            //
+            // 実際、外部プラグインの処理待ちで中止になったものが 2 回数えられ、
+            // 装備 9 件のプリセットが丸ごと無効化されて保存されていた。
+            if (this.executor.Failure == ExchangeFailure.Aborted)
+            {
+                this.anomalyLog.Info(
+                    "Monitor",
+                    $"中止で終わりましたが、設定の誤りではないため失敗には数えません（{this.executor.StatusDetail}）");
+                return;
+            }
+
             this.consecutiveFailures++;
 
             if (preset is not null && this.consecutiveFailures >= FailureLimit)

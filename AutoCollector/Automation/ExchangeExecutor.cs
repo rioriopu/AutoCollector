@@ -279,6 +279,41 @@ public sealed unsafe class ExchangeExecutor(
     private const int ExchangeQuantity = 1;
 
     private static readonly TimeSpan OutcomeTimeout = TimeSpan.FromSeconds(15);
+
+    /// <summary>
+    /// 本文を照合できないまま確認ダイアログを押してよい、発火からの猶予。
+    ///
+    /// 実測では発火から確認まで約 1 秒（docs/03 の F-10）。
+    /// 短く取るほど、無関係なダイアログを押す余地が減る。
+    /// </summary>
+    private static readonly TimeSpan OwnedDialogWindow = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// 本文にこれが出ていたら、交換の確認ではないと判断して押さない。
+    ///
+    /// 本文で「合っている」ことを確かめられない経路の最後の砦。
+    /// 交換の確認には出ない語だけを並べる。取り返しのつかない操作を優先して挙げる。
+    /// </summary>
+    private static readonly string[] DangerousDialogWords =
+    [
+        "捨て", "破棄", "削除", "分解", "精製", "売却", "ログアウト", "タイトル", "トレード",
+    ];
+
+    /// <summary>
+    /// 外部プラグインの手が空くのを待つ上限。
+    ///
+    /// 待つこと自体は正しいので、全体の制限時間からは外してある。
+    /// ただし**抑制を握ったまま無期限には待たない。**
+    /// AutoRetainer の IPC が読めなくなると fail-closed で「処理中」を返し続け、
+    /// 誰も抑制を解かないまま AutoRetainer と Artisan が止まったままになる。
+    ///
+    /// リテイナーの処理は数分かかることがある。それより長く、かつ有限にする。
+    /// 超えたら失敗として終わらせる。失敗の経路は必ず抑制を解く。
+    /// </summary>
+    private static readonly TimeSpan SuppressWaitLimit = TimeSpan.FromMinutes(5);
+
+    /// <summary>外部プラグインの手が空くのを待ち始めた区間の期限。</summary>
+    private DateTime suppressWaitDeadlineUtc = DateTime.MinValue;
     private static readonly TimeSpan DialogTimeout = TimeSpan.FromSeconds(10);
 
     /// <summary>
@@ -736,6 +771,22 @@ public sealed unsafe class ExchangeExecutor(
     /// Callback.Fire(addon, true, -1) は購入コマンドと同じ経路を通るため、
     /// 値の取り違えが購入として解釈される余地がある。誤爆しにくい方を先にする。
     /// </summary>
+    /// <summary>
+    /// 品と品のあいだで、答え終えていない確認を片づける。
+    ///
+    /// 次の品を撃つ前に閉じておかないと、発火直前の事前条件（P-5）が
+    /// 阻害アドオンとして弾き、以後の品が 1 つも試されなくなる。
+    ///
+    /// 自分が開かせたものだけを閉じる。
+    /// ほかのプラグインが出したものに手を出すと、相手の処理を壊す。
+    /// </summary>
+    private void CloseLeftoverDialogs()
+    {
+        this.CloseOwned("SelectYesno", useCloseFirst: false);
+        this.CloseOwned("ShopExchangeCurrencyDialog", useCloseFirst: false);
+        this.CloseOwned("ShopExchangeItemDialog", useCloseFirst: false);
+    }
+
     private void CloseOwned(string addonName, bool useCloseFirst)
     {
         if (!this.ownership.TryGetOwned(addonName, out var addon))
@@ -921,8 +972,17 @@ public sealed unsafe class ExchangeExecutor(
         //
         // 安全な状態を待っている間は数えない。コンテンツが終わるのを待つのは正しい動作で、
         // 時間切れで打ち切っても意味がない。
+        //
+        // **外部プラグインの処理待ちも同じ。**
+        // SuppressExternal は AutoRetainer や Artisan が手を離すのを待つ段で、
+        // 「時間で打ち切らない」ことを意図して作ってある（TickSuppressExternal）。
+        // それを全体の制限時間が横から殺していた。
+        //
+        // 安全待ちに時間を使ったあとここへ入ると、待つのが正しい状態のまま
+        // 「制限時間を超えたため中止しました（SuppressExternal で停止）」になり、
+        // しかも失敗として数えられてプリセットが自動で無効化されていた。
         if (this.Step is not (ExchangeStep.Idle or ExchangeStep.Done or ExchangeStep.Error
-                or ExchangeStep.WaitingSafeWindow) &&
+                or ExchangeStep.WaitingSafeWindow or ExchangeStep.SuppressExternal) &&
             this.tripDeadlineUtc != DateTime.MinValue &&
             DateTime.UtcNow > this.tripDeadlineUtc)
         {
@@ -1071,6 +1131,7 @@ public sealed unsafe class ExchangeExecutor(
 
         this.Step = ExchangeStep.SuppressExternal;
         this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(60);
+        this.suppressWaitDeadlineUtc = DateTime.UtcNow.Add(SuppressWaitLimit);
         this.StatusDetail = "外部プラグインの状態を確認しています";
     }
 
@@ -1128,6 +1189,22 @@ public sealed unsafe class ExchangeExecutor(
     /// </summary>
     private void TickSuppressExternal()
     {
+        // **抑制を握ったまま無期限に待たない。**
+        //
+        // この段は「時間で打ち切らない」ことを意図して作ってあり、全体の制限時間からも外した。
+        // だが外部プラグインの状態は fail-closed で読む（読めないときは「処理中」とみなす）。
+        // 相手の IPC が壊れると永久に「処理中」が返り、抑制を立てたまま誰も解かなくなる。
+        //
+        // 待つのは正しいが、有限にする。終わらせる経路は必ず抑制を解く。
+        if (this.suppressWaitDeadlineUtc != DateTime.MinValue &&
+            DateTime.UtcNow > this.suppressWaitDeadlineUtc)
+        {
+            this.Fail(
+                ExchangeFailure.Aborted,
+                $"外部プラグインの処理が {SuppressWaitLimit.TotalMinutes:F0} 分待っても終わりませんでした（{this.StatusDetail}）");
+            return;
+        }
+
         // 待っている間に次のコンテンツへ入ってしまうことがある。
         // Duty 中に AutoDuty を止めるのは最も避けたい事故なので、必ず戻る。
         if (this.ReturnToWaitIfUnsafe())
@@ -2876,6 +2953,17 @@ public sealed unsafe class ExchangeExecutor(
                 this.Failure = ExchangeFailure.None;
                 this.StatusDetail = $"{attempt.RewardName} は交換できませんでした";
 
+                // **開いたままの確認を片づけてから次へ進む。**
+                //
+                // ここへ来る理由の 1 つが「確認ダイアログを押せなかった」。
+                // 押せないまま残っているものを置いて次の品を撃つと、
+                // 発火直前の P-5 が阻害アドオンとして弾き、リストの残りが
+                // 1 品も試されないままプリセット全体が失敗になる。
+                //
+                // 実際、装備品 9 件のうち 1 件目でこうなり、
+                // 残り 8 件は一度も試されずに終わっていた。
+                this.CloseLeftoverDialogs();
+
                 if (this.TryAdvanceToNextTarget("交換できませんでした"))
                 {
                     return;
@@ -3259,6 +3347,10 @@ public sealed unsafe class ExchangeExecutor(
 
         var cost = attempt.CurrencyCost.ToString();
 
+        // 開いている確認ダイアログを、いったん全部拾う。
+        // 本文が合わないものも捨てずに持っておく。合わなかったという事実を記録に残す。
+        var open = new List<(nint Address, string Body)>();
+
         for (var i = 1; i < 16; i++)
         {
             // GetAddonByName は AtkUnitBasePtr を返す。Address から生ポインタを取る。
@@ -3273,7 +3365,6 @@ public sealed unsafe class ExchangeExecutor(
                 continue;
             }
 
-            string body;
             try
             {
                 var master = new AddonMaster.SelectYesno((nint)addon);
@@ -3282,15 +3373,24 @@ public sealed unsafe class ExchangeExecutor(
                     continue;
                 }
 
-                body = master.Text ?? string.Empty;
+                open.Add(((nint)addon, master.Text ?? string.Empty));
             }
             catch
             {
                 continue;
             }
+        }
 
-            // 必須条件: 本文に通貨名とコストの両方が含まれること
-            if (!body.Contains(currencyName, StringComparison.Ordinal) || !body.Contains(cost, StringComparison.Ordinal))
+        if (open.Count == 0)
+        {
+            return false;
+        }
+
+        // --- 1 段目: 本文が合うもの。いちばん確かな採り方 ---
+        foreach (var (address, body) in open)
+        {
+            if (!body.Contains(currencyName, StringComparison.Ordinal) ||
+                !body.Contains(cost, StringComparison.Ordinal))
             {
                 continue;
             }
@@ -3298,7 +3398,7 @@ public sealed unsafe class ExchangeExecutor(
             // 追加の裏付け: 報酬名がアドオン内のどこかに出ているか
             if (!string.IsNullOrEmpty(attempt.RewardName))
             {
-                var texts = CollectTexts(addon);
+                var texts = CollectTexts((AtkUnitBase*)address);
                 var rewardShown = texts.Any(t => t.Contains(attempt.RewardName, StringComparison.Ordinal));
                 if (!rewardShown)
                 {
@@ -3308,9 +3408,67 @@ public sealed unsafe class ExchangeExecutor(
                 }
             }
 
-            found = addon;
+            found = (AtkUnitBase*)address;
             text = body;
             return true;
+        }
+
+        // --- 2 段目: 自分が開かせたものとして採る ---
+        //
+        // **本文は品によって変わる。**
+        // 実測できていたのは消耗品の「アラガントームストーン:数理×20と交換します。」1 例だけ。
+        // 装備品は確認がもう 1 枚増えることが別途分かっていた（docs/05）。
+        // 本文照合だけを入口にしていたため、装備品では一度も押せず、
+        // 15 秒待って「所持数が動いていません」と誤診断していた。
+        //
+        // **推測では採らない。「撃った直後に自分が開かせたもの」だけを採る。**
+        //
+        // 所有権の記録だけでは足りない。自分の操作は移動や会話を含めて何分も続き、
+        // その間に利用者が出した確認ウィンドウまで「自分のもの」になる。
+        // 本文を見ない経路なので、そのまま押すと
+        // 「アイテムを捨てますか」「ログアウトしますか」に Yes を押しうる。
+        //
+        // 撃った時刻より**あとに**開いたものに限り、かつ撃ってすぐの間だけを見る。
+        var firedAt = attempt.FiredAtUtc;
+        var withinWindow = firedAt != default && DateTime.UtcNow - firedAt <= OwnedDialogWindow;
+
+        if (withinWindow &&
+            this.ownership.TryGetOwnedSince("SelectYesno", firedAt, out var ownedDialog))
+        {
+            var body = open.FirstOrDefault(x => x.Address == (nint)ownedDialog).Body ?? string.Empty;
+
+            // **押してはいけない本文は拒む。**
+            // 本文で「合っている」ことを確かめられない経路なので、
+            // せめて「明らかに違う」ものは弾く。取り返しのつかない操作を防ぐ。
+            var dangerous = DangerousDialogWords.FirstOrDefault(
+                w => body.Contains(w, StringComparison.Ordinal));
+
+            if (dangerous is not null)
+            {
+                this.anomalyLog.Error(
+                    "Exchange",
+                    $"確認ダイアログに「{dangerous}」が含まれるため押しません。交換のものではない可能性があります。本文: 「{body}」");
+                return false;
+            }
+
+            this.anomalyLog.Warn(
+                "Exchange",
+                $"確認ダイアログの本文が想定と違いますが、撃った直後に自分が開かせたものとして扱います。" +
+                $"本文: 「{body}」 / 探していた語: 「{currencyName}」「{cost}」 / " +
+                $"表示されていたテキスト: {string.Join(" / ", CollectTexts(ownedDialog).Where(x => !string.IsNullOrWhiteSpace(x)))}");
+
+            found = ownedDialog;
+            text = body;
+            return true;
+        }
+
+        // 押さずに見送ったことを残す。黙って見送ると、次の報告でも原因が分からない。
+        if (EzThrottler.Throttle("AutoCollector.ConfirmUnmatched", 5000))
+        {
+            this.anomalyLog.Warn(
+                "Exchange",
+                $"確認ダイアログを {open.Count} 枚見つけましたが、どれも自分のものと判断できませんでした。" +
+                $"探していた語: 「{currencyName}」「{cost}」 / 本文: {string.Join(" / ", open.Select(x => $"「{x.Body}」"))}");
         }
 
         return false;
