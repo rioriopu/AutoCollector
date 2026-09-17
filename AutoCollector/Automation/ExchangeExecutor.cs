@@ -2018,6 +2018,27 @@ public sealed unsafe class ExchangeExecutor(
         // 大きくずれている場合は移動そのものを出し直す必要がある。
         if (this.interaction.TryFindNpc(target.NpcDataId, out var liveNpc) && liveNpc is not null)
         {
+            // **届く距離まで来たら、経路が終わるのを待たずに話しかける。**
+            //
+            // vnavmesh は NPC の足元まで行こうとする。カウンターやテーブルの向こうに
+            // 立っている NPC だと、そこへは行けないので近くを走り続ける。
+            //
+            // 到着の判定は「vnavmesh が走り終わったか」を条件にしていたため、
+            // 走り続けているあいだは Arrived も ShortOfTarget も返らない。
+            // 実際、ジルコン（ソリューション・ナイン）で、話しかけられる距離まで
+            // 近づいているのに、あいだのテーブルへ向かって走り続けた。
+            //
+            // 話しかけられるかどうかは距離だけで決まる。
+            // 届いているなら、経路の都合は関係ない。
+            if (InteractionService.IsWithinInteractRange(liveNpc))
+            {
+                this.navigation.Stop();
+                this.Step = ExchangeStep.Interact;
+                this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(30);
+                this.StatusDetail = $"{target.NpcName} に話しかけています";
+                return;
+            }
+
             var live = liveNpc.Position;
 
             if (Vector3.Distance(live, this.navigationDestination) > 3f &&
