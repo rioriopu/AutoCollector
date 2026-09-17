@@ -130,10 +130,20 @@ public abstract class IpcGateBase(string internalName, AnomalyLog anomalyLog)
         }
         catch (Exception ex)
         {
+            this.LastError = $"{name}: {ex.GetType().Name}: {ex.Message}";
             this.LogThrottled($"{name}: 呼び出しに失敗しました: {ex.Message}");
             return false;
         }
     }
+
+    /// <summary>
+    /// 直近の呼び出しの失敗内容。
+    ///
+    /// 記録は 10 秒に 1 回へ間引いている。間引かれると理由がどこにも残らず、
+    /// 画面には「〜できませんでした」しか出ない。
+    /// 呼び出し側が理由を添えられるよう、最後の 1 件だけは覚えておく。
+    /// </summary>
+    public string LastError { get; private set; } = string.Empty;
 
     /// <summary>同じ内容を毎フレーム記録しないよう間引く。</summary>
     protected void LogThrottled(string message)

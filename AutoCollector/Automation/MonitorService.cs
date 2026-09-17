@@ -687,7 +687,11 @@ public sealed class MonitorService(
             //
             // 実際、外部プラグインの処理待ちで中止になったものが 2 回数えられ、
             // 装備 9 件のプリセットが丸ごと無効化されて保存されていた。
-            if (this.executor.Failure == ExchangeFailure.Aborted)
+            //
+            // 相手プラグインの都合（ExternalPluginError）も同じ。
+            // 「Artisan へ停止を依頼できませんでした」でトームストーンのプリセットが
+            // 自動で無効化された報告がある。製作とは何の関係も無い設定だった。
+            if (this.executor.Failure is ExchangeFailure.Aborted or ExchangeFailure.ExternalPluginError)
             {
                 this.anomalyLog.Info(
                     "Monitor",

@@ -35,7 +35,10 @@ public sealed record SelfCheckReport(DateTime At, IReadOnlyList<SelfCheckItem> I
 public sealed class SelfCheck(Config config, AnomalyLog anomalyLog, TomestoneService tomestoneService, CurrencyService currencyService)
 {
     /// <summary>SelfCheck が参照する連携プラグイン。バージョン変化の検知に使う。</summary>
-    private static readonly string[] TrackedPlugins = ["AutoDuty", "AutoRetainer", "vnavmesh", "Lifestream"];
+    // Artisan も載せる。載せていなかったため、導入の有無が画面から分からず、
+    // 「Artisan へ停止を依頼できませんでした」の原因を切り分けられなかった。
+    private static readonly string[] TrackedPlugins =
+        ["AutoDuty", "AutoRetainer", "vnavmesh", "Lifestream", "Artisan"];
 
     public SelfCheckReport? Latest { get; private set; }
 
