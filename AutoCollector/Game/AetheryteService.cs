@@ -54,6 +54,32 @@ public sealed class AetheryteService(AnomalyLog anomalyLog)
     /// 指定エリアへのテレポート先を探す。
     /// アクセスしていないエーテライトは AetheryteList に含まれないため、その場合は false になる。
     /// </summary>
+    /// <summary>
+    /// アクセス済みエーテライトの一覧を、いま信じてよいか。
+    ///
+    /// **コンテンツの中では一覧が空になる。**
+    /// 空を「1 つもアクセスしていない」と読むと、行けるはずの街へ
+    /// 「エーテライトが無い」と言って失敗する。
+    ///
+    /// 実際、討伐の最中に閾値へ達したとき、
+    /// 「ソリューション・ナイン へ行けません」と出て止まっていた。
+    /// その日のうちに何度もテレポートできている街だった。
+    ///
+    /// 空のときは「まだ判断できない」として扱い、判定を先送りする。
+    /// </summary>
+    public bool IsListReady()
+    {
+        try
+        {
+            return Svc.AetheryteList.Any();
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Warn("Aetheryte", $"エーテライト一覧を読めません: {ex.Message}");
+            return false;
+        }
+    }
+
     public bool TryFindTarget(uint territoryId, out TeleportTarget? target)
     {
         target = null;

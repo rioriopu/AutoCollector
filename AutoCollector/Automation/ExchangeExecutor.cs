@@ -895,9 +895,19 @@ public sealed unsafe class ExchangeExecutor(
                 return false;
             }
 
+            // **行けるかどうかは、判断できるときにだけ判断する。**
+            //
+            // アクセス済みエーテライトの一覧は、コンテンツの中では空になる。
+            // 交換は周回の途中で予約されるため、この判定はまさにその最中に走る。
+            // 空を「アクセスしていない」と読んで、行ける街へ行けないと言っていた。
+            //
+            // ここで判断しなくても、実際にテレポートする段（TickTeleport）で
+            // もう一度引き直す。そのときは街にいるので一覧が読める。
+            //
             // エーテライトが無いエリアがある（例: ウルダハ：ザル回廊）。
             // その場合は同じ網の親エーテライトへ飛び、そこから網で移動する。
-            if (!this.aetheryte.TryFindTarget(definition.TerritoryId, out _))
+            if (this.aetheryte.IsListReady() &&
+                !this.aetheryte.TryFindTarget(definition.TerritoryId, out _))
             {
                 if (!this.aetheryte.TryFindAethernetRoute(definition.TerritoryId, out plannedRoute) || plannedRoute is null)
                 {
@@ -1977,9 +1987,30 @@ public sealed unsafe class ExchangeExecutor(
         // 直接飛べないエリアでは玄関口へ飛ぶ。目的エリアへは網で移る。
         var destination = this.aethernetRoute?.Hub;
 
-        if (destination is null && (!this.aetheryte.TryFindTarget(target.TerritoryId, out destination) || destination is null))
+        if (destination is null && !this.aetheryte.TryFindTarget(target.TerritoryId, out destination))
         {
-            this.Fail(ExchangeFailure.AetheryteNotAttuned, "テレポート先のエーテライトが見つかりません");
+            // **ここで網の経路を引き直す。**
+            //
+            // 予約した時点ではコンテンツの中にいて、アクセス済みエーテライトの
+            // 一覧が空だった可能性がある。そのときは判断を先送りしてある。
+            // いまは街にいるので読める。
+            if (this.aetheryte.TryFindAethernetRoute(target.TerritoryId, out var lateRoute) && lateRoute is not null)
+            {
+                this.aethernetRoute = lateRoute;
+                destination = lateRoute.Hub;
+
+                this.anomalyLog.Info(
+                    "Travel",
+                    $"{NpcLocationService.GetTerritoryName(target.TerritoryId)} へは " +
+                    $"{lateRoute.Hub.Name} からエーテライト網で向かいます");
+            }
+        }
+
+        if (destination is null)
+        {
+            this.Fail(
+                ExchangeFailure.AetheryteNotAttuned,
+                $"{NpcLocationService.GetTerritoryName(target.TerritoryId)} のエーテライトにアクセスしていません");
             return;
         }
 
