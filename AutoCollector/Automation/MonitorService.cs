@@ -261,7 +261,13 @@ public sealed class MonitorService(
         // 勝手にテレポートして交換を始めてしまう。
         if (Plugin.C.RequireExternalAutomationRunning && !automationRunning)
         {
-            this.LastDecision = "AutoDuty や Artisan が動作していないため、自動交換は待機しています";
+            // 閾値に達しているのに動けない、という状態は伝える。
+            // 「待機しています」だけだと、交換する物が無いのか、
+            // 相手待ちなのかが読めない。
+            this.LastDecision = this.Snapshot.ReachedCount > 0
+                ? "交換したいものがありますが、AutoDuty や Artisan が動作していないため待機しています。"
+                  + "「周回を開始する」で始められます"
+                : "AutoDuty や Artisan が動作していないため、自動交換は待機しています";
             return;
         }
 

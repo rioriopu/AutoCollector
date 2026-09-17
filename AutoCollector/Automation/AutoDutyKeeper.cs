@@ -378,7 +378,19 @@ public sealed class AutoDutyKeeper(
         // **ただし永久には待たない。**
         // 交換先をどうしても解決できない設定だと、待ち続けると周回まで止まる。
         // 交換できないことより、周回が止まることのほうが損が大きい。
-        if (Plugin.P.MonitorService is { HasPendingExchange: true })
+        // **AD が止まっているなら、待つと詰む。**
+        //
+        // 交換は周回への相乗りとして動く設計で、AD が動いていないと始まらない
+        // （RequireExternalAutomationRunning）。
+        //
+        // その状態で「交換がまだ済んでいない」を理由に周回を止めると、
+        // 交換は AD が動き出すのを待ち、AD は交換が済むのを待つ。
+        // 互いに待ち合って、どちらも永久に動かない。
+        //
+        // 実際、2 周目の軍票交換と納品が終わったところで止まる形で再現した。
+        // 待つ意味があるのは「AD がまだ後片づけをしている」あいだだけで、
+        // 完全に止まったあとは、再開させることが交換への近道になる。
+        if (Plugin.P.MonitorService is { HasPendingExchange: true, Snapshot.AutomationRunning: true })
         {
             if (this.pendingSinceUtc == DateTime.MinValue)
             {
