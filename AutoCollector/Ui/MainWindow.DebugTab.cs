@@ -67,15 +67,31 @@ public sealed partial class MainWindow
             changed = true;
         }
 
-        if (ImGui.IsItemDeactivatedAfterEdit())
-        {
-            this.plugin.StartFileLog();
-        }
+        // **IsItem* は直前に積んだものを見る。**
+        // 入力欄と、この判定のあいだに別のものを描いてはいけない。
+        // 説明文を挟んだところ、欄を空にして確定しても開き直されなくなった。
+        var logDirEdited = ImGui.IsItemDeactivatedAfterEdit();
 
         ImGui.SameLine();
         if (ImGui.SmallButton("開き直す##restartlog"))
         {
             this.plugin.StartFileLog();
+        }
+
+        if (logDirEdited)
+        {
+            this.plugin.StartFileLog();
+        }
+
+        // 空のときにどこへ書かれるかを出す。入力欄が空のままだと
+        // 「記録されないのでは」と読めてしまう。
+        //
+        // 描くのは判定とボタンを積んだあと。ここを上へ動かすと両方が壊れる。
+        if (string.IsNullOrWhiteSpace(Plugin.C.LogDirectory))
+        {
+            ImGui.TextColored(
+                ImGuiColors.DalamudGrey,
+                $"  空のときはここへ書きます: {Plugin.ResolveLogDirectory()}");
         }
 
         var writer = this.plugin.FileLog;

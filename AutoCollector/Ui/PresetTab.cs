@@ -942,13 +942,28 @@ public sealed class PresetTab(Plugin plugin)
                 $" → あと {item.Remaining} 個 = {trade} = {item.Subtotal:N0}");
         }
 
+        // **費用を引けない品があるなら、合計を断言しない。**
+        //
+        // 引けなかった品は 0 として足されるため、合計が本当より小さくなる。
+        // それを「足りています」と緑で出していた。9 品すべて引けていないのに
+        // 「要る 0 / 足りています」と出て、交換が進まない理由を隠していた。
+        var unknownCost = goal.Items.Any(x => x.Cost == 0);
+
         ImGui.TextUnformatted($"要る{goal.CurrencyName}: {goal.RequiredScrips:N0}");
         ImGui.SameLine();
         ImGui.TextColored(ImGuiColors.DalamudGrey, $"  いま {goal.HeldScrips:N0}");
         ImGui.SameLine();
-        ImGui.TextColored(
-            goal.MissingScrips > 0 ? ImGuiColors.DalamudYellow : ImGuiColors.HealerGreen,
-            goal.MissingScrips > 0 ? $"  あと {goal.MissingScrips:N0}" : "  足りています");
+
+        if (unknownCost)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudYellow, "  費用を引けない品があるため、この合計は当てになりません");
+        }
+        else
+        {
+            ImGui.TextColored(
+                goal.MissingScrips > 0 ? ImGuiColors.DalamudYellow : ImGuiColors.HealerGreen,
+                goal.MissingScrips > 0 ? $"  あと {goal.MissingScrips:N0}" : "  足りています");
+        }
 
         if (goal.MissingScrips > 0)
         {

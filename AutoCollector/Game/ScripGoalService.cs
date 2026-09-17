@@ -81,13 +81,24 @@ public sealed class ScripGoalService(
     CurrencyService currency,
     InclusionShopCatalog catalog,
     CraftPlanService craftPlans,
-    CurrencyCatalog currencyCatalog)
+    CurrencyCatalog currencyCatalog,
+    ExchangeResolver resolver)
 {
     private readonly AnomalyLog anomalyLog = anomalyLog;
     private readonly CurrencyService currency = currency;
     private readonly InclusionShopCatalog catalog = catalog;
     private readonly CraftPlanService craftPlans = craftPlans;
     private readonly CurrencyCatalog currencyCatalog = currencyCatalog;
+
+    /// <summary>
+    /// 交換所を直接見る索引。
+    ///
+    /// 「アイテム交換」窓口に載らない通貨（トームストーンなど）の費用は
+    /// <see cref="InclusionShopCatalog"/> からは引けない。そちらで引けなかったときに使う。
+    /// **ここから索引づくりは始めない。** 費用を知りたいだけの場所で、
+    /// ゲームデータ全体の走査を始めるのは割に合わない。
+    /// </summary>
+    private readonly ExchangeResolver resolver = resolver;
 
     /// <summary>
     /// 交換費用の控え。
@@ -244,8 +255,38 @@ public sealed class ScripGoalService(
             this.anomalyLog.Warn("Goal", $"ItemId {rewardItemId} の交換費用を引けませんでした: {ex.Message}");
         }
 
+        // --- 第 2 経路: 交換所を直接見る索引から引く ---
+        //
+        // 「アイテム交換」窓口に載らない通貨（トームストーンなど）は、上の経路では
+        // 一生引けない。ListCategories がその通貨で 0 件になるため、ループが 1 周も回らない。
+        //
+        // 結果、費用 0 →「要る通貨 0」→「足りています」と緑で断言していた。
+        // 実際には 1 個も交換できていないのに、画面は足りていると言う。
+        //
+        // **索引づくりはここから始めない。**（このメソッドは描画から毎フレーム呼ばれる）
+        // すでに作ってあるときだけ使う。
+        try
+        {
+            if (this.resolver.IsBuiltFor(currencyItemId))
+            {
+                var definition = this.resolver.Resolve(currencyItemId, rewardItemId, 0);
+
+                // 報酬やコストが複数あるものは交換を実行できない。費用としても採らない。
+                if (definition is { SingleReward: true, SingleCost: true } && definition.CurrencyCost > 0)
+                {
+                    var found = (definition.CurrencyCost, Math.Max(1u, definition.RewardQuantity));
+                    this.costCache[key] = found;
+                    return found;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Warn("Goal", $"ItemId {rewardItemId} の交換費用を索引から引けませんでした: {ex.Message}");
+        }
+
         // 引けなかったことは控えない。
-        // 交換画面の一覧はあとから作られることがあり、控えると 0 のまま固定されてしまう。
+        // 交換画面の一覧も索引もあとから作られることがあり、控えると 0 のまま固定されてしまう。
         return (0, 1);
     }
 

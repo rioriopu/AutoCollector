@@ -224,7 +224,15 @@ public sealed class Config
     /// ネットワーク共有を指定できる。共有が落ちていても本体の動作には影響しない
     /// （書き込みは背景スレッドで行い、失敗しても諦めるだけ）。
     /// </summary>
-    public string LogDirectory { get; set; } = @"\\rio-pc\DevPlugins\AutoCollectorLogs";
+    /// <remarks>
+    /// **空にしておく。** 空ならプラグインの設定フォルダへ書く。
+    ///
+    /// 以前は開発機の共有（<c>\\rio-pc\DevPlugins\AutoCollectorLogs</c>）を既定にしていた。
+    /// 配布版ではその共有に誰も届かず、詳細ログを入れても
+    /// 「ネットワーク パスが見つかりません」で 1 行も残らない。
+    /// 不具合の報告を受けても、こちらから見られる記録が無い状態だった。
+    /// </remarks>
+    public string LogDirectory { get; set; } = string.Empty;
 
     /// <summary>
     /// 外部の自動化プラグイン（AutoDuty / Artisan）が動作しているときだけ自動交換する。
