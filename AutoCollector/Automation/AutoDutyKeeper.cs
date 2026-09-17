@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using AutoCollector.Diagnostics;
 using AutoCollector.Game;
 using AutoCollector.Ipc;
@@ -35,6 +36,17 @@ public sealed class AutoDutyKeeper(
 
     /// <summary>再開したあと、これだけの間に止まったら「押し返された」とみなす。</summary>
     private static readonly TimeSpan CountermandWindow = TimeSpan.FromSeconds(20);
+
+    /// <summary>
+    /// 交換がまだ渡せていないときに、周回の再開を待つ上限。
+    ///
+    /// 交換先を解決できない設定では永久に渡せない。
+    /// 待ち続けると周回まで止まるので、諦めて回し直す。
+    /// </summary>
+    private static readonly TimeSpan PendingExchangeHold = TimeSpan.FromMinutes(3);
+
+    /// <summary>交換を待ち始めた時刻。</summary>
+    private DateTime pendingSinceUtc = DateTime.MinValue;
 
     private readonly AnomalyLog anomalyLog = anomalyLog;
     private readonly AutoDutyIpc autoDuty = autoDuty;
@@ -77,12 +89,42 @@ public sealed class AutoDutyKeeper(
     /// <summary>いま何をしているか。UI に出す。</summary>
     public string Status { get; private set; } = string.Empty;
 
+    /// <summary>
+    /// 周回の維持を止めているか。
+    ///
+    /// 利用者が「止める」を押したら、押し返さない。
+    /// これを見ずに再開させていたため、止めたつもりでも AutoDuty が回り続け、
+    /// AutoDuty 側を無効にするまで止まらなかった。
+    /// </summary>
+    public bool Suspended { get; private set; }
+
     /// <summary>維持をやり直す。UI から呼ぶ。</summary>
     public void Resume()
     {
         this.GaveUp = false;
+        this.Suspended = false;
         this.countermands = 0;
         this.Status = string.Empty;
+    }
+
+    /// <summary>
+    /// 周回の維持を止める。停止操作から必ず通す。
+    ///
+    /// **いま走っている周回は別に止める必要がある。**
+    /// ここで止まるのは「終わったあとに再開させる」ほうだけ。
+    /// AutoDuty には渡した周回数ぶんを自走する力があるため、
+    /// 片方だけだと止めたつもりで回り続ける。
+    /// </summary>
+    public void Suspend(string reason)
+    {
+        if (this.Suspended)
+        {
+            return;
+        }
+
+        this.Suspended = true;
+        this.Status = $"周回の維持を止めています（{reason}）";
+        this.anomalyLog.Info("AutoDuty", $"周回の維持を止めます: {reason}");
     }
 
     public void Tick()
@@ -96,8 +138,48 @@ public sealed class AutoDutyKeeper(
         // 停止したあとでは現在地が街になっているため、そこでは取れない。
         this.RememberDutyTerritory();
 
-        if (!Plugin.C.KeepAutoDutyLooping || this.GaveUp)
+        // **止めているあいだも観測は続ける。**
+        //
+        // ここで戻ると AutoDuty の状態を見ないまま値が古いまま残る。
+        // 有効に戻した 1 回目の Tick が「前に見た停止の続き」として扱われ、
+        // その場でコンテンツへ突入してしまう。
+        //
+        // 見るのは続け、再開させるかどうかだけを止める。
+        var holdReason = string.Empty;
+
+        if (!Plugin.C.KeepAutoDutyLooping)
         {
+            holdReason = "設定で周回の維持を切っています";
+        }
+        else if (this.GaveUp)
+        {
+            holdReason = "押し返されたため維持をやめています";
+        }
+        else if (this.Suspended)
+        {
+            holdReason = "止めています";
+        }
+        else if (!Plugin.C.Presets.Any(x => x.Enabled))
+        {
+            // **交換するものが 1 件も無いなら、周回を維持する理由が無い。**
+            //
+            // ここはプリセットを一切見ていなかった。そのため全部のチェックを外しても、
+            // プリセットを消しても、周回だけが回り続けた。
+            // 利用者から見ると「オートコレクターを無効にしても止まらない」。
+            holdReason = "有効なプリセットが無いため、周回は維持しません";
+        }
+
+        if (holdReason.Length > 0)
+        {
+            this.Status = holdReason;
+
+            // 見た目の状態だけ更新して、再開の判断には進まない。
+            // 覚えている途中経過は捨てる。止めているあいだの変化を
+            // 「続き」として扱わないため。
+            this.sawRunning = false;
+            this.stoppedSinceUtc = DateTime.MinValue;
+            this.sawLoopingClearedBeforeStop = false;
+            this.pendingSinceUtc = DateTime.MinValue;
             return;
         }
 
@@ -285,6 +367,36 @@ public sealed class AutoDutyKeeper(
             reason = "交換の処理中です";
             return false;
         }
+
+        // **まだ渡せていない交換があるなら待つ。**
+        //
+        // ここは「交換が走っているか」しか見ていなかった。
+        // 閾値に達していても、索引ができていない・移動できないなどで
+        // 渡せずにいるあいだは走っていないため、そのまま周回を再開させていた。
+        // 結果、交換されないままコンテンツへ戻り続けた。
+        //
+        // **ただし永久には待たない。**
+        // 交換先をどうしても解決できない設定だと、待ち続けると周回まで止まる。
+        // 交換できないことより、周回が止まることのほうが損が大きい。
+        if (Plugin.P.MonitorService is { HasPendingExchange: true })
+        {
+            if (this.pendingSinceUtc == DateTime.MinValue)
+            {
+                this.pendingSinceUtc = DateTime.UtcNow;
+            }
+
+            if (DateTime.UtcNow - this.pendingSinceUtc <= PendingExchangeHold)
+            {
+                reason = "閾値に達したプリセットの交換がまだ済んでいません";
+                return false;
+            }
+
+            this.anomalyLog.Warn(
+                "AutoDuty",
+                $"交換が {PendingExchangeHold.TotalMinutes:F0} 分待っても始まらないため、周回を再開します");
+        }
+
+        this.pendingSinceUtc = DateTime.MinValue;
 
         // 結果が未確認の交換が残っている場合は何も動かさない。
         if (this.executor.InFlight is not null)

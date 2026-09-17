@@ -634,7 +634,36 @@ public sealed class Plugin : IDalamudPlugin
     /// 緊急停止。自分が握った制御だけを解放する。
     /// 外部プラグインそのものを止めることはしない。
     /// </summary>
-    internal void EmergencyStop(string reason)
+    /// <param name="stopExternalAutomation">
+    /// 走っている AutoDuty の周回も止めるか。
+    ///
+    /// **利用者が止めたときだけ true。**
+    /// アンロードや更新で通すと、こちらを入れ替えただけで相手の周回が消える。
+    /// AutoDuty の Stop は TaskManager ごと畳むため、ダンジョン後に積まれた
+    /// ループ間処理（リテイナー・GC 納品・修理）の予約まで巻き添えになる。
+    /// </param>
+    /// <summary>
+    /// 止めたものを全部戻す。
+    ///
+    /// **止めるときに立てた旗は、1 か所で全部下ろす。**
+    /// 停止は 2 つの旗を立てる。周回の維持（AutoDutyKeeper.Suspended）と、
+    /// 交換の封鎖（ExchangeExecutor の aborted）。
+    ///
+    /// 戻す側が維持しか見ていなかったため、止めたあとに周回だけが動き出し、
+    /// 交換は「停止中です」で弾かれ続けた。周回が回るのに一度も交換されない、
+    /// という直したはずの症状がそのまま再現していた。
+    ///
+    /// しかも封鎖を下ろす手段が画面に無かった。交換が実行中に止めた場合は
+    /// 状況タブの「状態をリセットして再開する」で戻せるが、
+    /// 何も動いていないときに止めるとその画面自体が出ない。
+    /// </summary>
+    internal void ResumeAfterStop()
+    {
+        this.AutoDutyKeeper?.Resume();
+        this.ExchangeExecutor?.ClearAbort();
+    }
+
+    internal void EmergencyStop(string reason, bool stopExternalAutomation = true)
     {
         // 束ねている側から先に止める。
         //
@@ -645,6 +674,33 @@ public sealed class Plugin : IDalamudPlugin
 
         // 何よりも先に発火経路を封鎖する。inFlight はクリアしない（未解決として残す）。
         this.ExchangeExecutor?.Abort(reason);
+
+        // **周回の維持も止める。**
+        //
+        // ここを通していなかったため、止めても AutoDuty が周回を終えるたびに
+        // こちらから再開させ続けていた。利用者から見ると
+        // 「オートコレクターを止めても周回が止まらない」。
+        this.AutoDutyKeeper?.Suspend(reason);
+
+        // **いま走っている周回も止める。**
+        //
+        // 維持を止めるだけでは足りない。AutoDuty には渡した周回数ぶんを
+        // 自走する力があるため、止めたつもりで回り続ける。
+        //
+        // 利用者が明示的に止めたときだけ通す。協調的な抑制で済む相手ではない。
+        try
+        {
+            if (stopExternalAutomation &&
+                this.AutoDuty is { IsLoaded: true } && this.AutoDuty.IsRunningFailClosed())
+            {
+                this.AutoDuty.TryStop();
+                this.AnomalyLog.Info("AutoDuty", "走っていた周回も止めました");
+            }
+        }
+        catch (Exception ex)
+        {
+            this.AnomalyLog.Warn("Stop", $"AutoDuty を止められませんでした: {ex.Message}");
+        }
 
         this.AnomalyLog.Warn("Stop", $"緊急停止しました: {reason}");
         Svc.Chat.Print($"[Auto Collector] 停止しました: {reason}");
@@ -838,7 +894,7 @@ public sealed class Plugin : IDalamudPlugin
 
         try
         {
-            this.EmergencyStop("プラグインのアンロード");
+            this.EmergencyStop("プラグインのアンロード", stopExternalAutomation: false);
         }
         catch (Exception ex)
         {

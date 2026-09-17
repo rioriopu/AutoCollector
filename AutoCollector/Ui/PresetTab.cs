@@ -8,6 +8,7 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Colors;
 using Dalamud.Interface.Utility.Raii;
 using ECommons.Configuration;
+using ECommons.GameHelpers;
 
 namespace AutoCollector.Ui;
 
@@ -35,6 +36,12 @@ public sealed class PresetTab(Plugin plugin)
     private readonly Plugin plugin = plugin;
 
     private string rewardSearch = string.Empty;
+
+    /// <summary>開始・停止を押した結果。押しても無反応に見えないよう画面へ返す。</summary>
+    private string runControlNote = string.Empty;
+
+    /// <summary>その結果が、どのプリセットのものか。別のプリセットへ持ち越さない。</summary>
+    private Guid runControlPresetId = Guid.Empty;
     private Guid editingPresetId = Guid.Empty;
 
     /// <summary>選んでいる系統。ゲーム内の交換画面と同じ並び。</summary>
@@ -431,6 +438,10 @@ public sealed class PresetTab(Plugin plugin)
 
         ImGui.Spacing();
 
+        this.DrawRunControls(preset);
+
+        ImGui.Separator();
+
         if (ImGui.Button("このプリセットを削除"))
         {
             toRemove = preset;
@@ -609,6 +620,162 @@ public sealed class PresetTab(Plugin plugin)
             ImGui.SameLine();
             ImGui.TextColored(ImGuiColors.DalamudGrey, $"  {offer.CurrencyCost:N0}");
         }
+    }
+
+    /// <summary>
+    /// 周回と交換をここから始める・止める。
+    ///
+    /// **プリセットを有効にしただけでは AutoDuty は始まらない。**
+    /// 自動交換は周回への相乗りとして動く設計で、こちらから周回を起こすことはない
+    /// （<c>RequireExternalAutomationRunning</c>）。
+    /// そのため「有効にしたのに何も起きない」と見える。始める操作をここに置く。
+    ///
+    /// 止めるほうも要る。周回の維持はプリセットとは別に動いていたため、
+    /// プリセットを無効にしても AutoDuty が回り続けていた。
+    /// </summary>
+    private void DrawRunControls(ExchangePreset preset)
+    {
+        ImGui.Separator();
+
+        var keeper = this.plugin.AutoDutyKeeper;
+        var autoDuty = this.plugin.AutoDuty;
+
+        // 画面用の問い合わせを使う。判定用のものは読めないたびに警告を書くため、
+        // 毎フレーム呼ぶと記録が埋まる。
+        var runState = autoDuty.IsRunningForDisplay();
+        var running = runState == true;
+
+        // 交換や周回の処理が動いているあいだは押させない。
+        // 押せると移動が二重になる。
+        var busy = this.plugin.ExchangeExecutor.IsBusy ||
+                   this.plugin.GoalRunner.IsRunning ||
+                   this.plugin.RetainerRestock.IsRunning ||
+                   this.plugin.CraftRunner.IsRunning ||
+                   this.plugin.CollectableCycle.IsRunning;
+
+        // コンテンツの中では押させない。
+        // AutoDuty へ行き先を渡すと、いま選んでいるコンテンツを書き換えてしまう。
+        //
+        // **分からないときは押させない。**
+        // Player.Available はエリア移動のロード中に false になるが、
+        // AutoDuty 側の判定はエリア番号で行うため、その間もコンテンツ扱いになる。
+        // Available を AND すると、ロード中だけ判定が緩んで押せてしまう。
+        var inDuty = !Player.Available || Player.IsInDuty;
+
+        var canStart = preset.Enabled && !running && !busy && !inDuty;
+
+        // --- 開始 ---
+        using (ImRaii.Disabled(!canStart))
+        {
+            if (ImGui.Button("周回を開始する##start"))
+            {
+                this.StartLoop(preset);
+            }
+        }
+
+        ImGui.SameLine();
+
+        // --- 停止 ---
+        if (ImGui.Button("止める##stop"))
+        {
+            this.plugin.EmergencyStop($"「{preset.Name}」から止められました");
+            this.runControlPresetId = preset.Id;
+            this.runControlNote = "止めました。周回の維持も止めています";
+        }
+
+        ImGui.SameLine();
+
+        // --- いまの状態 ---
+        if (!preset.Enabled)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudGrey, "  このプリセットが無効です");
+        }
+        else if (!autoDuty.IsLoaded)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudGrey, "  AutoDuty が導入されていません");
+        }
+        else if (runState is null)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudGrey, "  AutoDuty の状態を読み取れません");
+        }
+        else if (running)
+        {
+            ImGui.TextColored(ImGuiColors.HealerGreen, "  周回中です");
+        }
+        else if (inDuty)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudGrey, "  コンテンツの中では始められません");
+        }
+        else if (busy)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudGrey, "  ほかの処理が動いています");
+        }
+        else if (keeper.Suspended)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudYellow, "  止めています。「周回を開始する」で戻せます");
+        }
+        else
+        {
+            ImGui.TextColored(ImGuiColors.DalamudGrey, "  止まっています");
+        }
+
+        if (this.runControlPresetId == preset.Id && !string.IsNullOrEmpty(this.runControlNote))
+        {
+            ImGui.TextColored(ImGuiColors.DalamudYellow, $"  {this.runControlNote}");
+        }
+
+        ImGui.TextColored(
+            ImGuiColors.DalamudGrey,
+            "  交換は周回に相乗りして行います。周回が動いていないあいだは交換も待機します");
+    }
+
+    /// <summary>
+    /// 周回を起こす。
+    ///
+    /// AutoDuty には行き先が要る。どこを回っていたかを覚えていないと始められない。
+    /// その場合は利用者に 1 度だけ手で始めてもらう。
+    /// </summary>
+    private void StartLoop(ExchangePreset preset)
+    {
+        this.runControlPresetId = preset.Id;
+        this.runControlNote = string.Empty;
+
+        var autoDuty = this.plugin.AutoDuty;
+
+        if (!autoDuty.IsLoaded)
+        {
+            this.runControlNote = "AutoDuty が導入されていません";
+            return;
+        }
+
+        // 止めた記録が残っていると、始めてもすぐ押し返される。先に戻す。
+        // 交換の封鎖も一緒に下ろす。片方だけだと周回だけが回り、交換は弾かれ続ける。
+        this.plugin.ResumeAfterStop();
+
+        var territory = Plugin.C.LastDutyTerritoryId;
+
+        if (territory == 0)
+        {
+            this.runControlNote =
+                "前に回っていた場所が分かりません。AutoDuty で 1 度だけ手で始めてください。以後はここから始められます";
+            return;
+        }
+
+        if (!autoDuty.TryContentHasPath(territory, out var hasPath) || !hasPath)
+        {
+            this.runControlNote =
+                $"{NpcLocationService.GetTerritoryName(territory)} の経路を AutoDuty が持っていません";
+            return;
+        }
+
+        // loops には必ず 0 を渡す。0 以外は AutoDuty の設定を恒久的に書き換える。
+        if (!autoDuty.TryRun(territory))
+        {
+            this.runControlNote = "AutoDuty へ開始を伝えられませんでした";
+            return;
+        }
+
+        this.runControlNote = $"{NpcLocationService.GetTerritoryName(territory)} の周回を始めました";
     }
 
     /// <summary>
