@@ -966,6 +966,10 @@ public sealed unsafe class ExchangeExecutor(
         this.pendingRequest = null;
         this.travelTarget = definition;
         this.session = session;
+
+        // 前の移動の打ち切り理由を持ち越さない。
+        // 残っていると、次の移動で交換リストの 2 件目以降が 1 度も試されない。
+        this.sessionExhausted = false;
         this.aethernetTried = false;
         this.reapproachAttempts = 0;
         this.destinationUpdates = 0;
@@ -3202,11 +3206,16 @@ public sealed unsafe class ExchangeExecutor(
 
             if (this.session is { } current)
             {
-                current.Completed++;
-                if (current.RemainingCount > 0)
-                {
-                    current.RemainingCount--;
-                }
+                // **1 回の発火で何回ぶん撃ったかを見る。**
+                //
+                // 1 しか引いていなかった。まとめ買いが効く窓口では
+                // 「交換する回数 5」を指定しても 5 → 4 → 3 … と撃ち続け、
+                // 合計 15 回買うことになる。個数と回数を取り違えないという
+                // 方針は、カウンタを減らす側にも要る。
+                var fired = Math.Max(1, attempt.Amount);
+
+                current.Completed += fired;
+                current.RemainingCount = Math.Max(0, current.RemainingCount - fired);
 
                 if (current.Current is { } finishedTarget)
                 {
@@ -3217,7 +3226,6 @@ public sealed unsafe class ExchangeExecutor(
                     // まとめ買いのときは既に回数を掛けた値が入っている
                     // （FireInclusionExchange で definition.RewardQuantity * amount）。
                     // ここで回数を掛け直すと二重になる。
-                    var fired = Math.Max(1, attempt.Amount);
                     var gained = Math.Max(1, (int)attempt.RewardQuantity);
 
                     finishedTarget.Completed += fired;
@@ -3432,23 +3440,24 @@ public sealed unsafe class ExchangeExecutor(
 
         if (current is null)
         {
-            // セッションが無いなら歯止めも無い。1 回だけ許す形にしておく。
-            return new ExchangeLimitSet(
-                Unlimited: false, RemainingItems: 1, OwnedLimit: 0,
-                Mode: ExchangeMode.FixedQuantity, CurrencyReserve: 0,
-                RemainingTrades: 1, TargetQuantity: 0);
+            // セッションが無いなら「1 回だけ」。
+            //
+            // **回数の欄で表す。** 個数の欄に 1 を入れると、
+            // 1 回で 2 個以上もらえる品が「あと 1 個なので撃てない」と判断され、
+            // 手動の「交換する」が永久に無反応になる。
+            return ExchangeLimitSet.SingleTrade();
         }
 
         var target = current.Current;
 
-        return new ExchangeLimitSet(
-            Unlimited: target?.Unlimited ?? true,
-            RemainingItems: target?.Remaining ?? 0,
-            OwnedLimit: target?.OwnedLimit ?? 0,
-            Mode: current.Mode,
-            CurrencyReserve: current.CurrencyReserve,
-            RemainingTrades: current.RemainingCount,
-            TargetQuantity: current.TargetQuantity);
+        return ExchangeLimitSet.ForRun(
+            targetUnlimited: target?.Unlimited,
+            targetRemainingItems: target?.Remaining ?? 0,
+            targetOwnedLimit: target?.OwnedLimit ?? 0,
+            mode: current.Mode,
+            currencyReserve: current.CurrencyReserve,
+            remainingTrades: current.RemainingCount,
+            targetQuantity: current.TargetQuantity);
     }
 
     /// <summary>

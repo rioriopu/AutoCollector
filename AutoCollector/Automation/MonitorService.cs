@@ -854,22 +854,23 @@ public sealed class MonitorService(
 
         var currency = this.currencyService.TryGetCount(definition.CurrencyItemId, out var have) ? have : 0;
 
-        // 所持枠は出発の時点では当てにならない（周回中で埋まっていることがある）。
-        // 枠の判断は撃つ直前に任せ、ここでは十分あるものとして見る。
-        var limits = new ExchangeLimitSet(
-            Unlimited: entry.Quantity <= 0,
-            RemainingItems: Math.Max(0, entry.Quantity),
-            OwnedLimit: entry.OwnedLimit,
-            Mode: preset.Mode,
-            CurrencyReserve: preset.CurrencyReserve,
-            RemainingTrades: preset.Mode == ExchangeMode.FixedQuantity ? Math.Max(1, preset.Quantity) : int.MaxValue,
-            TargetQuantity: preset.Quantity);
+        // 下見であることを名前で表す。
+        // 所持枠も残り回数も、出発の時点では当てにならない（周回の最中で、
+        // 着く頃には変わっている）。そこは撃つ直前の判断に任せる。
+        var limits = ExchangeLimitSet.ForScouting(
+            unlimited: entry.Quantity <= 0,
+            remainingItems: Math.Max(0, entry.Quantity),
+            ownedLimit: entry.OwnedLimit,
+            mode: preset.Mode,
+            currencyReserve: preset.CurrencyReserve,
+            targetQuantity: preset.Quantity);
 
         var allowance = ExchangeLimits.Evaluate(
             perTrade: (int)definition.RewardQuantity,
             currencyCost: (int)definition.CurrencyCost,
             owned: owned,
             currency: currency,
+            // 所持枠は下見では見ない（上と同じ理由）。
             freeSlots: int.MaxValue / 2,
             keepFree: 0,
             limits: limits,
