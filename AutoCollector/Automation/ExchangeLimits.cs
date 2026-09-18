@@ -1,0 +1,210 @@
+using System;
+
+namespace AutoCollector.Automation;
+
+/// <summary>
+/// 交換をどこまで許すかの設定。
+///
+/// **窓口の種類に依らない。** トームストーンの窓口でもアイテム交換画面でも、
+/// 利用者が決める歯止めは同じもの。窓口ごとに違うのは撃ち方だけ。
+/// </summary>
+/// <param name="Unlimited">個数の上限を設けないか。</param>
+/// <param name="RemainingItems">残りの**個数**。<paramref name="Unlimited"/> が true なら見ない。</param>
+/// <param name="OwnedLimit">所持の上限（個数）。0 なら上限なし。</param>
+/// <param name="Mode">どこまで交換するか。</param>
+/// <param name="CurrencyReserve">残す通貨量。<see cref="ExchangeMode.UntilCurrencyReserve"/> のときだけ見る。</param>
+/// <param name="RemainingTrades">残りの交換**回数**。<see cref="ExchangeMode.FixedQuantity"/> のときだけ見る。</param>
+/// <param name="TargetQuantity">目標の所持数（個数）。<see cref="ExchangeMode.UntilTargetQuantity"/> のときだけ見る。</param>
+public sealed record ExchangeLimitSet(
+    bool Unlimited,
+    int RemainingItems,
+    int OwnedLimit,
+    ExchangeMode Mode,
+    int CurrencyReserve,
+    int RemainingTrades,
+    int TargetQuantity);
+
+/// <summary>
+/// 「いま何回まで交換してよいか」という答え。
+/// </summary>
+/// <param name="Trades">許される交換回数。0 なら撃ってはいけない。</param>
+/// <param name="Reason">0 のときの理由。画面と記録にそのまま出す。</param>
+/// <param name="EndsSession">
+/// この理由が、この品だけでなく**移動そのものの終わり**を意味するか。
+///
+/// 「この品はもう買わない」と「この移動はもう終わり」は別物。
+/// 混ぜると、高い品で通貨を使い切ったときに、まだ買える安い品まで見送る。
+/// </param>
+public readonly record struct ExchangeAllowance(int Trades, string Reason, bool EndsSession)
+{
+    public bool Allowed => this.Trades > 0;
+
+    public static ExchangeAllowance Ok(int trades) => new(Math.Max(0, trades), string.Empty, false);
+
+    public static ExchangeAllowance Block(string reason, bool endsSession = false)
+        => new(0, reason, endsSession);
+}
+
+/// <summary>
+/// 利用者が決めた歯止めを、1 か所で判断する。
+///
+/// **ここが唯一の判断場所。**
+/// 以前は窓口ごとに別々の実装があり、アイテム交換画面の経路にだけ歯止めがあって、
+/// トームストーンの経路には無かった。その結果、所持の上限 10 を指定しても
+/// 通貨が尽きるまで買い続けた。取り返しがつかない不具合だった。
+///
+/// 直したあとも、出発を決める側と撃つ側でコピーして揃えていたため、
+/// 片方だけ厳しくした途端に「出かけては弾かれる」往復が起きた。
+///
+/// 判断は 1 つにする。呼ぶ場所は次の 3 つで、どれも同じ答えを得る。
+///
+/// <code>
+/// 出発の前   MonitorService   … 撃てない品では出かけない
+/// 撃つ直前   ExchangeExecutor … 最後の関門
+/// 繰り返し   ExchangeExecutor … 続けてよいかの判断
+/// </code>
+///
+/// **個数と回数を取り違えないこと。**
+/// 利用者が入れる数（所持の上限・一括交換する個数・目標の所持数）はすべて個数。
+/// ここが返すのは交換の回数。1 回の交換で受け取る個数は品によって違う。
+/// 端数は切り捨てる。1 回撃つと超えてしまうなら撃たない。
+/// </summary>
+public static class ExchangeLimits
+{
+    /// <summary>
+    /// いま何回まで交換してよいかを決める。
+    /// </summary>
+    /// <param name="perTrade">1 回の交換で受け取る個数。</param>
+    /// <param name="currencyCost">1 回の交換に使う通貨。</param>
+    /// <param name="owned">いまの所持数（装備中とアーマリーも数えた値）。</param>
+    /// <param name="currency">いまの通貨。</param>
+    /// <param name="freeSlots">所持枠の空き。</param>
+    /// <param name="keepFree">残しておく所持枠。</param>
+    /// <param name="limits">利用者が決めた歯止め。</param>
+    /// <param name="maxBatch">1 回の発火で撃てる上限。窓口が数量を選べないなら 1。</param>
+    public static ExchangeAllowance Evaluate(
+        int perTrade,
+        int currencyCost,
+        int owned,
+        int currency,
+        int freeSlots,
+        int keepFree,
+        ExchangeLimitSet limits,
+        int maxBatch)
+    {
+        perTrade = Math.Max(1, perTrade);
+        maxBatch = Math.Max(1, maxBatch);
+
+        // **終わりを決める条件が 1 つも無いなら撃たない。**
+        //
+        // 個数も所持の上限も置かず、どこまで交換するかも「交換できる限り」だと、
+        // 通貨か所持枠が尽きるまで買い続けることになる。
+        // 判断材料が欠けたら撃たない、という方針に倒す。
+        if (limits.Unlimited && limits.OwnedLimit <= 0 && limits.Mode == ExchangeMode.MaxExchange)
+        {
+            return ExchangeAllowance.Block(
+                "終わりを決める設定がありません（個数・所持の上限・どこまで交換するか のいずれかを設定してください）",
+                endsSession: true);
+        }
+
+        // --- 所持枠。移動そのものの終わり ---
+        var bagRoom = freeSlots - keepFree;
+        if (bagRoom <= 0)
+        {
+            return ExchangeAllowance.Block(
+                $"所持枠の空きが {freeSlots} しかありません（{keepFree} 枠は残します）",
+                endsSession: true);
+        }
+
+        // --- 通貨。この品の値段に対する判断なので、移動の終わりではない ---
+        if (currencyCost > 0 && currency < currencyCost)
+        {
+            return ExchangeAllowance.Block($"通貨が足りません（所持 {currency} / 必要 {currencyCost}）");
+        }
+
+        // --- 所持の上限 ---
+        var trades = maxBatch;
+
+        if (limits.OwnedLimit > 0)
+        {
+            var room = (limits.OwnedLimit - owned) / perTrade;
+            if (room <= 0)
+            {
+                return ExchangeAllowance.Block(
+                    $"所持の上限に達しています（所持 {owned} / 上限 {limits.OwnedLimit}）");
+            }
+
+            trades = Math.Min(trades, room);
+        }
+
+        // --- 一括交換する個数 ---
+        if (!limits.Unlimited)
+        {
+            var wanted = limits.RemainingItems / perTrade;
+            if (wanted <= 0)
+            {
+                return ExchangeAllowance.Block(
+                    limits.RemainingItems <= 0
+                        ? "指定した個数まで交換しました"
+                        : $"あと {limits.RemainingItems} 個ですが、1 回で {perTrade} 個入るため交換しません");
+            }
+
+            trades = Math.Min(trades, wanted);
+        }
+
+        // --- どこまで交換するか ---
+        switch (limits.Mode)
+        {
+            case ExchangeMode.FixedQuantity:
+                if (limits.RemainingTrades <= 0)
+                {
+                    return ExchangeAllowance.Block("指定回数を交換しました", endsSession: true);
+                }
+
+                trades = Math.Min(trades, limits.RemainingTrades);
+                break;
+
+            case ExchangeMode.UntilCurrencyReserve:
+                if (currencyCost > 0)
+                {
+                    var spendable = currency - limits.CurrencyReserve;
+                    var affordable = spendable > 0 ? spendable / currencyCost : 0;
+
+                    if (affordable <= 0)
+                    {
+                        return ExchangeAllowance.Block(
+                            $"残す通貨量 {limits.CurrencyReserve} を割り込みます（所持 {currency}）");
+                    }
+
+                    trades = Math.Min(trades, affordable);
+                }
+
+                break;
+
+            case ExchangeMode.UntilTargetQuantity:
+                var toGoal = (limits.TargetQuantity - owned) / perTrade;
+                if (toGoal <= 0)
+                {
+                    return ExchangeAllowance.Block(
+                        $"目標の {limits.TargetQuantity} 個に達しています（所持 {owned}）",
+                        endsSession: true);
+                }
+
+                trades = Math.Min(trades, toGoal);
+                break;
+        }
+
+        // --- 通貨で買える回数 ---
+        if (currencyCost > 0)
+        {
+            trades = Math.Min(trades, currency / currencyCost);
+        }
+
+        // --- 所持枠。品が重なるかどうかは分からないので 1 回 1 枠として見る ---
+        trades = Math.Min(trades, bagRoom);
+
+        return trades > 0
+            ? ExchangeAllowance.Ok(trades)
+            : ExchangeAllowance.Block("交換できる条件を満たしていません");
+    }
+}

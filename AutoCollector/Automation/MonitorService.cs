@@ -817,7 +817,7 @@ public sealed class MonitorService(
             // ここが「まだ足りない」と判断して出発すると、着いてから弾かれ、
             // 所持数が変わらないので次の判定でもまた出発する。
             // テレポートと AutoDuty の停止・再開を繰り返すだけになる。
-            if (!CanTradeAtLeastOnce(entry, definition, preset.Mode, out var blocked))
+            if (!this.CanTradeAtLeastOnce(entry, definition, preset, out var blocked))
             {
                 this.anomalyLog.Info(
                     "Monitor",
@@ -840,56 +840,50 @@ public sealed class MonitorService(
     /// <summary>
     /// 出かけて 1 回でも交換できるか。
     ///
-    /// **撃つ側と同じ条件で見る。**
-    /// 片方だけが緩いと、出かけては弾かれ、所持数が変わらないので
-    /// また出かける、という往復が止まらなくなる。
+    /// **判断は ExchangeLimits に集めてある。ここでは持たない。**
+    /// 撃つ側と別々に書いていたため、片方だけ厳しくした途端に
+    /// 「出かけては弾かれ、所持数が変わらないのでまた出かける」往復が起きた。
     /// </summary>
-    private static bool CanTradeAtLeastOnce(
-        ExchangeEntry entry, ExchangeDefinition definition, ExchangeMode mode, out string reason)
+    private bool CanTradeAtLeastOnce(
+        ExchangeEntry entry, ExchangeDefinition definition, ExchangePreset preset, out string reason)
     {
         reason = string.Empty;
 
-        var perTrade = Math.Max(1, (int)definition.RewardQuantity);
+        var owned = this.currencyService.TryGetCount(
+            entry.RewardItemId, out var held, includeEquipped: true, includeArmory: true) ? held : 0;
 
-        // **終わりを決める設定が 1 つも無いなら出かけない。**
-        //
-        // 個数も所持の上限も置かず、どこまで交換するかも「交換できる限り」だと、
-        // 通貨か所持枠が尽きるまで買い続けることになる。
-        // 実行時に止めるだけだと、1 回撃っては止まり、所持通貨が減らないので
-        // また出かける、という重い往復になる。出発の前で止める。
-        if (entry.Quantity <= 0 && entry.OwnedLimit <= 0 && mode == ExchangeMode.MaxExchange)
-        {
-            reason = "終わりを決める設定がありません（個数・所持の上限・どこまで交換するか のいずれかを設定してください）";
-            return false;
-        }
+        var currency = this.currencyService.TryGetCount(definition.CurrencyItemId, out var have) ? have : 0;
 
-        // 指定した個数が 1 回ぶんに満たない。
-        if (entry.Quantity > 0 && entry.Quantity < perTrade)
-        {
-            reason = $"1 回で {perTrade} 個入るため、一括交換する個数 {entry.Quantity} では交換できません";
-            return false;
-        }
+        // 所持枠は出発の時点では当てにならない（周回中で埋まっていることがある）。
+        // 枠の判断は撃つ直前に任せ、ここでは十分あるものとして見る。
+        var limits = new ExchangeLimitSet(
+            Unlimited: entry.Quantity <= 0,
+            RemainingItems: Math.Max(0, entry.Quantity),
+            OwnedLimit: entry.OwnedLimit,
+            Mode: preset.Mode,
+            CurrencyReserve: preset.CurrencyReserve,
+            RemainingTrades: preset.Mode == ExchangeMode.FixedQuantity ? Math.Max(1, preset.Quantity) : int.MaxValue,
+            TargetQuantity: preset.Quantity);
 
-        if (entry.OwnedLimit <= 0)
+        var allowance = ExchangeLimits.Evaluate(
+            perTrade: (int)definition.RewardQuantity,
+            currencyCost: (int)definition.CurrencyCost,
+            owned: owned,
+            currency: currency,
+            freeSlots: int.MaxValue / 2,
+            keepFree: 0,
+            limits: limits,
+            maxBatch: 1);
+
+        if (allowance.Allowed)
         {
             return true;
         }
 
-        if (!Plugin.P.CurrencyService.TryGetCount(
-                entry.RewardItemId, out var owned, includeEquipped: true, includeArmory: true))
-        {
-            // 数えられないなら判断しない。撃つ側の関門に任せる。
-            return true;
-        }
-
-        if (owned + perTrade > entry.OwnedLimit)
-        {
-            reason = $"1 回で {perTrade} 個入るため、所持 {owned} / 上限 {entry.OwnedLimit} では交換できません";
-            return false;
-        }
-
-        return true;
+        reason = allowance.Reason;
+        return false;
     }
+
 
     private static string ItemName(uint itemId)
         => ECommons.DalamudServices.Svc.Data.GetExcelSheet<Lumina.Excel.Sheets.Item>()
@@ -909,14 +903,12 @@ public sealed class MonitorService(
             return false;
         }
 
-        // **数え方は交換の実行側と揃える。**
+        // **ここは「もう用が無い品」を落とすだけ。**
         //
-        // 実行側は装備中もアーマリーも数える（includeEquipped: true）。
-        // ここだけ装備を数えないでいると、装備している品について
-        // 「まだ足りない」と判断して出かけ、着いてから「上限に達している」で
-        // 引き返すことになる。
+        // 交換できるかどうかの判断は CanTradeAtLeastOnce（＝ ExchangeLimits）が行う。
+        // ここで同じ条件を書くと、また 2 本になって差が開く。
         //
-        // 揃えるなら厳しい側に揃える。多く数えるほうが買いすぎない。
+        // 数え方だけは実行側と揃える。装備中もアーマリーも数える。
         return this.currencyService.TryGetCount(
                    entry.RewardItemId, out var owned, includeEquipped: true, includeArmory: true) &&
                owned >= entry.OwnedLimit;
