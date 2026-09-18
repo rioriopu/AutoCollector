@@ -22,7 +22,62 @@ public sealed record ExchangeLimitSet(
     ExchangeMode Mode,
     int CurrencyReserve,
     int RemainingTrades,
-    int TargetQuantity);
+    int TargetQuantity)
+{
+    /// <summary>
+    /// 1 回だけ交換する。手動の「交換する」など、セッションを持たない実行のため。
+    ///
+    /// **「1 回」は回数の欄で表す。**
+    /// 個数の欄に 1 を入れると、1 回で 2 個以上もらえる品が
+    /// 「あと 1 個なので撃てない」と判断されて永久に交換できない。
+    /// </summary>
+    public static ExchangeLimitSet SingleTrade() => new(
+        Unlimited: true,
+        RemainingItems: 0,
+        OwnedLimit: 0,
+        Mode: ExchangeMode.FixedQuantity,
+        CurrencyReserve: 0,
+        RemainingTrades: 1,
+        TargetQuantity: 0);
+
+    /// <summary>
+    /// 実行中のセッションから組み立てる。
+    ///
+    /// 交換リストを使う場合は品ごとの設定、使わない場合はセッション全体の設定を見る。
+    /// </summary>
+    public static ExchangeLimitSet ForRun(
+        bool? targetUnlimited, int targetRemainingItems, int targetOwnedLimit,
+        ExchangeMode mode, int currencyReserve, int remainingTrades, int targetQuantity) => new(
+        // 品ごとの設定が無い（交換リストを使わない）なら、個数では縛らない。
+        // モードと回数が歯止めになる。
+        Unlimited: targetUnlimited ?? true,
+        RemainingItems: targetRemainingItems,
+        OwnedLimit: targetOwnedLimit,
+        Mode: mode,
+        CurrencyReserve: currencyReserve,
+        RemainingTrades: remainingTrades,
+        TargetQuantity: targetQuantity);
+
+    /// <summary>
+    /// 出発してよいかを下見する。
+    ///
+    /// 出発の時点では所持枠も残り回数も当てにならない（周回の最中で、
+    /// 着く頃には変わっている）。そこは撃つ直前の判断に任せ、
+    /// ここでは「品の設定として撃てるか」だけを見る。
+    /// </summary>
+    public static ExchangeLimitSet ForScouting(
+        bool unlimited, int remainingItems, int ownedLimit,
+        ExchangeMode mode, int currencyReserve, int targetQuantity) => new(
+        Unlimited: unlimited,
+        RemainingItems: remainingItems,
+        OwnedLimit: ownedLimit,
+        Mode: mode,
+        CurrencyReserve: currencyReserve,
+
+        // 回数の残りは出発時には分からない。撃つ直前に見る。
+        RemainingTrades: int.MaxValue,
+        TargetQuantity: targetQuantity);
+}
 
 /// <summary>
 /// 「いま何回まで交換してよいか」という答え。
@@ -185,9 +240,11 @@ public static class ExchangeLimits
                 var toGoal = (limits.TargetQuantity - owned) / perTrade;
                 if (toGoal <= 0)
                 {
+                    // **品単位の判断なので、移動そのものは終わらせない。**
+                    // owned は「いま扱っている品」の所持数。所持の上限と同じ性質。
+                    // 全体の旗を立てると、交換リストの残りが 1 件も試されなくなる。
                     return ExchangeAllowance.Block(
-                        $"目標の {limits.TargetQuantity} 個に達しています（所持 {owned}）",
-                        endsSession: true);
+                        $"目標の {limits.TargetQuantity} 個に達しています（所持 {owned}）");
                 }
 
                 trades = Math.Min(trades, toGoal);
