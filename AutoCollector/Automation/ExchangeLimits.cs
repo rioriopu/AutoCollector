@@ -180,7 +180,17 @@ public static class ExchangeLimits
         // --- 所持の上限 ---
         var trades = maxBatch;
 
-        if (limits.OwnedLimit > 0)
+        // **「どこまで交換するか」で目標を決めているなら、そちらが親。**
+        //
+        // 行の「所持の上限」は既定が 1。プリセットで目標 5 と入れても、
+        // 行を触っていなければ 1 で止まる。利用者から見ると、
+        // 自分で入れた 5 が黙って無視される。
+        //
+        // どちらも「いくつ持つか」を決める設定なので、親を決めておく。
+        // モードで目標を決めているときは、行の上限は見ない。
+        var ownedLimitGoverns = limits.Mode != ExchangeMode.UntilTargetQuantity;
+
+        if (ownedLimitGoverns && limits.OwnedLimit > 0)
         {
             var room = (limits.OwnedLimit - owned) / perTrade;
             if (room <= 0)

@@ -770,7 +770,7 @@ public sealed class MonitorService(
 
         foreach (var entry in entries)
         {
-            if (this.IsSatisfied(entry))
+            if (this.IsSatisfied(entry, preset))
             {
                 continue;
             }
@@ -797,7 +797,7 @@ public sealed class MonitorService(
 
         foreach (var entry in entries)
         {
-            if (this.IsSatisfied(entry))
+            if (this.IsSatisfied(entry, preset))
             {
                 continue;
             }
@@ -860,7 +860,8 @@ public sealed class MonitorService(
         var limits = ExchangeLimitSet.ForScouting(
             unlimited: entry.Quantity <= 0,
             remainingItems: Math.Max(0, entry.Quantity),
-            ownedLimit: entry.OwnedLimit,
+            // モードで目標を決めているなら、行の上限は親ではない。
+            ownedLimit: preset.Mode == ExchangeMode.UntilTargetQuantity ? 0 : entry.OwnedLimit,
             mode: preset.Mode,
             currencyReserve: preset.CurrencyReserve,
             targetQuantity: preset.Quantity);
@@ -891,7 +892,7 @@ public sealed class MonitorService(
             ?.GetRowOrDefault(itemId)?.Name.ExtractText() ?? $"ItemId {itemId}";
 
     /// <summary>この品を飛ばすか。上限まで持っている、またはゲームに拒まれた品。</summary>
-    private bool IsSatisfied(ExchangeEntry entry)
+    private bool IsSatisfied(ExchangeEntry entry, ExchangePreset preset)
     {
         // ゲームが購入を拒む品（習得済みの秘伝書など）は毎回試さない。
         if (this.executor.IsRejected(entry.RewardItemId))
@@ -899,7 +900,13 @@ public sealed class MonitorService(
             return true;
         }
 
-        if (entry.OwnedLimit <= 0)
+        // 「どこまで交換するか」で目標を決めているなら、そちらが親。
+        // 行の上限は既定が 1 なので、ここで見ると目標が黙って 1 に潰れる。
+        var cap = preset.Mode == ExchangeMode.UntilTargetQuantity
+            ? preset.Quantity
+            : entry.OwnedLimit;
+
+        if (cap <= 0)
         {
             return false;
         }
@@ -912,6 +919,6 @@ public sealed class MonitorService(
         // 数え方だけは実行側と揃える。装備中もアーマリーも数える。
         return this.currencyService.TryGetCount(
                    entry.RewardItemId, out var owned, includeEquipped: true, includeArmory: true) &&
-               owned >= entry.OwnedLimit;
+               owned >= cap;
     }
 }
