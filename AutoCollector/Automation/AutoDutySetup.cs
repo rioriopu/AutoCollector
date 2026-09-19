@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using AutoCollector.Diagnostics;
 using AutoCollector.Ipc;
 using ECommons.DalamudServices;
@@ -91,6 +92,9 @@ public sealed class AutoDutySetup(AutoDutyIpc autoDuty, AnomalyLog anomalyLog)
         }
     }
 
+    /// <summary>設定を 1 件も読めなかったか。相手の版が想定と違う可能性がある。</summary>
+    public bool NothingReadable => this.Items.Count > 0 && this.Items.All(x => !x.Readable);
+
     private List<SetupItem> Read()
     {
         var items = new List<SetupItem>();
@@ -100,28 +104,28 @@ public sealed class AutoDutySetup(AutoDutyIpc autoDuty, AnomalyLog anomalyLog)
             "1 周ごとに交換の機会ができます。値を大きくすると、その周回数ごとの交換になります。",
             "1", "1", v => v == "1");
 
-        Add("EnableBetweenLoopActions", "ループ間処理を有効にする",
+        Add("Loop.Between.Enabled", "ループ間処理を有効にする",
             "AutoDuty の設定「Between Loop Actions」",
             "リテイナー・GC 納品などをまとめて行う枠です。ここが無効だと何も実行されません。",
             "有効", "true", IsTrue);
 
-        Add("ExecuteBetweenLoopActionLastLoop", "「Run on last Loop」を有効にする",
+        Add("Loop.Between.ExecuteLastLoop", "「Run on last Loop」を有効にする",
             "AutoDuty の設定「Between Loop Actions」の先頭",
             "これが要です。無効だと最終周のあとループ間処理が行われず、1 周設定では一度も実行されません。",
             "有効", "true", IsTrue);
 
-        Add("EnableAutoRetainer", "リテイナー連携を有効にする",
+        Add("Loop.Between.Actions.[AutoRetainerLoopActionConfig].Enabled", "リテイナー連携を有効にする",
             "AutoDuty の設定「Between Loop Actions」→ AutoRetainer",
             "ダンジョン後にリテイナーへアクセスします。",
             "有効", "true", IsTrue);
 
-        Add("AutoRetainer_RemainingTime", "リテイナーへ向かう猶予を入れる",
+        Add("Loop.Between.Actions.[AutoRetainerLoopActionConfig].AutoRetainerRemainingTime", "リテイナーへ向かう猶予を入れる",
             "同じ欄の「Waiting up to ... seconds」",
             "0 のままだとリテイナーへ行きません。ベンチャーの完了がこの秒数以内なら向かいます。",
             "0 より大きい値（推奨 300）", "300",
             v => long.TryParse(v, out var n) && n > 0);
 
-        Add("AutoGCTurnin", "GC 納品を有効にする",
+        Add("Loop.Between.Actions.[GCTurnInLoopActionConfig].Enabled", "GC 納品を有効にする",
             "AutoDuty の設定「Between Loop Actions」→ GC Turnin",
             "補給担当官での軍票交換と、希少品の納品を行います。",
             "有効", "true", IsTrue);
@@ -132,7 +136,7 @@ public sealed class AutoDutySetup(AutoDutyIpc autoDuty, AnomalyLog anomalyLog)
             "有効", "true", IsTrue);
 
         // これは要件ではなく注意喚起。勝手に書き換えると、意図した終了処理を壊す。
-        Add("TerminationMethodEnum", "終了時の動作を確認する",
+        Add("Loop.Termination.TerminationMethodEnum", "終了時の動作を確認する",
             "AutoDuty の設定「Termination Actions」",
             "1 周ごとに終了処理を通ります。ログアウトやクライアント終了を設定していると毎周回それが走ります。",
             "Do_Nothing", string.Empty,
@@ -153,19 +157,93 @@ public sealed class AutoDutySetup(AutoDutyIpc autoDuty, AnomalyLog anomalyLog)
             Func<string, bool> check,
             bool canApply = true)
         {
-            var readable = this.autoDuty.TryGetConfig(key, out var current) && !string.IsNullOrEmpty(current);
+            // **新旧どちらのキーでも引けるようにする。**
+            //
+            // AutoDuty は設定をプロファイル方式へ作り直した（2026 年前半）。
+            // 旧: Configuration のフィールドを名前で引く（LoopTimes など）
+            // 新: プロファイルのプロパティを入れ子のパスで引く
+            //     （Loop.Between.Enabled、Loop.Between.Actions.[型名].Enabled）
+            //
+            // 引く側は GetFields から GetProperties に変わっているため、
+            // 旧キーは新しい AutoDuty では 1 つも解決できない。
+            // 実際、8 項目すべてが「読み取れません」になっていた。
+            //
+            // どちらを使っているかは相手の版で決まる。両方試して、
+            // 先に引けたほうを使う。
+            var resolved = this.Resolve(key, out var current);
+
             items.Add(new SetupItem(
-                key,
+                resolved,
                 title,
                 where,
                 why,
                 expected,
                 applyValue,
-                readable ? current : string.Empty,
-                readable && check(current),
-                readable,
+                current,
+                current.Length > 0 && check(current),
+                current.Length > 0,
                 canApply && !string.IsNullOrEmpty(applyValue)));
         }
+    }
+
+    /// <summary>
+    /// 新しいキーと古いキーの対応。
+    ///
+    /// AutoDuty が設定をプロファイル方式へ作り直したため、同じ設定でも
+    /// 版によって指し方が違う。対応表は相手の移行コード
+    /// （ConfigurationMain の旧→新の写し替え）から取った。
+    /// </summary>
+    private static readonly (string Modern, string Legacy)[] KeyPairs =
+    [
+        ("LoopTimes", "LoopTimes"),
+        ("Loop.Between.Enabled", "EnableBetweenLoopActions"),
+        ("Loop.Between.ExecuteLastLoop", "ExecuteBetweenLoopActionLastLoop"),
+        ("Loop.Between.Actions.[AutoRetainerLoopActionConfig].Enabled", "EnableAutoRetainer"),
+        ("Loop.Between.Actions.[AutoRetainerLoopActionConfig].AutoRetainerRemainingTime", "AutoRetainer_RemainingTime"),
+        ("Loop.Between.Actions.[GCTurnInLoopActionConfig].Enabled", "AutoGCTurnin"),
+        ("AutoExitDuty", "AutoExitDuty"),
+        ("Loop.Termination.TerminationMethodEnum", "TerminationMethodEnum"),
+    ];
+
+    /// <summary>
+    /// 設定を引く。新しいキーで引けなければ古いキーで引く。
+    /// 実際に引けたキーを返す。書き込みにも同じものを使う。
+    /// </summary>
+    private string Resolve(string key, out string value)
+    {
+        value = string.Empty;
+
+        foreach (var candidate in Candidates(key))
+        {
+            if (this.autoDuty.TryGetConfig(candidate, out var current) && !string.IsNullOrEmpty(current))
+            {
+                value = current;
+                return candidate;
+            }
+        }
+
+        return key;
+    }
+
+    /// <summary>そのキーで試す候補を、新しいほうから順に返す。</summary>
+    private static IEnumerable<string> Candidates(string key)
+    {
+        foreach (var (modern, legacy) in KeyPairs)
+        {
+            if (modern == key || legacy == key)
+            {
+                yield return modern;
+
+                if (legacy != modern)
+                {
+                    yield return legacy;
+                }
+
+                yield break;
+            }
+        }
+
+        yield return key;
     }
 
     /// <summary>1 件だけ適用する。</summary>
