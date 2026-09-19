@@ -2,6 +2,7 @@ using System;
 using System.Linq;
 using System.Reflection;
 using AutoCollector.Diagnostics;
+using Dalamud.Interface;
 using ECommons.Automation;
 using ECommons.DalamudServices;
 using ECommons.Reflection;
@@ -77,12 +78,31 @@ public sealed class AutoDutyIpc(AnomalyLog anomalyLog) : IpcGateBase("AutoDuty",
     private DateTime versionCacheExpiry = DateTime.MinValue;
 
     /// <summary>
-    /// Dalamud のプラグイン一覧を開く。更新はそこから行ってもらう。
+    /// Dalamud のプラグイン一覧を、更新可能な一覧に絞って開く。
+    /// 検索欄に AutoDuty を入れた状態で出すので、そのまま更新できる。
     ///
-    /// **こちらから他プラグインを更新することはできない。**
-    /// Dalamud が握っている領分なので、入口まで案内するに留める。
+    /// **更新そのものはこちらから実行できない。**
+    /// Dalamud が公開しているのは「どのページを、どの検索語で開くか」まで
+    /// （<c>IDalamudPluginInterface.OpenPluginInstallerTo</c>）。
+    /// 実際に入れ替える API はプラグインへ公開されていない。
+    /// 押す手間を 1 回に減らすのがここでできる上限。
     /// </summary>
-    public bool TryOpenPluginInstaller() => this.TryProcessCommand("/xlplugins");
+    public bool TryOpenPluginInstaller()
+    {
+        try
+        {
+            Svc.PluginInterface.OpenPluginInstallerTo(
+                PluginInstallerOpenKind.UpdateablePlugins, this.InternalName);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            this.AnomalyLog.Warn("Ipc", $"プラグイン一覧を開けませんでした: {ex.Message}");
+
+            // 開けないときはコマンドで代替する。
+            return this.TryProcessCommand("/xlplugins");
+        }
+    }
 
     /// <summary>AutoDuty の設定画面を開く。</summary>
     public bool TryOpenConfig() => this.TryProcessCommand("/ad config");

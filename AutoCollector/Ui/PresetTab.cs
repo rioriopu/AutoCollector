@@ -748,7 +748,7 @@ public sealed class PresetTab(Plugin plugin)
             {
                 setup.OpenPluginInstaller();
                 this.runControlPresetId = preset.Id;
-                this.runControlNote = "プラグイン一覧を開きました。AutoDuty を更新してください";
+                this.runControlNote = "更新可能な一覧を AutoDuty で絞って開きました。そこから更新してください";
             }
 
             return;
