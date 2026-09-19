@@ -706,7 +706,20 @@ public sealed class MonitorService(
             // 相手プラグインの都合（ExternalPluginError）も同じ。
             // 「Artisan へ停止を依頼できませんでした」でトームストーンのプリセットが
             // 自動で無効化された報告がある。製作とは何の関係も無い設定だった。
-            if (this.executor.Failure is ExchangeFailure.Aborted or ExchangeFailure.ExternalPluginError)
+            // **環境の都合はすべて除く。**
+            //
+            // 鞄の空きが足りない（NoBagSpace）と、交換の途中で
+            // ウィンドウが閉じた（ShopClosedUnexpectedly）は、
+            // どちらも設定の誤りではない。
+            //
+            // とくに NoBagSpace は、製作つきプリセットの「残す空き枠」が
+            // そのまま交換側の関門にもなっているため起きやすい。
+            // 残す枠 100 の設定では、交換所へ着くたびに必ず落ちる。
+            // 数えていたため 2 周でプリセットが自動的に無効化されていた。
+            if (this.executor.Failure is ExchangeFailure.Aborted
+                or ExchangeFailure.ExternalPluginError
+                or ExchangeFailure.NoBagSpace
+                or ExchangeFailure.ShopClosedUnexpectedly)
             {
                 this.anomalyLog.Info(
                     "Monitor",
