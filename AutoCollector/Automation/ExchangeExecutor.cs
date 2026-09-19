@@ -3693,21 +3693,28 @@ public sealed unsafe class ExchangeExecutor(
         // ナイトで周回しながら弓術士用の装備を交換する、といった場面で必ず出る。
         // **交換できない品という意味ではない。** 受け取った装備はアーマリーへ入る。
         //
-        // 「交換しますか」で終わる問いは、こちらが撃った交換のものとみて答える。
-        foreach (var (address, body) in open)
+        // **文面が合うだけでは押さない。**
+        // 撃った時刻より後に、自分が開かせたものであることも要る。
+        // 文面だけを条件にすると、たまたま同じ語を含む別のダイアログを押しうる。
+        var firedAtKnown = attempt.FiredAtUtc;
+        var freshWindow = firedAtKnown != default &&
+                          DateTime.UtcNow - firedAtKnown <= OwnedDialogWindow;
+
+        if (freshWindow &&
+            this.ownership.TryGetOwnedSince("SelectYesno", firedAtKnown, out var knownDialog))
         {
-            if (!KnownExchangeConfirmations.Any(w => body.Contains(w, StringComparison.Ordinal)))
+            var knownBody = open.FirstOrDefault(x => x.Address == (nint)knownDialog).Body ?? string.Empty;
+
+            if (KnownExchangeConfirmations.Any(w => knownBody.Contains(w, StringComparison.Ordinal)))
             {
-                continue;
+                this.anomalyLog.Info(
+                    "Exchange",
+                    $"交換に付随する確認に答えます: 「{knownBody}」");
+
+                found = knownDialog;
+                text = knownBody;
+                return true;
             }
-
-            this.anomalyLog.Info(
-                "Exchange",
-                $"交換に付随する確認に答えます: 「{body}」");
-
-            found = (AtkUnitBase*)address;
-            text = body;
-            return true;
         }
 
         // --- 2 段目: 自分が開かせたものとして採る ---
