@@ -737,19 +737,11 @@ public sealed class PresetTab(Plugin plugin)
 
         if (needsUpdate)
         {
+            // 詳しい案内と更新ボタンは状況タブの「はじめに」に置いてある。
+            // 同じ案内を 2 か所に出すと、どちらで直すのか分からなくなる。
             ImGui.TextColored(
-                ImGuiColors.DalamudRed,
-                "  古い AutoDuty は設定の持ち方が違うため、ループ間処理を確かめられません。");
-            ImGui.TextColored(
-                ImGuiColors.DalamudRed,
-                "  そのまま任せると、交換に入れないまま周回だけを繰り返します。");
-
-            if (ImGui.Button("AutoDuty を更新する##updateautoduty"))
-            {
-                setup.OpenPluginInstaller();
-                this.runControlPresetId = preset.Id;
-                this.runControlNote = "更新可能な一覧を AutoDuty で絞って開きました。そこから更新してください";
-            }
+                ImGuiColors.DalamudGrey,
+                "  更新のしかたは 状況タブ の「はじめに」に出しています");
 
             return;
         }
