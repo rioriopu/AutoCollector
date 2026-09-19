@@ -31,6 +31,14 @@ public sealed record ExchangeLimitSet(
     /// 個数の欄に 1 を入れると、1 回で 2 個以上もらえる品が
     /// 「あと 1 個なので撃てない」と判断されて永久に交換できない。
     /// </summary>
+    /// <summary>
+    /// 終わりを利用者が承知のうえで回す。
+    ///
+    /// 「所持の上限 0 ＝ 素材が尽きるまで」は、画面でもそう案内している
+    /// 正規の遊び方。終了条件が無いことを理由に撃たないと、その設定が死ぬ。
+    /// </summary>
+    public bool AllowOpenEnded { get; init; }
+
     public static ExchangeLimitSet SingleTrade() => new(
         Unlimited: true,
         RemainingItems: 0,
@@ -47,7 +55,8 @@ public sealed record ExchangeLimitSet(
     /// </summary>
     public static ExchangeLimitSet ForRun(
         bool? targetUnlimited, int targetRemainingItems, int targetOwnedLimit,
-        ExchangeMode mode, int currencyReserve, int remainingTrades, int targetQuantity) => new(
+        ExchangeMode mode, int currencyReserve, int remainingTrades, int targetQuantity,
+        bool allowOpenEnded = false) => new(
         // 品ごとの設定が無い（交換リストを使わない）なら、個数では縛らない。
         // モードと回数が歯止めになる。
         Unlimited: targetUnlimited ?? true,
@@ -56,7 +65,8 @@ public sealed record ExchangeLimitSet(
         Mode: mode,
         CurrencyReserve: currencyReserve,
         RemainingTrades: remainingTrades,
-        TargetQuantity: targetQuantity);
+        TargetQuantity: targetQuantity)
+    { AllowOpenEnded = allowOpenEnded };
 
     /// <summary>
     /// 出発してよいかを下見する。
@@ -67,7 +77,8 @@ public sealed record ExchangeLimitSet(
     /// </summary>
     public static ExchangeLimitSet ForScouting(
         bool unlimited, int remainingItems, int ownedLimit,
-        ExchangeMode mode, int currencyReserve, int targetQuantity) => new(
+        ExchangeMode mode, int currencyReserve, int targetQuantity,
+        bool allowOpenEnded = false) => new(
         Unlimited: unlimited,
         RemainingItems: remainingItems,
         OwnedLimit: ownedLimit,
@@ -76,7 +87,8 @@ public sealed record ExchangeLimitSet(
 
         // 回数の残りは出発時には分からない。撃つ直前に見る。
         RemainingTrades: int.MaxValue,
-        TargetQuantity: targetQuantity);
+        TargetQuantity: targetQuantity)
+    { AllowOpenEnded = allowOpenEnded };
 }
 
 /// <summary>
@@ -155,7 +167,13 @@ public static class ExchangeLimits
         // 個数も所持の上限も置かず、どこまで交換するかも「交換できる限り」だと、
         // 通貨か所持枠が尽きるまで買い続けることになる。
         // 判断材料が欠けたら撃たない、という方針に倒す。
-        if (limits.Unlimited && limits.OwnedLimit <= 0 && limits.Mode == ExchangeMode.MaxExchange)
+        // **承知のうえで上限なしにしている場合は通す。**
+        //
+        // 「所持の上限 0 ＝ 素材が尽きるまで回す」は画面で案内している遊び方で、
+        // ScripGoalService も Endless として正規に扱う。
+        // 終了条件が無いことだけを理由に弾くと、その設定が動かなくなる。
+        if (!limits.AllowOpenEnded &&
+            limits.Unlimited && limits.OwnedLimit <= 0 && limits.Mode == ExchangeMode.MaxExchange)
         {
             return ExchangeAllowance.Block(
                 "終わりを決める設定がありません（個数・所持の上限・どこまで交換するか のいずれかを設定してください）",

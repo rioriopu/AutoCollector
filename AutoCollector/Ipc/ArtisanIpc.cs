@@ -102,6 +102,27 @@ public sealed class ArtisanIpc(AnomalyLog anomalyLog) : IpcGateBase("Artisan", a
     }
 
     /// <summary>
+    /// 自分で始めた製作を、恒久的に止める。
+    ///
+    /// **<see cref="Stop"/> と使い分ける。**
+    /// あちらは <c>SetStopRequest</c> を立てる「預かり」で、
+    /// 解除すると Artisan 側が <c>ResumeCrafting</c> を呼んで**作り直す**
+    /// （Artisan の IPC.cs: StopCraftingRequest の setter が false で ResumeCrafting）。
+    ///
+    /// こちらが CraftItem で頼んだレシピと残り回数は Artisan 側に残るため、
+    /// 解除した瞬間に残りを作り始める。「止める」を押したのに手が動き続ける、
+    /// という形になっていた。
+    ///
+    /// 恒久的に止めるときは耐久モードを直接落とす。
+    /// <c>SetEnduranceStatus(false)</c> は <c>StopCraftingRequest</c> を触らないので、
+    /// 再開の経路が仕込まれない。
+    /// </summary>
+    public bool StopEndurance()
+        => this.TryAction(
+            "SetEnduranceStatus",
+            () => this.Func<bool, object>("Artisan.SetEnduranceStatus").InvokeAction(false));
+
+    /// <summary>
     /// 停止を要求する。
     ///
     /// Artisan 側は動作中のモードを記録したうえで、耐久モードなら停止、

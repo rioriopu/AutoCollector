@@ -672,6 +672,19 @@ public sealed class Plugin : IDalamudPlugin
         // 利用者は止めたつもりでいるのに、すぐ別の自動処理が動き出すことになる。
         this.GoalRunner?.Stop(reason);
 
+        // **子の処理も直接止める。**
+        //
+        // GoalRunner.Stop は自分が走っていなければ即座に戻るため、
+        // 製作計画タブから手で始めた取り出しや製作は止まらなかった。
+        // それでいて次の Abort が AutoRetainer の抑制だけ剥がすので、
+        // 取り出しが続いたまま AutoRetainer が同じ呼び鈴へ来て操作を取り合う。
+        //
+        // **Abort より先に通す。** 取り出し側の後始末が先に抑制を返さないと、
+        // あとから Cleanup 側が旗を倒して、取り出しの後始末が空振りする。
+        this.RetainerRestock?.Stop(reason);
+        this.CraftRunner?.Stop(reason);
+        this.CollectableCycle?.Stop(reason);
+
         // 何よりも先に発火経路を封鎖する。inFlight はクリアしない（未解決として残す）。
         this.ExchangeExecutor?.Abort(reason);
 
