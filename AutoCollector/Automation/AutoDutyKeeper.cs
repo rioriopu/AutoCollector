@@ -159,6 +159,11 @@ public sealed class AutoDutyKeeper(
         {
             holdReason = "止めています";
         }
+        else if (Plugin.P.AutoDutySetup is { NeedsAutoDutyUpdate: true })
+        {
+            // 古い版では設定を確かめられない。任せると交換に入れないまま回り続ける。
+            holdReason = "AutoDuty を更新してください。古い版では周回を任せられません";
+        }
         else if (!Plugin.C.Presets.Any(x => x.Enabled))
         {
             // **交換するものが 1 件も無いなら、周回を維持する理由が無い。**

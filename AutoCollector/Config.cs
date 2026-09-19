@@ -258,6 +258,17 @@ public sealed class Config
     // 残す枠はプリセットの「残す空き枠」だけで決める。
     // 2 つあると、片方を直しても交換の数が変わらず、理由が読めなくなる。
 
+    /// <summary>
+    /// 必要な AutoDuty の版。これを下回るあいだは戦闘の自動周回を使わせない。
+    ///
+    /// **AutoDuty は設定の持ち方を作り直した。**
+    /// 古い版では設定の読み書きができず、ループ間処理の設定も確かめられない。
+    /// その状態で周回を任せると、交換に入れないまま回り続けることになる。
+    ///
+    /// 空にすると制限しない。
+    /// </summary>
+    public string MinimumAutoDutyVersion { get; set; } = "0.0.0.340";
+
     /// <summary>NPC へ近づく際の許容距離。</summary>
     public float NpcApproachRange { get; set; } = 3.0f;
 

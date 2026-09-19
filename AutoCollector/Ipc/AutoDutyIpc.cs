@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Reflection;
 using AutoCollector.Diagnostics;
 using ECommons.Automation;
@@ -42,6 +43,46 @@ public sealed class AutoDutyIpc(AnomalyLog anomalyLog) : IpcGateBase("AutoDuty",
     /// </summary>
     public bool TrySetConfig(string key, string value)
         => this.TryAction("SetConfig", () => this.Func<string, object, object>("AutoDuty.SetConfig").InvokeAction(key, value));
+
+    /// <summary>
+    /// 導入されている AutoDuty の版。読めなければ null。
+    ///
+    /// **IPC では取れない。** 版を返す IPC が無いため、Dalamud の一覧から読む。
+    /// UI から毎フレーム呼ばれるので短時間だけ使い回す。
+    /// </summary>
+    public Version? GetInstalledVersion()
+    {
+        var now = DateTime.UtcNow;
+        if (now <= this.versionCacheExpiry)
+        {
+            return this.versionCache;
+        }
+
+        this.versionCacheExpiry = now.AddSeconds(5);
+
+        try
+        {
+            this.versionCache = Svc.PluginInterface.InstalledPlugins
+                .FirstOrDefault(x => x.InternalName == this.InternalName && x.IsLoaded)?.Version;
+        }
+        catch
+        {
+            this.versionCache = null;
+        }
+
+        return this.versionCache;
+    }
+
+    private Version? versionCache;
+    private DateTime versionCacheExpiry = DateTime.MinValue;
+
+    /// <summary>
+    /// Dalamud のプラグイン一覧を開く。更新はそこから行ってもらう。
+    ///
+    /// **こちらから他プラグインを更新することはできない。**
+    /// Dalamud が握っている領分なので、入口まで案内するに留める。
+    /// </summary>
+    public bool TryOpenPluginInstaller() => this.TryProcessCommand("/xlplugins");
 
     /// <summary>AutoDuty の設定画面を開く。</summary>
     public bool TryOpenConfig() => this.TryProcessCommand("/ad config");
