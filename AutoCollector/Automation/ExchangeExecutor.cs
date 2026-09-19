@@ -1426,10 +1426,47 @@ public sealed unsafe class ExchangeExecutor(
             var wasRunning = this.autoDuty.IsRunningFailClosed() || this.sawAutoDutyRunning;
             this.autoDuty.TryIsLooping(out var looping);
 
-            // 観測できた Duty のエリアを優先する。無ければ現在地を使う。
-            var resumeTerritory = this.observedDutyTerritoryId != 0
-                ? this.observedDutyTerritoryId
-                : Svc.ClientState.TerritoryType;
+            // **再開先は「経路があるところ」を選ぶ。現在地に落とさない。**
+            //
+            // 自分で見た Duty のエリアを優先するが、それは待機中に
+            // コンテンツの中にいたときしか記録されない。
+            // 交換はたいてい GC 納品のあと、街から始まるため空のままになる。
+            //
+            // そこで現在地へ落ちていた。街には AutoDuty の経路が無いので、
+            // 「ソリューション・ナイン に経路が無いため再開できません」と出て
+            // 毎回失敗していた（周回の維持が別途拾うので実害は無かったが、
+            // 記録にエラーが残り、原因を探す手間になる）。
+            //
+            // 周回していたエリアは AutoDutyKeeper が覚えている。そちらを次に見る。
+            uint resumeTerritory = 0;
+
+            foreach (var candidate in new[]
+                     {
+                         this.observedDutyTerritoryId,
+                         Plugin.C.LastDutyTerritoryId,
+                         Svc.ClientState.TerritoryType,
+                     })
+            {
+                if (candidate == 0)
+                {
+                    continue;
+                }
+
+                if (this.autoDuty.TryContentHasPath(candidate, out var usable) && usable)
+                {
+                    resumeTerritory = candidate;
+                    break;
+                }
+            }
+
+            // どれも使えないなら、覚えている値をそのまま持っておく。
+            // 再開の段で理由を出す。
+            if (resumeTerritory == 0)
+            {
+                resumeTerritory = this.observedDutyTerritoryId != 0
+                    ? this.observedDutyTerritoryId
+                    : Plugin.C.LastDutyTerritoryId;
+            }
 
             this.returnContext = new ReturnContext
             {
@@ -1708,10 +1745,12 @@ public sealed unsafe class ExchangeExecutor(
 
         if (!this.autoDuty.TryContentHasPath(context.AutoDutyTerritoryId, out var hasPath) || !hasPath)
         {
-            this.anomalyLog.Error(
+            // 周回の維持がこのあと拾うので、ここで止まっても周回は続く。
+            // 止まったと誤解させないよう、警告に留める。
+            this.anomalyLog.Warn(
                 "AutoDuty",
-                $"{NpcLocationService.GetTerritoryName(context.AutoDutyTerritoryId)} に AutoDuty の経路が無いため再開できません。" +
-                "手動で再開してください（状況タブの「AutoDuty を再開」からも実行できます）");
+                $"{NpcLocationService.GetTerritoryName(context.AutoDutyTerritoryId)} に AutoDuty の経路が無いため、ここからは再開できません。" +
+                "周回の維持が引き継ぎます（引き継がれない場合は状況タブの「AutoDuty を再開」から）");
             this.Failure = ExchangeFailure.AutoDutyResumeFailed;
             this.FinishAfterExchange();
             return;
