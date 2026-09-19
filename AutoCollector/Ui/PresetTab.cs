@@ -428,6 +428,41 @@ public sealed class PresetTab(Plugin plugin)
                     ImGui.TextColored(ImGuiColors.DalamudGrey, $"  現在 {owned:N0} / 目標 {preset.Quantity:N0}");
                 }
 
+                // **同じ「いくつ持つか」を 2 か所で決めている。**
+                //
+                // ここの「目標の所持数」と、交換リストの行の「所持の上限」は
+                // どちらも同じことを指す。食い違うと厳しいほうが勝つため、
+                // 目標 5 と入れても行の上限が 1 なら 1 で止まる。
+                //
+                // 黙って厳しいほうを使うと、なぜ止まったのか読めない。
+                var conflicting = preset.Rewards
+                    .Where(x => x.OwnedLimit > 0 && x.OwnedLimit < preset.Quantity)
+                    .ToList();
+
+                if (conflicting.Count > 0)
+                {
+                    ImGui.TextColored(
+                        ImGuiColors.DalamudYellow,
+                        $"  交換リストの「所持の上限」のほうが小さいため、そちらで止まります");
+
+                    foreach (var c in conflicting)
+                    {
+                        ImGui.TextColored(
+                            ImGuiColors.DalamudYellow,
+                            $"    {ItemName(c.RewardItemId)}: 上限 {c.OwnedLimit}（目標 {preset.Quantity}）");
+                    }
+
+                    if (ImGui.SmallButton($"交換リストの上限を {preset.Quantity} に揃える##aligncaps"))
+                    {
+                        foreach (var c in conflicting)
+                        {
+                            c.OwnedLimit = preset.Quantity;
+                        }
+
+                        changed = true;
+                    }
+                }
+
                 break;
             }
 
@@ -1115,6 +1150,21 @@ public sealed class PresetTab(Plugin plugin)
         if (goal.Achieved)
         {
             ImGui.TextColored(ImGuiColors.HealerGreen, "目標に届いています");
+
+            // **何の目標に届いたのかを言う。**
+            //
+            // ここが見ているのは交換リストの「所持の上限」。
+            // 「どこまで交換するか」で別の目標を入れていると、
+            // そちらに届いていなくてもここは緑になる。
+            // どちらで止まったのかが分からないと、設定を直しようがない。
+            if (preset.Mode == ExchangeMode.UntilTargetQuantity &&
+                preset.Rewards.Any(x => x.OwnedLimit > 0 && x.OwnedLimit < preset.Quantity))
+            {
+                ImGui.TextColored(
+                    ImGuiColors.DalamudYellow,
+                    $"  交換リストの「所持の上限」に届いた状態です。" +
+                    $"「目標の所持数」{preset.Quantity} まで買うなら、そちらも上げてください");
+            }
         }
 
         // 要るスクリップ。届いていない品だけを並べる。
