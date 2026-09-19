@@ -22,6 +22,61 @@ namespace AutoCollector.Ui;
 /// </summary>
 public sealed partial class MainWindow
 {
+    /// <summary>
+    /// 急停止。**この画面のいちばん上に、いつでも置く。**
+    ///
+    /// これまでの「中止する」は交換の実行中しか描いていなかった。
+    /// 周回だけが回っているときや、製作・納品の最中には押すものが無く、
+    /// 止めたいのに止められない場面があった。
+    ///
+    /// 止めるのは自動処理のすべて。周回の維持も、走っている周回も含む。
+    /// </summary>
+    private void DrawEmergencyStop()
+    {
+        var executor = this.plugin.ExchangeExecutor;
+
+        // 何か動いているかを一目で分かるようにする。
+        var running = executor.IsBusy ||
+                      this.plugin.GoalRunner.IsRunning ||
+                      this.plugin.RetainerRestock.IsRunning ||
+                      this.plugin.CraftRunner.IsRunning ||
+                      this.plugin.CollectableCycle.IsRunning ||
+                      this.plugin.AutoDuty.IsRunningForDisplay() == true;
+
+        using (ImRaii.PushColor(ImGuiCol.Button, running ? 0xFF2222CCu : 0xFF333333u))
+        using (ImRaii.PushColor(ImGuiCol.ButtonHovered, 0xFF3333DDu))
+        {
+            if (ImGui.Button("すべて止める##emergencystop", new Vector2(160, 34)))
+            {
+                this.plugin.EmergencyStop("状況タブから止められました");
+            }
+        }
+
+        ImGui.SameLine();
+
+        if (this.plugin.AutoDutyKeeper.Suspended)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudYellow, "  止めています");
+
+            ImGui.SameLine();
+
+            if (ImGui.SmallButton("再開する##emergencyresume"))
+            {
+                this.plugin.ResumeAfterStop();
+            }
+        }
+        else if (running)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudGrey, "  交換・製作・納品・周回のすべてを止めます");
+        }
+        else
+        {
+            ImGui.TextColored(ImGuiColors.DalamudGrey, "  いまは何も動いていません");
+        }
+
+        ImGui.Separator();
+    }
+
     /// <summary>プリセットタブへ切り替える要求。立っているフレームだけ渡す。</summary>
     private bool jumpToPresetTab;
 
@@ -34,6 +89,8 @@ public sealed partial class MainWindow
         }
 
         var snap = this.plugin.MonitorService.Snapshot;
+
+        this.DrawEmergencyStop();
 
         this.DrawHeadline(snap);
         this.DrawGoalRun();
