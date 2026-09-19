@@ -1256,31 +1256,12 @@ public sealed partial class MainWindow(Plugin plugin)
             ImGuiColors.DalamudGrey,
             "  これを下回るあいだは戦闘の自動周回を使えません。空にすると制限しません");
 
+        // 更新をうながすのは状況タブの「はじめに」。設定はここで数を決めるだけ。
+        // 両方に出すと、どちらで直すのか分からなくなる。
+        if (this.plugin.AutoDuty.IsLoaded &&
+            this.plugin.AutoDutySetup.InstalledVersion is { } adVersion)
         {
-            var setup = this.plugin.AutoDutySetup;
-            var installed = setup.InstalledVersion;
-
-            if (!this.plugin.AutoDuty.IsLoaded)
-            {
-                ImGui.TextColored(ImGuiColors.DalamudGrey, "  AutoDuty は導入されていません");
-            }
-            else if (setup.NeedsAutoDutyUpdate)
-            {
-                ImGui.TextColored(
-                    ImGuiColors.DalamudRed,
-                    $"  いま {installed?.ToString() ?? "読み取れません"} — 更新が必要です");
-
-                if (ImGui.Button("AutoDuty を更新する##settingsupdatead"))
-                {
-                    setup.OpenPluginInstaller();
-                }
-            }
-            else
-            {
-                ImGui.TextColored(
-                    ImGuiColors.HealerGreen,
-                    $"  いま {installed?.ToString() ?? "?"} — 条件を満たしています");
-            }
+            ImGui.TextColored(ImGuiColors.DalamudGrey, $"  いま入っているのは {adVersion} です");
         }
 
         ImGui.Spacing();

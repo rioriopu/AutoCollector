@@ -21,6 +21,55 @@ public sealed partial class MainWindow
         }
 
         var setup = this.plugin.AutoDutySetup;
+
+        // **版が足りないなら、設定の話より先にそれを出す。**
+        //
+        // 古い AutoDuty は設定の持ち方が違うため、そもそも読み書きできない。
+        // その状態で「あと N 件の設定が必要です」と並べても直しようがない。
+        // 設定の話は、版が足りてから。
+        if (setup.NeedsAutoDutyUpdate)
+        {
+            using var stale = ImRaii.TreeNode(
+                "はじめに: AutoDuty の更新が必要です##setupversion",
+                ImGuiTreeNodeFlags.DefaultOpen);
+
+            if (!stale)
+            {
+                return;
+            }
+
+            var installed = setup.InstalledVersion?.ToString() ?? "読み取れません";
+
+            ImGui.TextColored(
+                ImGuiColors.DalamudRed,
+                $"いま {installed} / 必要 {setup.RequiredVersion}");
+
+            ImGui.TextColored(
+                ImGuiColors.DalamudGrey,
+                "AutoDuty は設定の持ち方を作り直しました。古い版では設定を読み書きできません。");
+            ImGui.TextColored(
+                ImGuiColors.DalamudGrey,
+                "そのまま任せると、ループ間処理を確かめられないまま周回だけを繰り返します。");
+
+            ImGui.Spacing();
+
+            if (ImGui.Button("AutoDuty を更新する", new Vector2(200, 30)))
+            {
+                setup.OpenPluginInstaller();
+            }
+
+            ImGui.SameLine();
+            ImGui.TextColored(
+                ImGuiColors.DalamudGrey,
+                "  更新可能な一覧を AutoDuty で絞って開きます");
+
+            ImGui.TextColored(
+                ImGuiColors.DalamudGrey,
+                "  必要な版は 設定タブ で変えられます。空にすると制限しません");
+
+            return;
+        }
+
         var pending = setup.PendingCount;
 
         if (pending == 0)
