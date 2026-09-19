@@ -327,6 +327,19 @@ public sealed unsafe class ExchangeExecutor(
     ];
 
     /// <summary>
+    /// 交換に付随して出ることが分かっている確認の言い回し。
+    ///
+    /// 本文に通貨名もコストも出ないため、値段での照合では拾えない。
+    /// ここに並べるのは**実際に見た文面だけ**。想像で足さない。
+    /// </summary>
+    private static readonly string[] KnownExchangeConfirmations =
+    [
+        // 装備できない品を交換するとき（利用者の実測・2026-09-19）
+        // 「クラスやレベル、装備状態が合わないためこのアイテムを装備することが出来ません。交換しますか？」
+        "装備することが出来ません",
+    ];
+
+    /// <summary>
     /// 外部プラグインの手が空くのを待つ上限。
     ///
     /// 待つこと自体は正しいので、全体の制限時間からは外してある。
@@ -3663,6 +3676,34 @@ public sealed unsafe class ExchangeExecutor(
                         $"確認ダイアログに報酬名「{attempt.RewardName}」が見つかりませんでした。表示されていたテキスト: {string.Join(" / ", texts.Where(x => !string.IsNullOrWhiteSpace(x)))}");
                 }
             }
+
+            found = (AtkUnitBase*)address;
+            text = body;
+            return true;
+        }
+
+        // --- 1.5 段目: 交換に付随する確認として分かっているもの ---
+        //
+        // **装備できない品を交換するときは、別の確認が出る。**
+        // 実測（利用者の報告・2026-09-19）:
+        //   「クラスやレベル、装備状態が合わないためこのアイテムを装備することが
+        //     出来ません。交換しますか？」
+        //
+        // 本文に通貨名もコストも出ないため 1 段目では拾えない。
+        // ナイトで周回しながら弓術士用の装備を交換する、といった場面で必ず出る。
+        // **交換できない品という意味ではない。** 受け取った装備はアーマリーへ入る。
+        //
+        // 「交換しますか」で終わる問いは、こちらが撃った交換のものとみて答える。
+        foreach (var (address, body) in open)
+        {
+            if (!KnownExchangeConfirmations.Any(w => body.Contains(w, StringComparison.Ordinal)))
+            {
+                continue;
+            }
+
+            this.anomalyLog.Info(
+                "Exchange",
+                $"交換に付随する確認に答えます: 「{body}」");
 
             found = (AtkUnitBase*)address;
             text = body;
