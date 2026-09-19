@@ -99,7 +99,7 @@ public sealed class AutoDutySetup(AutoDutyIpc autoDuty, AnomalyLog anomalyLog)
     {
         var items = new List<SetupItem>();
 
-        Add("LoopTimes", "周回数を 1 にする",
+        Add("Meta.LoopTimes", "周回数を 1 にする",
             "AutoDuty のメイン画面「Loops」",
             "1 周ごとに交換の機会ができます。値を大きくすると、その周回数ごとの交換になります。",
             "1", "1", v => v == "1");
@@ -130,7 +130,7 @@ public sealed class AutoDutySetup(AutoDutyIpc autoDuty, AnomalyLog anomalyLog)
             "補給担当官での軍票交換と、希少品の納品を行います。",
             "有効", "true", IsTrue);
 
-        Add("AutoExitDuty", "コンテンツから自動で出る",
+        Add("DutyConfig.AutoExitDuty", "コンテンツから自動で出る",
             "AutoDuty の設定「Duty」",
             "無効だとダンジョン内で停止し、交換に入れません。手動停止との区別にも使っています。",
             "有効", "true", IsTrue);
@@ -195,13 +195,13 @@ public sealed class AutoDutySetup(AutoDutyIpc autoDuty, AnomalyLog anomalyLog)
     /// </summary>
     private static readonly (string Modern, string Legacy)[] KeyPairs =
     [
-        ("LoopTimes", "LoopTimes"),
+        ("Meta.LoopTimes", "LoopTimes"),
         ("Loop.Between.Enabled", "EnableBetweenLoopActions"),
         ("Loop.Between.ExecuteLastLoop", "ExecuteBetweenLoopActionLastLoop"),
         ("Loop.Between.Actions.[AutoRetainerLoopActionConfig].Enabled", "EnableAutoRetainer"),
         ("Loop.Between.Actions.[AutoRetainerLoopActionConfig].AutoRetainerRemainingTime", "AutoRetainer_RemainingTime"),
         ("Loop.Between.Actions.[GCTurnInLoopActionConfig].Enabled", "AutoGCTurnin"),
-        ("AutoExitDuty", "AutoExitDuty"),
+        ("DutyConfig.AutoExitDuty", "AutoExitDuty"),
         ("Loop.Termination.TerminationMethodEnum", "TerminationMethodEnum"),
     ];
 
