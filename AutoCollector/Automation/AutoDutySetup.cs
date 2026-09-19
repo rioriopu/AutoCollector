@@ -92,6 +92,29 @@ public sealed class AutoDutySetup(AutoDutyIpc autoDuty, AnomalyLog anomalyLog)
         }
     }
 
+    /// <summary>
+    /// AutoDuty の版が古くて、戦闘の周回を任せられない状態か。
+    ///
+    /// **古い版では設定の読み書きができない。**
+    /// AutoDuty は設定の持ち方を作り直しており、古い版ではループ間処理の
+    /// 設定を確かめられない。その状態で周回を任せると、
+    /// 交換に入れないまま延々と回り続けることになる。
+    /// </summary>
+    public bool NeedsAutoDutyUpdate => this.RequiredVersion is { } required &&
+                                       this.autoDuty.IsLoaded &&
+                                       (this.autoDuty.GetInstalledVersion() is not { } installed ||
+                                        installed < required);
+
+    /// <summary>必要な版。設定が空か読めなければ null（制限しない）。</summary>
+    public Version? RequiredVersion
+        => Version.TryParse(Plugin.C.MinimumAutoDutyVersion, out var v) ? v : null;
+
+    /// <summary>いま入っている版。読めなければ null。</summary>
+    public Version? InstalledVersion => this.autoDuty.GetInstalledVersion();
+
+    /// <summary>Dalamud のプラグイン一覧を開く。更新はそこから行ってもらう。</summary>
+    public void OpenPluginInstaller() => this.autoDuty.TryOpenPluginInstaller();
+
     /// <summary>設定を 1 件も読めなかったか。相手の版が想定と違う可能性がある。</summary>
     public bool NothingReadable => this.Items.Count > 0 && this.Items.All(x => !x.Readable);
 

@@ -662,7 +662,11 @@ public sealed class PresetTab(Plugin plugin)
         // Available を AND すると、ロード中だけ判定が緩んで押せてしまう。
         var inDuty = !Player.Available || Player.IsInDuty;
 
-        var canStart = preset.Enabled && !running && !busy && !inDuty;
+        // 古い AutoDuty では周回を任せない。設定を確かめられないため。
+        var setup = this.plugin.AutoDutySetup;
+        var needsUpdate = setup.NeedsAutoDutyUpdate;
+
+        var canStart = preset.Enabled && !running && !busy && !inDuty && !needsUpdate;
 
         // --- 開始 ---
         using (ImRaii.Disabled(!canStart))
@@ -686,7 +690,14 @@ public sealed class PresetTab(Plugin plugin)
         ImGui.SameLine();
 
         // --- いまの状態 ---
-        if (!preset.Enabled)
+        if (needsUpdate)
+        {
+            var installed = setup.InstalledVersion?.ToString() ?? "読み取れません";
+            ImGui.TextColored(
+                ImGuiColors.DalamudRed,
+                $"  AutoDuty の更新が必要です（いま {installed} / 必要 {setup.RequiredVersion}）");
+        }
+        else if (!preset.Enabled)
         {
             ImGui.TextColored(ImGuiColors.DalamudGrey, "  このプリセットが無効です");
         }
@@ -722,6 +733,25 @@ public sealed class PresetTab(Plugin plugin)
         if (this.runControlPresetId == preset.Id && !string.IsNullOrEmpty(this.runControlNote))
         {
             ImGui.TextColored(ImGuiColors.DalamudYellow, $"  {this.runControlNote}");
+        }
+
+        if (needsUpdate)
+        {
+            ImGui.TextColored(
+                ImGuiColors.DalamudRed,
+                "  古い AutoDuty は設定の持ち方が違うため、ループ間処理を確かめられません。");
+            ImGui.TextColored(
+                ImGuiColors.DalamudRed,
+                "  そのまま任せると、交換に入れないまま周回だけを繰り返します。");
+
+            if (ImGui.Button("AutoDuty を更新する##updateautoduty"))
+            {
+                setup.OpenPluginInstaller();
+                this.runControlPresetId = preset.Id;
+                this.runControlNote = "プラグイン一覧を開きました。AutoDuty を更新してください";
+            }
+
+            return;
         }
 
         ImGui.TextColored(

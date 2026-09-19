@@ -1244,6 +1244,47 @@ public sealed partial class MainWindow(Plugin plugin)
 
         ImGui.Spacing();
 
+        var minAd = Plugin.C.MinimumAutoDutyVersion;
+        ImGui.SetNextItemWidth(160f);
+        if (ImGui.InputText("必要な AutoDuty の版", ref minAd, 32))
+        {
+            Plugin.C.MinimumAutoDutyVersion = minAd;
+            changed = true;
+        }
+
+        ImGui.TextColored(
+            ImGuiColors.DalamudGrey,
+            "  これを下回るあいだは戦闘の自動周回を使えません。空にすると制限しません");
+
+        {
+            var setup = this.plugin.AutoDutySetup;
+            var installed = setup.InstalledVersion;
+
+            if (!this.plugin.AutoDuty.IsLoaded)
+            {
+                ImGui.TextColored(ImGuiColors.DalamudGrey, "  AutoDuty は導入されていません");
+            }
+            else if (setup.NeedsAutoDutyUpdate)
+            {
+                ImGui.TextColored(
+                    ImGuiColors.DalamudRed,
+                    $"  いま {installed?.ToString() ?? "読み取れません"} — 更新が必要です");
+
+                if (ImGui.Button("AutoDuty を更新する##settingsupdatead"))
+                {
+                    setup.OpenPluginInstaller();
+                }
+            }
+            else
+            {
+                ImGui.TextColored(
+                    ImGuiColors.HealerGreen,
+                    $"  いま {installed?.ToString() ?? "?"} — 条件を満たしています");
+            }
+        }
+
+        ImGui.Spacing();
+
         var range = Plugin.C.NpcApproachRange;
         if (ImGui.SliderFloat("NPC への接近距離", ref range, 1.0f, 6.0f, "%.1f"))
         {

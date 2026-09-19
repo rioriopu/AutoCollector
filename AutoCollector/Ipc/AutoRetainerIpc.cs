@@ -1,4 +1,5 @@
 using AutoCollector.Diagnostics;
+using ECommons.Throttlers;
 
 namespace AutoCollector.Ipc;
 
@@ -33,7 +34,22 @@ public sealed class AutoRetainerIpc(AnomalyLog anomalyLog) : IpcGateBase("AutoRe
 
         if (!this.TryInvoke("PluginState.IsBusy", () => this.Func<bool>("AutoRetainer.PluginState.IsBusy").InvokeFunc(), out bool busy))
         {
-            this.AnomalyLog.Warn("Ipc", "[AutoRetainer] 状態を取得できないため、処理中とみなして待機します");
+            // **理由を添え、間引く。**
+            //
+            // これは毎フレーム呼ばれる。間引かずに書いていたため、
+            // 取得できない状況では記録が同じ 1 行で埋まり、
+            // ほかの警告が押し流されていた。
+            //
+            // しかも「取得できない」としか出ないので、IPC が未登録なのか、
+            // 相手が例外を投げたのかが分からなかった。
+            if (EzThrottler.Throttle("AutoCollector.ArBusyWarn", 10000))
+            {
+                var detail = string.IsNullOrEmpty(this.LastError) ? string.Empty : $"（{this.LastError}）";
+                this.AnomalyLog.Warn(
+                    "Ipc",
+                    $"[AutoRetainer] 状態を取得できないため、処理中とみなして待機します{detail}");
+            }
+
             return true;
         }
 
