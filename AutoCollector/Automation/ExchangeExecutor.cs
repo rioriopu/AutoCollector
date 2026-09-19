@@ -2692,12 +2692,18 @@ public sealed unsafe class ExchangeExecutor(
         // 単に 1 枠空いていればよいのではない。
         // AutoRetainer は所持枠が空いていないキャラクタを処理対象から外して保存するため、
         // 交換で枠を使い切ると、あとでリテイナーが回らなくなる。
+        // **枠が足りないことは失敗にしない。**
+        //
+        // 鞄が埋まっているのは設定の誤りではない。硬い失敗にすると
+        // 連続失敗に数えられ、プリセットが自動で無効になっていた。
+        // 枠の判定は共通の歯止め（ExchangeLimits）が行い、
+        // 撃たずに次の品へ進む穏当な終わり方にする。
+        //
+        // ここでは読めるかどうかだけを見る。
         var keepFree = this.KeepFreeSlots();
-        if (!this.currencyService.TryGetEmptyBagSlots(out var freeSlots) || freeSlots <= keepFree)
+        if (!this.currencyService.TryGetEmptyBagSlots(out var freeSlots))
         {
-            this.Fail(
-                ExchangeFailure.NoBagSpace,
-                $"所持枠の空きが {freeSlots} しかありません（{keepFree} 枠は残します）");
+            this.Fail(ExchangeFailure.NoBagSpace, "所持枠の空きを取得できませんでした");
             return;
         }
 
@@ -2854,12 +2860,18 @@ public sealed unsafe class ExchangeExecutor(
             return;
         }
 
+        // **枠が足りないことは失敗にしない。**
+        //
+        // 鞄が埋まっているのは設定の誤りではない。硬い失敗にすると
+        // 連続失敗に数えられ、プリセットが自動で無効になっていた。
+        // 枠の判定は共通の歯止め（ExchangeLimits）が行い、
+        // 撃たずに次の品へ進む穏当な終わり方にする。
+        //
+        // ここでは読めるかどうかだけを見る。
         var keepFree = this.KeepFreeSlots();
-        if (!this.currencyService.TryGetEmptyBagSlots(out var freeSlots) || freeSlots <= keepFree)
+        if (!this.currencyService.TryGetEmptyBagSlots(out var freeSlots))
         {
-            this.Fail(
-                ExchangeFailure.NoBagSpace,
-                $"所持枠の空きが {freeSlots} しかありません（{keepFree} 枠は残します）");
+            this.Fail(ExchangeFailure.NoBagSpace, "所持枠の空きを取得できませんでした");
             return;
         }
 
@@ -3509,7 +3521,11 @@ public sealed unsafe class ExchangeExecutor(
             mode: current.Mode,
             currencyReserve: current.CurrencyReserve,
             remainingTrades: current.RemainingCount,
-            targetQuantity: current.TargetQuantity);
+            targetQuantity: current.TargetQuantity,
+
+            // 製作で稼ぐプリセットは「素材が尽きるまで」が正規の遊び方。
+            allowOpenEnded: Plugin.C.Presets
+                .FirstOrDefault(x => x.Id == current.PresetId)?.CraftToEarn ?? false);
     }
 
     /// <summary>
@@ -3954,18 +3970,17 @@ public sealed unsafe class ExchangeExecutor(
     /// </summary>
     private int KeepFreeSlots()
     {
+        // **製作用の枠を、交換の関門に使わない。**
+        //
+        // プリセットの「残す空き枠」は、次に作る収集品を入れる余地のための値。
+        // 橙のプリセットでは 100 のように大きく取る。
+        // それをそのまま交換の関門にしていたため、鞄の空きが 100 以下だと
+        // 交換所へ着くたびに必ず落ちていた。2 周でプリセットが無効になる形で
+        // 表に出た（いまは失敗に数えないが、交換できないことは変わらない）。
+        //
+        // 交換で受け取るのは数個。残す枠も数枠でよい。
+        // 製作の側は BuildPlan が自分で「残す空き枠」を見る。役割が違う。
         const int floor = 2;
-
-        var preset = this.session is { } session
-            ? Plugin.C.Presets.FirstOrDefault(x => x.Id == session.PresetId)
-            : null;
-
-        // 目標つきのプリセットは、そこで決めた枠を使う。
-        // 交換した品と、次に作る収集品の両方が同じ鞄へ入るため。
-        if (preset is { CraftCollectableItemId: not 0 })
-        {
-            return Math.Max(floor, preset.CraftKeepFreeSlots);
-        }
 
         return floor;
     }

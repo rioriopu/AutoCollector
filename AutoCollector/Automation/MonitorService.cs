@@ -877,7 +877,11 @@ public sealed class MonitorService(
             ownedLimit: preset.Mode == ExchangeMode.UntilTargetQuantity ? 0 : entry.OwnedLimit,
             mode: preset.Mode,
             currencyReserve: preset.CurrencyReserve,
-            targetQuantity: preset.Quantity);
+            targetQuantity: preset.Quantity,
+
+            // 製作で稼ぐプリセットは「素材が尽きるまで」が正規の遊び方。
+            // 終了条件が無いことを理由に弾かない。
+            allowOpenEnded: preset.CraftToEarn);
 
         var allowance = ExchangeLimits.Evaluate(
             perTrade: (int)definition.RewardQuantity,

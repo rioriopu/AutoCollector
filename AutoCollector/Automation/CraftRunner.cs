@@ -201,15 +201,27 @@ public sealed class CraftRunner(
             return;
         }
 
-        if (this.artisan.Stop())
+        // **預けて返す、をしない。**
+        //
+        // SetStopRequest を立てて解除する形にしていたが、
+        // Artisan 側は解除を「再開」として扱う（ResumeCrafting）。
+        // こちらが頼んだレシピと残り回数は相手に残っているため、
+        // 解除した瞬間に残りを作り始めていた。
+        // 「止める」を押したのに手が動き続ける、という形になる。
+        //
+        // 自分で始めた製作を止めるのだから、耐久モードを直接落とす。
+        // こちらは再開の経路が仕込まれない。
+        if (this.artisan.StopEndurance())
         {
-            this.releasePending = true;
-            this.Note("Artisan に停止を頼みました");
+            this.Note("Artisan の製作を止めました");
         }
         else
         {
             this.Note("Artisan に停止を頼めませんでした。作り終わるまで動き続けます");
         }
+
+        // 解除すべき要求は立てていない。後始末は不要。
+        this.releasePending = false;
 
         this.Note($"止めます: {reason}");
         this.Step = CraftRunStep.Done;
@@ -218,7 +230,11 @@ public sealed class CraftRunner(
 
     /// <summary>
     /// 立てた停止要求を、手が止まったのを見てから解除する。
-    /// ここを通さないと Artisan が止まったままになる。
+    ///
+    /// **いまはここを通る経路が無い。**
+    /// 製作を止めるときは耐久モードを直接落とすようにしたため、
+    /// 解除すべき要求が残らない。
+    /// 交換のために預かるほう（ExchangeExecutor）は自分で返す。
     /// </summary>
     private void ReleaseIfSettled()
     {

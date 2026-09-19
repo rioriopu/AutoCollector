@@ -141,7 +141,15 @@ public sealed class ScripGoalService(
             // **交換 1 回で 2 個以上もらえる品がある。**
             // 個数ぶん交換すると、要るスクリップも作る収集品もその倍数だけ多くなる。
             // 要るのは回数であって個数ではない。
-            var trades = (remaining + (int)perTrade - 1) / (int)perTrade;
+            // **歯止めと同じ数え方にする。**
+            //
+            // ここは切り上げ、交換を許す側は切り捨て、と食い違っていた。
+            // 所持の上限が 1 回あたりの個数で割り切れないと、最後に端数が残り、
+            // 目標は「あと 1 回」と言い続けるのに交換は永久に許可されない。
+            //
+            // 上限を超えて買うわけにはいかないので、歯止め側に合わせる。
+            // 端数は目標から落とす。
+            var trades = remaining / (int)perTrade;
             var subtotal = (long)trades * cost;
 
             required += subtotal;
@@ -176,7 +184,13 @@ public sealed class ScripGoalService(
         var hasUnlimited = items.Any(x => x.Unlimited);
         var hasGoal = items.Any(x => !x.Unlimited);
         var endless = hasUnlimited;
-        var achieved = hasGoal && !hasUnlimited && items.Where(x => !x.Unlimited).All(x => x.Remaining == 0);
+        // **端数は達成とみなす。**
+        //
+        // 1 回で 2 個以上もらえる品は、上限が割り切れないと最後に端数が残る。
+        // その端数は交換できない（買うと上限を超える）ので、
+        // Remaining == 0 を条件にすると永久に達成にならない。
+        var achieved = hasGoal && !hasUnlimited &&
+                       items.Where(x => !x.Unlimited).All(x => x.Trades <= 0);
 
         // まだ買う必要がある品のうち、いちばん安い費用。
         // これだけ持っていれば 1 個は交換できる、という判断に使う。
