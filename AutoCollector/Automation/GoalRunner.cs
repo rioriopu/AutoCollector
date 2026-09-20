@@ -13,7 +13,17 @@ namespace AutoCollector.Automation;
 /// <param name="RetryAtUtc">
 /// この時刻を過ぎたら自動でもう一度試す。null なら自動では試さない。
 /// </param>
-public sealed record GoalBlock(string Reason, DateTime? RetryAtUtc);
+/// <summary>止まっている理由。</summary>
+/// <param name="Reason">人に読ませる文。</param>
+/// <param name="RetryAtUtc">自動でやり直す時刻。やり直さないなら null。</param>
+/// <param name="Shortages">
+/// 足りていなかった素材。文にも含まれているが、画面で 1 件ずつ扱えるように形のまま残す。
+/// 素材名をコピーしたり、中間素材の素材を開いたりするのに使う。
+/// </param>
+public sealed record GoalBlock(
+    string Reason,
+    DateTime? RetryAtUtc,
+    IReadOnlyList<PlanMaterial> Shortages);
 
 public enum GoalStep
 {
@@ -149,6 +159,14 @@ public sealed class GoalRunner(
     /// 二度と動き出さなかった。
     /// </summary>
     private readonly Dictionary<Guid, GoalBlock> blocked = [];
+
+    /// <summary>
+    /// いま計画を立てた時点で足りていなかった素材。
+    ///
+    /// 止まったときにそのまま <see cref="GoalBlock"/> へ移す。
+    /// 計画を立て直すたびに空へ戻すので、古い一覧が残ることはない。
+    /// </summary>
+    private IReadOnlyList<PlanMaterial> pendingShortages = [];
 
     /// <summary>
     /// 次に終わるとき、この時間だけ空けてから自動でもう一度試す。
@@ -307,6 +325,15 @@ public sealed class GoalRunner(
 
         return Math.Max(0, (int)(block.RetryAtUtc.Value - DateTime.UtcNow).TotalSeconds);
     }
+
+    /// <summary>
+    /// 止まった原因になった、足りない素材。
+    ///
+    /// 理由の文にも入っているが、画面で 1 件ずつ扱えるように形のまま渡す。
+    /// 素材名のコピーと、中間素材の素材を開く操作に使う。
+    /// </summary>
+    public IReadOnlyList<PlanMaterial> BlockedShortages(Guid presetId)
+        => this.blocked.TryGetValue(presetId, out var block) ? block.Shortages : [];
 
     /// <summary>止まっているプリセットがあるか。状況タブの見出しで使う。</summary>
     public bool HasBlocked => this.blocked.Count > 0;
@@ -594,6 +621,10 @@ public sealed class GoalRunner(
             return false;
         }
 
+        // 新しく計画を立てたので、前回の不足は忘れる。
+        // 残したままにすると、別の理由で止まったときに古い一覧が画面へ出る。
+        this.pendingShortages = [];
+
         var shortfalls = plan.Materials.Where(x => x.Shortfall > 0).ToList();
 
         // **足りないことと、作れないことは別物。**
@@ -676,6 +707,10 @@ public sealed class GoalRunner(
                     return true;
                 }
 
+                // 止まる原因になった素材を、形のまま残す。
+                // 文字列に潰すと、画面で 1 件ずつ扱えなくなる。
+                this.pendingShortages = shortfalls;
+
                 var depleted = string.IsNullOrEmpty(stockDetail)
                     ? "素材が尽きました"
                     : $"素材が尽きました（{stockDetail}）";
@@ -714,6 +749,11 @@ public sealed class GoalRunner(
             {
                 return true;
             }
+
+            // 止まる原因になった素材を、形のまま残す。
+            // **進めたときは残さない。** 残すと、あとで別の理由で終わったときに
+            // 関係のない一覧が画面へ出る。
+            this.pendingShortages = blocking;
 
             // 取りに行っても足りず、手持ちでも 1 個も作れない。そこで打ち止め。
             this.AnnounceDepleted(preset, shortage);
@@ -1025,10 +1065,11 @@ public sealed class GoalRunner(
                     ? (DateTime?)null
                     : DateTime.UtcNow.Add(this.retryAfterOnFinish.Value);
 
-                this.blocked[this.presetId] = new GoalBlock(detail, retryAt);
+                this.blocked[this.presetId] = new GoalBlock(detail, retryAt, this.pendingShortages);
             }
         }
 
+        this.pendingShortages = [];
         this.retryAfterOnFinish = null;
         this.lastRestockSignature = string.Empty;
 

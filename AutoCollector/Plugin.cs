@@ -603,6 +603,19 @@ public sealed class Plugin : IDalamudPlugin
                 return;
             }
 
+            // **納品だけは間引かない。**
+            //
+            // 納品は「選ぶ → 撃つ → 反映を見る」を 1 個ごとに繰り返す。
+            // 手順そのものは一瞬で終わるので、100 ミリ秒ごとに 1 手しか進まないと
+            // 1 個あたり 0.5 秒以上が待ち時間で占められる。40 個なら 20 秒以上になる。
+            //
+            // ここを毎フレームにすると 1 個あたり 0.1 秒台で回る。
+            // 待つ・諦めるの判断はすべて時刻で持たせてあるので、
+            // 呼ばれる回数が変わっても待ち時間は変わらない。
+            //
+            // 走っていなければ即座に戻るため、ふだんの負荷は増えない。
+            this.CollectableDelivery.Tick();
+
             var now = DateTime.UtcNow;
             if (now < this.nextTickUtc)
             {
@@ -614,7 +627,6 @@ public sealed class Plugin : IDalamudPlugin
             this.ExchangeExecutor.Tick();
             this.MonitorService.Tick();
             this.AutoDutyKeeper.Tick();
-            this.CollectableDelivery.Tick();
             this.CollectableCycle.Tick();
             this.RetainerRestock.Tick();
             this.CraftRunner.Tick();
@@ -689,6 +701,13 @@ public sealed class Plugin : IDalamudPlugin
         this.RetainerRestock?.Stop(reason);
         this.CraftRunner?.Stop(reason);
         this.CollectableCycle?.Stop(reason);
+
+        // 納品も直接止める。
+        //
+        // 納品は毎フレーム進むようにしてあるため、止め損なうと
+        // 画面が開いているあいだ撃ち続けることになる。
+        // 束ねている側を止めただけでは、納品そのものは止まらない。
+        this.CollectableDelivery?.Stop(reason);
 
         // 何よりも先に発火経路を封鎖する。inFlight はクリアしない（未解決として残す）。
         this.ExchangeExecutor?.Abort(reason);
