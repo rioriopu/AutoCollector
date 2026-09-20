@@ -504,7 +504,17 @@ public sealed class Plugin : IDalamudPlugin
         Svc.Framework.Update += this.OnFrameworkUpdate;
 
         this.mainWindow = new MainWindow(this);
-        EzConfigGui.Init(this.mainWindow.Draw, null, "Auto Collector");
+
+        // 設定と主画面の両方に繋ぐ。
+        //
+        // このプラグインの画面は 1 つしかなく、設定も操作もそこで行う。
+        // 既定（設定だけ）にしていたため、プラグイン一覧から「開く」で
+        // 辿り着けず、Dalamud の検査でも主画面が無いと指摘されていた。
+        EzConfigGui.Init(
+            this.mainWindow.Draw,
+            null,
+            "Auto Collector",
+            EzConfigGui.WindowType.Both);
 
         EzCmd.Add(MainCommand, this.OnCommand, "Auto Collector を開く。/autocollector stop で緊急停止");
         this.TryRegisterShortCommand();
