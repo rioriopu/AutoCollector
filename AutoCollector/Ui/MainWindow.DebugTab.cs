@@ -617,24 +617,32 @@ public sealed partial class MainWindow
             return;
         }
 
-        // 2 段目: 納品ボタンが押せるようになるのを待ってから押す。
-        // 選んだ直後は画面が切り替わっておらず、まだ押せない。
-        // 何回目で押せたかを残し、待ち方が足りているかを後から判断できるようにする。
+        // 2 段目: 納品できる状態になったら撃つ。
+        //
+        // 納品ボタン（node 51）が現れるのを合図にしていたが、
+        // 選択は効いているのにボタンが現れない状態が実機で出た。
+        // ボタンは「選択が効いた」ことの代わりに見ていたにすぎないので、
+        // 選択そのものを一覧から読んで確かめる方へ切り替える。
         var attempt = 0;
 
-        void PressWhenReady()
+        void DeliverWhenReady()
         {
             attempt++;
 
-            if (service.IsTradeReady())
+            var button = service.ReadTradeButton();
+            var confirmed = service.TryConfirmSelection(offer, out var selectionDetail);
+
+            if (button.Ready || (attempt >= 10 && confirmed))
             {
-                if (!service.TryTrade(out var tradeFailure))
+                if (!service.TryDeliver(out var deliverFailure))
                 {
-                    this.plugin.AnomalyLog.Error("Collect", $"納品ボタンを押せませんでした: {tradeFailure}");
+                    this.plugin.AnomalyLog.Error("Collect", $"納品を撃てませんでした: {deliverFailure}");
                     return;
                 }
 
-                this.plugin.AnomalyLog.Info("Collect", $"納品ボタンを押しました（{attempt} 回目の確認で押せました）");
+                this.plugin.AnomalyLog.Info(
+                    "Collect",
+                    $"納品を撃ちました（{attempt} 回目 / ボタン: {button.Detail} / 選択: {selectionDetail}）");
                 _ = new ECommons.Schedulers.TickScheduler(Verify, 1500);
                 return;
             }
@@ -643,14 +651,15 @@ public sealed partial class MainWindow
             {
                 this.plugin.AnomalyLog.Error(
                     "Collect",
-                    $"{offer.ItemName} を選びましたが、納品ボタンが押せる状態になりませんでした");
+                    $"{offer.ItemName} を選びましたが納品できる状態になりませんでした" +
+                    $"（ボタン: {button.Detail} / 選択: {selectionDetail}）");
                 return;
             }
 
-            _ = new ECommons.Schedulers.TickScheduler(PressWhenReady, 150);
+            _ = new ECommons.Schedulers.TickScheduler(DeliverWhenReady, 150);
         }
 
-        _ = new ECommons.Schedulers.TickScheduler(PressWhenReady, 150);
+        _ = new ECommons.Schedulers.TickScheduler(DeliverWhenReady, 150);
         return;
 
         void Verify()

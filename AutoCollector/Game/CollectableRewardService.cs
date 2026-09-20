@@ -11,7 +11,27 @@ namespace AutoCollector.Game;
 /// <param name="LowReward">低い収集価値のときの量。</param>
 /// <param name="MidReward">中くらいのときの量。</param>
 /// <param name="HighReward">高いときの量。</param>
-public sealed record CollectableReward(uint CurrencyItemId, ushort LowReward, ushort MidReward, ushort HighReward);
+/// <param name="LowCollectability">納品を受け付ける最低の収集価値。これに届かないと渡せない。</param>
+/// <param name="MidCollectability">中の段に上がる収集価値。</param>
+/// <param name="HighCollectability">高の段に上がる収集価値。</param>
+public sealed record CollectableReward(
+    uint CurrencyItemId,
+    ushort LowReward,
+    ushort MidReward,
+    ushort HighReward,
+    ushort LowCollectability,
+    ushort MidCollectability,
+    ushort HighCollectability)
+{
+    /// <summary>
+    /// この収集価値で納品できるか。
+    ///
+    /// 下限が読めなかった場合は止めない。判断材料が無いだけで、
+    /// 納品してみれば分かる。読めない値を根拠に品を捨てる方が害が大きい。
+    /// </summary>
+    public bool Accepts(int collectability)
+        => this.LowCollectability == 0 || collectability >= this.LowCollectability;
+}
 
 /// <summary>
 /// 収集品を納品すると何のスクリップがいくつ得られるかを、納品する前に求める。
@@ -30,9 +50,15 @@ public sealed record CollectableReward(uint CurrencyItemId, ushort LowReward, us
 /// Currency は特殊通貨の番号で、ItemId ではない。
 /// <see cref="SpecialCurrencyMap"/> で ItemId へ直す。
 ///
+/// 納品を受け付ける収集価値の下限は <c>CollectablesShopRefine</c> にある。
+/// これに届かない品は、窓口まで行っても渡せない。
+///
 /// 実測（2026-09-13）:
 /// 収集用のタコス・カルネ・アサーダ → Currency 6（クラフタースクリップ:橙貨）
 /// 低 120 / 中 134 / 高 144。実際の納品で 144 を確認している。
+///
+/// 実データ（2026-09-20、シートを直接読んで確認）:
+/// 収集用のタコス・カルネ・アサーダ の収集価値は 低 660 / 中 900 / 高 1140。
 /// </summary>
 public sealed class CollectableRewardService(AnomalyLog anomalyLog, SpecialCurrencyMap specialCurrencyMap)
 {
@@ -61,6 +87,7 @@ public sealed class CollectableRewardService(AnomalyLog anomalyLog, SpecialCurre
         {
             var shopItems = Svc.Data.GetSubrowExcelSheet<CollectablesShopItem>();
             var scrips = Svc.Data.GetExcelSheet<CollectablesShopRewardScrip>();
+            var refines = Svc.Data.GetExcelSheet<CollectablesShopRefine>();
             var items = Svc.Data.GetExcelSheet<Item>();
 
             if (shopItems is null || scrips is null)
@@ -102,11 +129,30 @@ public sealed class CollectableRewardService(AnomalyLog anomalyLog, SpecialCurre
                         continue;
                     }
 
+                    // 納品を受け付ける収集価値の段。
+                    //
+                    // 0 行目が実在して全 0 のため、行番号 0 は「未設定」として扱う。
+                    // 引けなかった場合も 0 のままにして、下限での判断を行わない。
+                    ushort lowCollectability = 0;
+                    ushort midCollectability = 0;
+                    ushort highCollectability = 0;
+
+                    var refineRowId = row.CollectablesShopRefine.RowId;
+                    if (refineRowId != 0 && refines is not null && refines.TryGetRow(refineRowId, out var refine))
+                    {
+                        lowCollectability = refine.LowCollectability;
+                        midCollectability = refine.MidCollectability;
+                        highCollectability = refine.HighCollectability;
+                    }
+
                     result[itemId] = new CollectableReward(
                         currencyItemId,
                         scrip.LowReward,
                         scrip.MidReward,
-                        scrip.HighReward);
+                        scrip.HighReward,
+                        lowCollectability,
+                        midCollectability,
+                        highCollectability);
                 }
             }
 

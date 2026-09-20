@@ -912,7 +912,39 @@ public sealed class GoalRunner(
 
             // 何のスクリップになるか分からないものは、持っている扱いにしない。
             // 分からないまま納品へ行っても、目標のスクリップは増えない。
-            if (this.rewards.TryResolve(itemId, out var reward) && reward.CurrencyItemId == currencyItemId)
+            if (!this.rewards.TryResolve(itemId, out var reward) || reward.CurrencyItemId != currencyItemId)
+            {
+                continue;
+            }
+
+            // 収集価値が下限に届かない品は、窓口へ行っても渡せない。
+            // 持っている扱いにすると、納品へ行っては何も納品できずに戻る。
+            if (!MeetsCollectability(itemId, reward))
+            {
+                continue;
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// 手持ちのどれかが納品の下限に届いているか。
+    ///
+    /// 下限が読めない場合は止めない。判断材料が無いだけで、納品してみれば分かる。
+    /// </summary>
+    private static bool MeetsCollectability(uint itemId, CollectableReward reward)
+    {
+        if (reward.LowCollectability == 0)
+        {
+            return true;
+        }
+
+        foreach (var value in CollectablesShopReader.ListCollectability(itemId))
+        {
+            if (reward.Accepts(value))
             {
                 return true;
             }

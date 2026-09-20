@@ -1631,9 +1631,21 @@ public sealed unsafe class ExchangeExecutor(
         }
 
         // 走り終わった。結果は納品側が記録している。
-        var summary = string.IsNullOrEmpty(this.deliveryFailure)
-            ? $"納品を終えました（{this.collectableDelivery.Delivered} 個）"
-            : this.deliveryFailure;
+        //
+        // 納品側が途中で止まった場合、その理由を握りつぶさない。
+        // 以前は deliveryFailure（始められなかったときだけ入る）しか見ておらず、
+        // 途中で止まっても「納品を終えました（0 個）」としか出なかった。
+        // 何も納品できていないのに成功に見えるため、原因を追えなかった。
+        var delivered = this.collectableDelivery.Delivered;
+        var detail = this.collectableDelivery.StatusDetail;
+
+        var summary = !string.IsNullOrEmpty(this.deliveryFailure)
+            ? this.deliveryFailure
+            : this.collectableDelivery.Step == DeliveryStep.Error
+                ? $"納品できませんでした（{delivered} 個）: {detail}"
+                : delivered == 0 && !string.IsNullOrEmpty(detail)
+                    ? $"納品しませんでした: {detail}"
+                    : $"納品を終えました（{delivered} 個）";
 
         this.anomalyLog.Info("Collectables", summary);
         this.deliverySummary = summary;
