@@ -23,6 +23,9 @@ public sealed class PresetTab(Plugin plugin)
     /// <summary>製作するジョブを選んでいないときの表示。</summary>
     private const string UnsetJobLabel = "--選択して下さい--";
 
+    /// <summary>コピーしたことを知らせておく時間。短すぎると気づけない。</summary>
+    private static readonly TimeSpan CopyNoticeDuration = TimeSpan.FromSeconds(4);
+
     private static readonly string[] ThresholdModeNames = ["固定値", "上限に対する割合", "上限までの残り"];
 
     private static readonly string[] ExchangeModeNames =
@@ -35,7 +38,19 @@ public sealed class PresetTab(Plugin plugin)
 
     private readonly Plugin plugin = plugin;
 
+    /// <summary>素材を開いて見せている中間素材。ItemId で覚える。</summary>
+    private readonly HashSet<uint> expandedShortages = [];
+
     private string rewardSearch = string.Empty;
+
+    /// <summary>直前に写した名前。押した手応えを画面へ返すために持つ。</summary>
+    private string copiedName = string.Empty;
+
+    /// <summary>写した時刻。しばらく経ったら知らせを消す。</summary>
+    private DateTime copiedAtUtc = DateTime.MinValue;
+
+    /// <summary>この画面で知らせを出したか。同じ行が 2 つ並ぶのを防ぐ。</summary>
+    private bool copyNoticeDrawn;
 
     /// <summary>開始・停止を押した結果。押しても無反応に見えないよう画面へ返す。</summary>
     private string runControlNote = string.Empty;
@@ -145,6 +160,10 @@ public sealed class PresetTab(Plugin plugin)
         {
             return;
         }
+
+        // 写したことの知らせは 1 画面に 1 度だけ。
+        // 出す場所が 2 か所あるため、ここで戻さないと同じ行が 2 つ並ぶ。
+        this.copyNoticeDrawn = false;
 
         // 監視は常に動いている。有効なプリセットが閾値へ達したら自動で交換所へ向かう。
         ImGui.TextColored(ImGuiColors.DalamudGrey, "有効なプリセットが閾値に達したら、自動で交換所へ向かいます");
@@ -1360,6 +1379,8 @@ public sealed class PresetTab(Plugin plugin)
 
             ImGui.TextColored(ImGuiColors.DalamudYellow, $"止まっています: {stopped}");
 
+            this.DrawShortages(runner.BlockedShortages(preset.Id));
+
             if (retry is not null)
             {
                 ImGui.TextColored(ImGuiColors.DalamudGrey, $"  {retry} 秒後にもう一度試します");
@@ -1395,6 +1416,153 @@ public sealed class PresetTab(Plugin plugin)
             $"  {bell}");
 
         this.DrawKnownBell();
+    }
+
+    /// <summary>
+    /// 足りない素材を 1 件ずつ出す。
+    ///
+    /// 止まった理由の文にも素材名は入っているが、文のままだと
+    /// 「どこで手に入るのか」を調べるために名前を打ち直すことになる。
+    /// 名前を押せばそのまま写せるようにしておく。
+    ///
+    /// **中間素材は、その素材をすぐには出さない。**
+    /// ウトォームチリソースが足りないと言われても、直したいのは
+    /// その素材（ウトォームトマトとドラゴンペッパー）のほうである。
+    /// ただし最初から末端まで並べると、実際には足りている物まで含めて
+    /// 一覧が長くなり、何を見ればよいのか分からなくなる。
+    /// 右クリックで開く形にして、見たいときだけ出す。
+    /// </summary>
+    private void DrawShortages(IReadOnlyList<PlanMaterial> shortages)
+    {
+        if (shortages.Count == 0)
+        {
+            return;
+        }
+
+        ImGui.TextColored(
+            ImGuiColors.DalamudGrey,
+            "  足りない素材（左クリックで名前をコピー / 中間素材は右クリックで素材を開く）");
+
+        foreach (var material in shortages)
+        {
+            this.DrawShortageRow(material, depth: 1);
+        }
+
+        this.DrawCopyNotice();
+    }
+
+    /// <summary>足りない素材 1 行。中間素材なら、開いているあいだその素材も続けて出す。</summary>
+    private void DrawShortageRow(PlanMaterial material, int depth)
+    {
+        // 自分で作れて、素材まで辿れているものだけ開ける。
+        // 辿れていないものを開けるように見せると、押しても何も出ずに戸惑う。
+        var canExpand = material.IsIntermediate && material.SubMaterials.Count > 0;
+        var expanded = canExpand && this.expandedShortages.Contains(material.ItemId);
+
+        var mark = canExpand ? (expanded ? "▼ " : "▶ ") : "  ";
+        var indent = new string('　', depth);
+
+        ImGui.Selectable(
+            $"{indent}{mark}{material.Name}##shortage{depth}_{material.ItemId}",
+            false,
+            ImGuiSelectableFlags.None,
+            new Vector2(320f, 0f));
+
+        if (ImGui.IsItemClicked(ImGuiMouseButton.Left))
+        {
+            ImGui.SetClipboardText(material.Name);
+            this.copiedName = material.Name;
+            this.copiedAtUtc = DateTime.UtcNow;
+        }
+
+        if (canExpand && ImGui.IsItemClicked(ImGuiMouseButton.Right))
+        {
+            if (!this.expandedShortages.Remove(material.ItemId))
+            {
+                this.expandedShortages.Add(material.ItemId);
+            }
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(
+                canExpand
+                    ? $"左クリック: 「{material.Name}」をコピー\n" +
+                      $"右クリック: この素材を作るのに要る物を{(expanded ? "閉じる" : "開く")}"
+                    : $"左クリック: 「{material.Name}」をコピー");
+        }
+
+        ImGui.SameLine();
+        ImGui.TextColored(ImGuiColors.DalamudYellow, $"あと {material.Shortfall}");
+
+        if (canExpand)
+        {
+            ImGui.SameLine();
+            ImGui.TextColored(ImGuiColors.DalamudGrey, "（自分で作れます）");
+        }
+
+        if (!expanded)
+        {
+            return;
+        }
+
+        // 開いたときは、足りている素材も出す。
+        // 足りている物まで見えていないと「これだけ集めればよい」が判断できない。
+        foreach (var sub in material.SubMaterials)
+        {
+            this.DrawShortageSubRow(sub, depth + 1);
+        }
+    }
+
+    /// <summary>中間素材の素材 1 行。ここから先は辿らない。</summary>
+    private void DrawShortageSubRow(PlanMaterial sub, int depth)
+    {
+        var indent = new string('　', depth);
+
+        ImGui.Selectable(
+            $"{indent}  {sub.Name}##shortagesub{depth}_{sub.ItemId}",
+            false,
+            ImGuiSelectableFlags.None,
+            new Vector2(320f, 0f));
+
+        if (ImGui.IsItemClicked(ImGuiMouseButton.Left))
+        {
+            ImGui.SetClipboardText(sub.Name);
+            this.copiedName = sub.Name;
+            this.copiedAtUtc = DateTime.UtcNow;
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip($"左クリック: 「{sub.Name}」をコピー");
+        }
+
+        ImGui.SameLine();
+        ImGui.TextColored(
+            sub.Shortfall > 0 ? ImGuiColors.DalamudYellow : ImGuiColors.HealerGreen,
+            sub.Shortfall > 0 ? $"あと {sub.Shortfall}" : "足りています");
+
+        ImGui.SameLine();
+        ImGui.TextColored(ImGuiColors.DalamudGrey, $"（要 {sub.Needed} / 手持ち {sub.Held}）");
+    }
+
+    /// <summary>
+    /// 直前に写した名前を短く知らせる。
+    ///
+    /// クリップボードは目に見えない。押した手応えが無いと、
+    /// 効いたのかどうか分からず何度も押すことになる。
+    /// </summary>
+    private void DrawCopyNotice()
+    {
+        if (this.copyNoticeDrawn ||
+            string.IsNullOrEmpty(this.copiedName) ||
+            DateTime.UtcNow - this.copiedAtUtc > CopyNoticeDuration)
+        {
+            return;
+        }
+
+        this.copyNoticeDrawn = true;
+        ImGui.TextColored(ImGuiColors.HealerGreen, $"  「{this.copiedName}」をコピーしました");
     }
 
     /// <summary>
@@ -1550,7 +1718,7 @@ public sealed class PresetTab(Plugin plugin)
 
         ImGui.TextColored(
             ImGuiColors.DalamudGrey,
-            $"  作れる収集品 {filtered.Count} 件（製作手帳と同じ並び）");
+            $"  作れる収集品 {filtered.Count} 件（製作手帳と同じ並び / 右クリックで名前をコピー）");
 
         using (var child = ImRaii.Child("##presetcraftlist", new Vector2(0, 150), true))
         {
@@ -1558,7 +1726,20 @@ public sealed class PresetTab(Plugin plugin)
             {
                 foreach (var item in filtered)
                 {
-                    if (ImGui.Selectable($"{item.Name}##pc{item.ItemId}", preset.CraftCollectableItemId == item.ItemId))
+                    var selected = ImGui.Selectable(
+                        $"{item.Name}##pc{item.ItemId}",
+                        preset.CraftCollectableItemId == item.ItemId);
+
+                    // 右クリックは選択を変えない。**何を作るかの設定は左クリックだけで動かす。**
+                    // 名前を調べたいだけのときに設定が変わると、気づかないまま別の物を作る。
+                    if (ImGui.IsItemClicked(ImGuiMouseButton.Right))
+                    {
+                        ImGui.SetClipboardText(item.Name);
+                        this.copiedName = item.Name;
+                        this.copiedAtUtc = DateTime.UtcNow;
+                    }
+
+                    if (selected)
                     {
                         preset.CraftCollectableItemId = item.ItemId;
                         preset.CraftToEarn = true;
@@ -1591,6 +1772,8 @@ public sealed class PresetTab(Plugin plugin)
         {
             ImGui.TextColored(ImGuiColors.DalamudGrey, "作る収集品を選ぶと、必要な個数を計算します");
         }
+
+        this.DrawCopyNotice();
     }
 
     /// <summary>作る物の選択を解く。表を装備品へ戻すときに通す。</summary>

@@ -449,6 +449,8 @@ public sealed partial class MainWindow
 
         ImGui.Spacing();
         ImGui.TextUnformatted("要る素材");
+        ImGui.SameLine();
+        ImGui.TextColored(ImGuiColors.DalamudGrey, "（素材名をクリックするとコピーします）");
 
         using var table = ImRaii.Table("##materials", 7, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp);
         if (!table)
@@ -470,7 +472,7 @@ public sealed partial class MainWindow
             ImGui.TableNextRow();
 
             ImGui.TableNextColumn();
-            ImGui.TextUnformatted(material.Name);
+            DrawCopyableName(material.Name, $"##planmat{material.ItemId}");
 
             if (material.IsIntermediate)
             {
@@ -519,7 +521,7 @@ public sealed partial class MainWindow
                 ImGui.TableNextRow();
 
                 ImGui.TableNextColumn();
-                ImGui.TextColored(ImGuiColors.DalamudGrey, $"    └ {sub.Name}");
+                DrawCopyableName($"    └ {sub.Name}", $"##plansub{material.ItemId}_{sub.ItemId}", sub.Name);
 
                 ImGui.TableNextColumn();
                 ImGui.TextColored(ImGuiColors.DalamudGrey, sub.PerCraft.ToString());
@@ -541,6 +543,32 @@ public sealed partial class MainWindow
                 ImGui.TableNextColumn();
                 ImGui.TextColored(ImGuiColors.DalamudGrey, "-");
             }
+        }
+    }
+
+    /// <summary>
+    /// 素材の名前を、押せば写せる形で出す。
+    ///
+    /// 足りない素材をどこで手に入れるかは、たいてい外部の一覧で調べることになる。
+    /// 名前を打ち直さずに済むようにしておく。
+    /// </summary>
+    /// <param name="label">画面に出す文字。段差の記号を含むことがある。</param>
+    /// <param name="id">ImGui の識別子。行ごとに変える。</param>
+    /// <param name="copyText">写す文字。省くと <paramref name="label"/> をそのまま写す。</param>
+    private static void DrawCopyableName(string label, string id, string? copyText = null)
+    {
+        var text = copyText ?? label;
+
+        ImGui.Selectable($"{label}{id}", false, ImGuiSelectableFlags.None, new Vector2(0f, 0f));
+
+        if (ImGui.IsItemClicked(ImGuiMouseButton.Left))
+        {
+            ImGui.SetClipboardText(text);
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip($"クリックで「{text}」をコピー");
         }
     }
 

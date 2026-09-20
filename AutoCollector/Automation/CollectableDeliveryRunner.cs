@@ -34,27 +34,20 @@ public sealed class CollectableDeliveryRunner(
     CollectableRewardService rewards,
     CollectablesShopReader reader)
 {
-    /// <summary>納品ボタンが押せるようになるまでの確認回数の上限。</summary>
-    private const int TradeReadyAttempts = 20;
+    /// <summary>
+    /// 納品できる状態になるのを待つ上限。
+    ///
+    /// **回数ではなく時間で持つ。** 呼ばれる間隔は場面によって変わるため、
+    /// 回数で持つと、速く呼ばれるほど待ち時間が短くなってしまう。
+    /// </summary>
+    private static readonly TimeSpan TradeReadyLimit = TimeSpan.FromSeconds(2);
 
     /// <summary>
-    /// ボタンを待つのをやめて、実測の手順で納品するまでの確認回数。
+    /// ボタンを待つのをやめて、選択を確かめて納品へ進むまでの猶予。
     ///
-    /// 呼び出しは 100 ミリ秒ごとなので、10 回でおよそ 1 秒。
-    /// うまくいっている環境では 1 回目で押せるようになるため、ここまで来ない。
+    /// うまくいっている環境では最初の確認で押せるようになるため、ここまで来ない。
     /// </summary>
-    private const int TradeReadyFallbackAttempts = 10;
-
-    /// <summary>
-    /// 撃ってから読みにいくまでの間。
-    ///
-    /// **ここだけは待つ。** 反映の途中を読むと、減る前の所持数を見て
-    /// 「納品できなかった」と誤判定し、同じ品をもう一度撃つことになる。
-    ///
-    /// 実測ではスクリップは撃ってから 0.2 秒ほどで入る。
-    /// 少し余裕を取り、それ以降は「変わったか」で進む。
-    /// </summary>
-    private static readonly TimeSpan VerifySettle = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan TradeReadyFallbackAfter = TimeSpan.FromSeconds(1);
 
     /// <summary>
     /// 反映を待つ上限。
@@ -98,7 +91,12 @@ public sealed class CollectableDeliveryRunner(
     /// </summary>
     private IReadOnlyDictionary<uint, int> heldBefore = new Dictionary<uint, int>();
     private IReadOnlyList<(uint ItemId, string Name, int Count)> scripBefore = [];
+
+    /// <summary>何回確かめたか。待ち方が足りているかを後から読むために残す。</summary>
     private int tradeAttempts;
+
+    /// <summary>選んだ時刻。納品できる状態になるのを待つ起点。</summary>
+    private DateTime selectedAtUtc;
 
     /// <summary>最後に読んだ納品ボタンの状態。納品できなかったときの理由に入れる。</summary>
     private string lastButtonDetail = string.Empty;
@@ -117,9 +115,6 @@ public sealed class CollectableDeliveryRunner(
 
     /// <summary>反映を待つ上限。ここを過ぎても変わらなければ原因を切り分ける。</summary>
     private DateTime waitUntilUtc;
-
-    /// <summary>この時刻までは読みにいかない。反映の途中を読むと取り違える。</summary>
-    private DateTime verifyFromUtc;
 
     public DeliveryStep Step { get; private set; } = DeliveryStep.Idle;
 
@@ -278,6 +273,7 @@ public sealed class CollectableDeliveryRunner(
             this.heldBefore = held;
             this.scripBefore = this.SampleScrips();
             this.tradeAttempts = 0;
+            this.selectedAtUtc = DateTime.UtcNow;
             this.lastButtonDetail = "未読";
             this.lastSelectionDetail = "未確認";
 
@@ -367,8 +363,10 @@ public sealed class CollectableDeliveryRunner(
             return;
         }
 
+        var waited = DateTime.UtcNow - this.selectedAtUtc;
+
         // ボタンが現れない。選択が狙いどおりなら、ボタンを待たずに納品する。
-        if (this.tradeAttempts >= TradeReadyFallbackAttempts)
+        if (waited >= TradeReadyFallbackAfter)
         {
             this.DumpAfterSelect();
 
@@ -384,7 +382,7 @@ public sealed class CollectableDeliveryRunner(
             }
         }
 
-        if (this.tradeAttempts >= TradeReadyAttempts)
+        if (waited >= TradeReadyLimit)
         {
             this.Fail(
                 $"{offer.ItemName} を選びましたが納品できる状態になりませんでした" +
@@ -435,23 +433,18 @@ public sealed class CollectableDeliveryRunner(
         //
         // 以前は一律 1200 ミリ秒待っていた。実測ではスクリップは
         // 撃ってから 0.2 秒ほどで入っており、残りの 1 秒は無駄に待っていた。
-        // 納品 1 個あたり約 1.5 秒かかっていたのはこれが原因。
         //
-        // 撃った直後は読みにいかない。反映の途中を読むと、
-        // 減る前の所持数を見て「納品できなかった」と誤判定する。
-        this.verifyFromUtc = DateTime.UtcNow.Add(VerifySettle);
+        // 読みにいく前の間合い（250 ミリ秒）も外した。
+        // 変化を見るまで待ち続ける形になった時点で、早く読んでも
+        // 「まだ変わっていない」と見て次の呼び出しへ回るだけになっている。
+        // 誤判定が起きるのは下の上限まで変わらなかったときだけで、
+        // そこは 2500 ミリ秒のまま変えていない。
         this.waitUntilUtc = DateTime.UtcNow.Add(VerifyLimit);
     }
 
     /// <summary>撃ったことではなく、所持数の変化で成否を判断する。</summary>
     private void TickVerify()
     {
-        // 反映の途中を読まないぶんだけは待つ。
-        if (DateTime.UtcNow < this.verifyFromUtc)
-        {
-            return;
-        }
-
         var offer = this.target;
         if (offer is null)
         {
