@@ -41,6 +41,9 @@ public sealed class PresetTab(Plugin plugin)
     /// <summary>素材を開いて見せている中間素材。ItemId で覚える。</summary>
     private readonly HashSet<uint> expandedShortages = [];
 
+    /// <summary>「一括交換する個数」の欄を出している品。ふだんは隠している。</summary>
+    private readonly HashSet<uint> showBatchFor = [];
+
     private string rewardSearch = string.Empty;
 
     /// <summary>直前に写した名前。押した手応えを画面へ返すために持つ。</summary>
@@ -72,6 +75,22 @@ public sealed class PresetTab(Plugin plugin)
     private ScripGoal? goalCache;
     private Guid goalCachePresetId;
     private DateTime goalCacheUntilUtc;
+
+    /// <summary>
+    /// いまの手持ちで立てた製作の計画。素材を数え直すので 1 秒は使い回す。
+    ///
+    /// 止まったときの控えではなく、そのつど作り直す。
+    /// リテイナーから出したぶんや買ってきたぶんが、その場で数字に出る。
+    /// </summary>
+    private CraftPlan? planCache;
+    private Guid planCachePresetId;
+    private DateTime planCacheUntilUtc;
+
+    /// <summary>素材を確かめて開始を押した結果。</summary>
+    private string craftStartNote = string.Empty;
+
+    /// <summary>その結果が、どのプリセットのものか。</summary>
+    private Guid craftStartPresetId = Guid.Empty;
 
     /// <summary>いま打ち込み中の数値欄と、その文字列。打ち込みを邪魔しないために持つ。</summary>
     private string numberEditKey = string.Empty;
@@ -222,11 +241,18 @@ public sealed class PresetTab(Plugin plugin)
                 this.seriesIndex = 0;
                 this.rewardSearch = string.Empty;
                 this.searchResults = null;
-                this.goalCacheUntilUtc = DateTime.MinValue;
+                this.craftStartNote = string.Empty;
+                this.InvalidateCaches();
             }
 
             // 止まっていることは、畳んだままでも分かるようにする。
-            var blockedReason = this.plugin.GoalRunner.BlockedReason(preset.Id);
+            //
+            // **開いているときは出さない。** 開けば下に同じ理由が、
+            // 足りない素材の一覧と開始ボタンつきで出る。ここにも出すと
+            // まったく同じ文が画面に 2 行並ぶ。
+            var blockedReason = this.editingPresetId == preset.Id
+                ? string.Empty
+                : this.plugin.GoalRunner.BlockedReason(preset.Id);
 
             if (!string.IsNullOrEmpty(blockedReason))
             {
@@ -1095,23 +1121,14 @@ public sealed class PresetTab(Plugin plugin)
             return;
         }
 
-        var now = DateTime.UtcNow;
-
         // 設定を書き換えた直後は作り直す。間引いていると、収集品を選んでも
         // 「作る収集品が選ばれていません」が 1 秒残り、押せていないように見える。
         if (changed)
         {
-            this.goalCacheUntilUtc = DateTime.MinValue;
+            this.InvalidateCaches();
         }
 
-        if (this.goalCachePresetId != preset.Id || now > this.goalCacheUntilUtc)
-        {
-            this.goalCache = this.plugin.ScripGoalService.Build(preset);
-            this.goalCachePresetId = preset.Id;
-            this.goalCacheUntilUtc = now.AddSeconds(1);
-        }
-
-        var goal = this.goalCache;
+        var goal = this.CachedGoal(preset);
 
         if (goal is null)
         {
@@ -1379,20 +1396,53 @@ public sealed class PresetTab(Plugin plugin)
 
             ImGui.TextColored(ImGuiColors.DalamudYellow, $"止まっています: {stopped}");
 
-            this.DrawShortages(runner.BlockedShortages(preset.Id));
+            // **止まったときの控えではなく、いまの手持ちで数え直したものを出す。**
+            // リテイナーから出したり買ってきたりしたぶんが、その場で数字に反映される。
+            // 計画が立たない場合だけ、止まったときの控えに戻る。
+            var livePlan = this.CachedPlan(preset);
+            var shortages = livePlan is null
+                ? runner.BlockedShortages(preset.Id)
+                : livePlan.Materials.Where(x => x.Shortfall > 0).ToList();
+
+            this.DrawShortages(shortages);
+
+            // そろったことが分かるようにする。
+            // 一覧が消えただけだと、押してよくなったのかどうかが読めない。
+            if (livePlan is not null && livePlan.Materials.All(x => x.CanCoverFromBag()) && livePlan.Crafts > 0)
+            {
+                ImGui.TextColored(
+                    ImGuiColors.HealerGreen,
+                    $"  素材はそろいました（{livePlan.Target.Name} を {livePlan.Crafts} 個ぶん）。下のボタンで始められます");
+            }
 
             if (retry is not null)
             {
                 ImGui.TextColored(ImGuiColors.DalamudGrey, $"  {retry} 秒後にもう一度試します");
             }
 
-            if (ImGui.Button("いますぐもう一度試す##retrygoal"))
+            // **ボタンは「確かめてから始める」。**
+            //
+            // 以前は「いますぐもう一度試す」だった。押すと止まった理由を忘れるだけで、
+            // 素材が足りないままなら同じところで止まり直す。何が起きたのか分からない。
+            //
+            // 押した瞬間の手持ちで数え直し、そろっていれば始める。
+            // 足りなければ何がいくつ足りないのかを返して、始めない。
+            if (ImGui.Button("素材を確かめて開始する##retrygoal"))
             {
-                runner.ClearBlock(preset.Id);
+                this.TryStartWhenMaterialsReady(preset);
             }
 
             ImGui.SameLine();
             ImGui.TextColored(ImGuiColors.DalamudGrey, "（チェックを入れ直しても、この理由を忘れてやり直します）");
+
+            if (this.craftStartPresetId == preset.Id && !string.IsNullOrEmpty(this.craftStartNote))
+            {
+                ImGui.TextColored(
+                    this.craftStartNote.StartsWith("素材はそろっています", StringComparison.Ordinal)
+                        ? ImGuiColors.HealerGreen
+                        : ImGuiColors.DalamudYellow,
+                    $"  {this.craftStartNote}");
+            }
 
             // 呼び鈴が要るのは取り出しのときだけ。**止まっているときこそ出す。**
             // ここで return していたため、原因を示す唯一の行が隠れていた。
@@ -1418,6 +1468,108 @@ public sealed class PresetTab(Plugin plugin)
         this.DrawKnownBell();
     }
 
+    /// <summary>控えを捨てる。設定を書き換えた直後に通す。</summary>
+    private void InvalidateCaches()
+    {
+        this.goalCacheUntilUtc = DateTime.MinValue;
+        this.planCacheUntilUtc = DateTime.MinValue;
+    }
+
+    /// <summary>逆算した目標。1 秒は使い回す。</summary>
+    private ScripGoal? CachedGoal(ExchangePreset preset)
+    {
+        var now = DateTime.UtcNow;
+
+        if (this.goalCachePresetId != preset.Id || now > this.goalCacheUntilUtc)
+        {
+            this.goalCache = this.plugin.ScripGoalService.Build(preset);
+            this.goalCachePresetId = preset.Id;
+            this.goalCacheUntilUtc = now.AddSeconds(1);
+        }
+
+        return this.goalCache;
+    }
+
+    /// <summary>
+    /// いまの手持ちで立てた製作の計画。1 秒は使い回す。
+    ///
+    /// 素材の数は、持ち物を数え直すたびに変わる。
+    /// 控えたものを出し続けると、リテイナーから出しても数字が動かない。
+    /// </summary>
+    private CraftPlan? CachedPlan(ExchangePreset preset)
+    {
+        if (preset.CraftCollectableItemId == 0)
+        {
+            return null;
+        }
+
+        var now = DateTime.UtcNow;
+
+        if (this.planCachePresetId != preset.Id || now > this.planCacheUntilUtc)
+        {
+            var goal = this.CachedGoal(preset);
+
+            this.planCache = goal?.Collectable is null
+                ? null
+                : this.plugin.CraftPlanService.BuildPlan(
+                    preset.CraftCollectableItemId,
+                    Math.Max(0, preset.CraftKeepFreeSlots),
+                    goal.Endless ? 0 : goal.CollectablesNeeded);
+
+            this.planCachePresetId = preset.Id;
+            this.planCacheUntilUtc = now.AddSeconds(1);
+        }
+
+        return this.planCache;
+    }
+
+    /// <summary>
+    /// 素材がそろっているかを確かめて、そろっていれば始める。
+    ///
+    /// 押した瞬間の持ち物で判断する。控えは使わない。
+    /// </summary>
+    private void TryStartWhenMaterialsReady(ExchangePreset preset)
+    {
+        this.craftStartPresetId = preset.Id;
+        this.InvalidateCaches();
+
+        var plan = this.CachedPlan(preset);
+
+        if (plan is null)
+        {
+            // 計画が立たないなら、素材以外の理由で止まっている。
+            // 素材で門番をしても意味がないので、そのままやり直す。
+            this.plugin.GoalRunner.ClearBlock(preset.Id);
+            this.craftStartNote = "素材の計画が立ちません。止まった理由を忘れて、もう一度試します";
+            return;
+        }
+
+        // 「足りない」と「作れない」は別。中間素材はその素材が鞄にあれば自分で作れる。
+        var missing = plan.Materials.Where(x => !x.CanCoverFromBag()).ToList();
+
+        if (missing.Count > 0)
+        {
+            var top = missing
+                .OrderByDescending(x => x.Shortfall)
+                .Take(3)
+                .Select(x => $"{x.Name} があと {x.Shortfall}");
+
+            this.craftStartNote = $"まだ足りません: {string.Join(" / ", top)}";
+            return;
+        }
+
+        if (plan.Crafts <= 0)
+        {
+            this.craftStartNote = plan.Notes.Count > 0
+                ? $"始められません: {string.Join(" / ", plan.Notes)}"
+                : "始められません: 鞄に空きがありません";
+            return;
+        }
+
+        this.plugin.GoalRunner.ClearBlock(preset.Id);
+        this.craftStartNote = $"素材はそろっています。{plan.Target.Name} を {plan.Crafts} 個作るところから始めます";
+    }
+
     /// <summary>
     /// 足りない素材を 1 件ずつ出す。
     ///
@@ -1441,7 +1593,7 @@ public sealed class PresetTab(Plugin plugin)
 
         ImGui.TextColored(
             ImGuiColors.DalamudGrey,
-            "  足りない素材（左クリックで名前をコピー / 中間素材は右クリックで素材を開く）");
+            "  足りない素材 … 手に入れると数が減ります（左クリックで名前をコピー / 中間素材は右クリックで素材を開く）");
 
         foreach (var material in shortages)
         {
@@ -1865,6 +2017,9 @@ public sealed class PresetTab(Plugin plugin)
         ExchangeEntry? remove = null;
         var moveUp = -1;
 
+        // 1 行でも「一括交換する個数」の欄を出したか。説明を出すかの判断に使う。
+        var anyBatchShown = false;
+
         using (var child = ImRaii.Child("##rewardlist_selected", new Vector2(0, Math.Min(200f, 34f + (preset.Rewards.Count * 28f))), true))
         {
             if (child)
@@ -1895,23 +2050,55 @@ public sealed class PresetTab(Plugin plugin)
                     ImGui.SameLine();
                     ImGui.SetCursorPosX(ImGui.GetCursorPosX() + 8f);
 
-                    // 2 つの数値は役割が違う。ラベルだけでは取り違えるため、
-                    // それぞれに説明を付ける。
-                    var quantity = entry.Quantity;
-                    if (this.DrawNumber($"eq{i}{entry.RewardItemId}", "一括交換する個数##qty", ref quantity, 90f))
-                    {
-                        entry.Quantity = Math.Max(0, quantity);
-                        changed = true;
-                    }
+                    // 「一括交換する個数」は、所持の上限が入っていれば何もしない。
+                    //
+                    // 上限まで足りないぶんを買うので、いくつ持つかは上限で決まりきっている。
+                    // それでも欄が出ていると、2 つの数の関係を考えさせることになる。
+                    //
+                    // 効く場面は「所持の上限 0（上限なし）で、1 回の移動で買いすぎたくない」
+                    // ときだけ。そのときと、すでに値が入っているときだけ出す。
+                    var showsBatch = entry.Quantity != 0
+                        || entry.OwnedLimit <= 0
+                        || this.showBatchFor.Contains(entry.RewardItemId);
 
-                    if (ImGui.IsItemHovered())
-                    {
-                        ImGui.SetTooltip(
-                            "1 回の移動でこの数まで交換します。0 なら 1 回で交換できる最大数を交換します。\n" +
-                            "所持の上限が 0 なら、交換所へ行くたびにこの数ずつ交換し続けます。");
-                    }
+                    anyBatchShown |= showsBatch;
 
-                    ImGui.SameLine();
+                    if (showsBatch)
+                    {
+                        var quantity = entry.Quantity;
+                        if (this.DrawNumber($"eq{i}{entry.RewardItemId}", "一括交換する個数##qty", ref quantity, 90f))
+                        {
+                            entry.Quantity = Math.Max(0, quantity);
+                            changed = true;
+                        }
+
+                        if (ImGui.IsItemHovered())
+                        {
+                            ImGui.SetTooltip(
+                                "1 回の移動でこの数まで交換します。0 なら 1 回で交換できる最大数を交換します。\n" +
+                                "所持の上限が入っていれば、この欄は効きません。\n" +
+                                "効くのは「所持の上限 0（上限なし）で、1 回の移動で買いすぎたくない」ときだけです。");
+                        }
+
+                        ImGui.SameLine();
+                    }
+                    else
+                    {
+                        // 隠したままにすると、使いたくなったときに戻せない。
+                        if (ImGui.SmallButton($"＋##showbatch{entry.RewardItemId}"))
+                        {
+                            this.showBatchFor.Add(entry.RewardItemId);
+                        }
+
+                        if (ImGui.IsItemHovered())
+                        {
+                            ImGui.SetTooltip(
+                                "「一括交換する個数」の欄を出します。\n" +
+                                "所持の上限が入っているあいだは効かないため、ふだんは隠しています。");
+                        }
+
+                        ImGui.SameLine();
+                    }
 
                     var limit = entry.OwnedLimit;
                     if (this.DrawNumber($"el{i}{entry.RewardItemId}", "所持の上限##own", ref limit, 90f))
@@ -1979,7 +2166,9 @@ public sealed class PresetTab(Plugin plugin)
                             $"{ownedText} / 上限なし → 素材が尽きるまで繰り返します");
                     }
 
-                    if (entry.Quantity == 0)
+                    // 欄を出していないときは、この注記も出さない。
+                    // 隠した欄の説明だけが残ると、何の話なのか分からない。
+                    if (entry.Quantity == 0 && showsBatch)
                     {
                         ImGui.SameLine();
                         ImGui.TextColored(ImGuiColors.DalamudYellow, "1 回で交換できる最大数を交換します");
@@ -1988,9 +2177,14 @@ public sealed class PresetTab(Plugin plugin)
             }
         }
 
-        ImGui.TextColored(
-            ImGuiColors.DalamudGrey,
-            "  一括交換する個数 … スクリップ交換窓口で交換する数量。0 なら 1 回で交換できる最大数");
+        if (anyBatchShown)
+        {
+            ImGui.TextColored(
+                ImGuiColors.DalamudGrey,
+                "  一括交換する個数 … 1 回の移動でこの数まで交換する。0 なら 1 回で交換できる最大数。" +
+                "所持の上限が入っていれば効かない");
+        }
+
         ImGui.TextColored(ImGuiColors.DalamudGrey, "  所持の上限 … この数まで持つように交換する。0 で上限なし");
 
         if (remove is not null)
