@@ -405,7 +405,12 @@ public sealed class Plugin : IDalamudPlugin
         this.CurrencyCatalog = new CurrencyCatalog(
             this.TomestoneService, this.SpecialCurrencyMap, this.InclusionShopCatalog);
         this.CollectableDelivery = new CollectableDeliveryRunner(
-            this.AnomalyLog, this.CollectablesShopService, this.CurrencyService, this.SpecialCurrencyMap);
+            this.AnomalyLog,
+            this.CollectablesShopService,
+            this.CurrencyService,
+            this.SpecialCurrencyMap,
+            this.CollectableRewardService,
+            this.CollectablesShopReader);
 
         // スクリップの増減を人に数えさせないため、通貨の読み取り口を渡しておく。
         this.CollectablesShopReader.CurrencySampler = this.SampleSpecialCurrencies;

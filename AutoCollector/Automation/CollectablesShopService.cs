@@ -4,7 +4,6 @@ using AutoCollector.Diagnostics;
 using ECommons;
 using ECommons.Automation;
 using ECommons.DalamudServices;
-using ECommons.UIHelpers.AddonMasterImplementations;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 using Lumina.Excel.Sheets;
 
@@ -22,6 +21,11 @@ namespace AutoCollector.Automation;
 /// </summary>
 public sealed record CollectableOffer(int RowIndex, uint ItemId, string ItemName);
 
+/// <summary>納品ボタンの状態。押せない場合に、なぜ押せないのかを言葉で持つ。</summary>
+/// <param name="Ready">いま押せるか。</param>
+/// <param name="Detail">読み取った状態。押せないときの記録に使う。</param>
+public sealed record TradeButtonState(bool Ready, string Detail);
+
 /// <summary>
 /// 収集品納品画面（CollectablesShop）の読み取りと納品。
 ///
@@ -34,8 +38,9 @@ public sealed record CollectableOffer(int RowIndex, uint ItemId, string ItemName
 ///   AtkValues[34 + i*11]     ItemId + CollectableOffset
 ///
 /// 納品:
-///   Callback.Fire(addon, true, 12, 行番号)
-///   確認ダイアログは出ない。1 回の発火で 1 個だけ渡される。
+///   Callback.Fire(addon, true, 12, 行番号)   選ぶ
+///   Callback.Fire(addon, true, 15, 0u)       納品する
+///   1 回の発火で 1 個だけ渡される。
 /// </summary>
 public sealed unsafe class CollectablesShopService(AnomalyLog anomalyLog)
 {
@@ -45,12 +50,30 @@ public sealed unsafe class CollectablesShopService(AnomalyLog anomalyLog)
     /// 一覧から品目を選ぶコマンド。実測で確定した値。
     ///
     /// これは選択であって納品ではない。撃つと画面がその品目の表示に切り替わり、
-    /// 納品ボタン（node 51）が現れる。納品はそのボタンを押して行う。
+    /// 納品ボタン（node 51）が現れる。
     /// </summary>
     private const int SelectCommand = 12;
 
+    /// <summary>
+    /// 納品するコマンド。実測で確定した値。
+    ///
+    /// 納品ボタン（node 51）を押したときにゲームへ渡っていたのがこれである。
+    /// 2026-09-13 の記録では、成功した納品のすべてが
+    /// <c>Fire(12, 行番号)</c> → <c>Fire(15, 0u)</c> の 2 手だった。
+    /// 行番号 0 / 1 / 7 のいずれでも第 2 引数は 0 で変わらない。
+    ///
+    /// ボタンの押下を模す方法（ECommons の <c>ClickAddonButton</c>）は、
+    /// ノードのイベント列の先頭をそのまま使うため、ボタンが隠れている間や
+    /// イベント列の並びが変わった場合に何が起きるかを説明できない。
+    /// ゲームが実際に受け取っていた値が分かっている以上、そちらを直接渡す。
+    /// </summary>
+    private const int DeliverCommand = 15;
+
     /// <summary>納品ボタンのノード。ECommons の AddonMaster.CollectablesShop と同じ。</summary>
     private const uint TradeButtonNodeId = 51;
+
+    /// <summary>納品できる品の一覧（左のツリー）のノード。</summary>
+    private const uint OfferListNodeId = 28;
 
     /// <summary>一覧の先頭が入っている位置。</summary>
     private const uint FirstEntry = 33;
@@ -244,38 +267,138 @@ public sealed unsafe class CollectablesShopService(AnomalyLog anomalyLog)
     }
 
     /// <summary>
-    /// 納品ボタンが押せる状態か。
+    /// 納品ボタンの状態を読む。
     ///
     /// 品目を選ぶ前は隠れており、選ぶと現れる。
-    /// これが押せることをもって「選択が効いた」と判断する。
+    /// これが押せることをもって「選択が効いた」と判断していた。
+    ///
+    /// **読めなかったことを黙って「押せない」に丸めない。**
+    /// 以前はここが例外を握りつぶしており、ボタンを掴めなくなっても
+    /// 「まだ押せる状態ではない」としか見えず、原因を追えなかった。
+    ///
+    /// ノードは <see cref="AtkUnitBase.GetComponentByNodeId"/> で取る。
+    /// <c>GetComponentButtonById</c> は別のシグネチャで解決される関数で、
+    /// そちらだけが引けなくなる可能性があるため、診断と同じ経路に揃える。
     /// </summary>
-    public bool IsTradeReady()
+    public TradeButtonState ReadTradeButton()
     {
         try
         {
             if (!this.TryGetAddon(out var addon))
             {
-                return false;
+                return new TradeButtonState(false, "納品画面を掴めません");
             }
 
-            var button = addon->GetComponentButtonById(TradeButtonNodeId);
-            if (button is null || button->AtkComponentBase.OwnerNode is null)
+            var component = addon->GetComponentByNodeId(TradeButtonNodeId);
+            if (component is null)
             {
+                return new TradeButtonState(false, $"納品ボタン（node {TradeButtonNodeId}）がありません");
+            }
+
+            var type = component->GetComponentType();
+            if (type != ComponentType.Button)
+            {
+                return new TradeButtonState(false, $"node {TradeButtonNodeId} がボタンではありません（{type}）");
+            }
+
+            var owner = component->OwnerNode;
+            if (owner is null)
+            {
+                return new TradeButtonState(false, "納品ボタンのノードを取れません");
+            }
+
+            var visible = owner->AtkResNode.IsVisible();
+            var enabled = ((AtkComponentButton*)component)->IsEnabled;
+
+            return new TradeButtonState(visible && enabled, $"見える={visible} 押せる={enabled}");
+        }
+        catch (Exception ex)
+        {
+            return new TradeButtonState(false, $"納品ボタンを読めませんでした: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 選んだ品が、いま画面で選ばれている品と一致しているか。
+    ///
+    /// 納品を撃つ前の最後の関門。ここが一致していなければ、撃つと別の品を渡す。
+    /// 一覧（node 28）の選択位置から行を引き、そこに入っている行番号と照らす。
+    ///
+    /// 見出し行は納品の対象ではないので、選択位置が見出しなら不一致として扱う。
+    /// </summary>
+    public bool TryConfirmSelection(CollectableOffer offer, out string detail)
+    {
+        detail = string.Empty;
+
+        try
+        {
+            if (!this.TryGetAddon(out var addon))
+            {
+                detail = "納品画面を掴めません";
                 return false;
             }
 
-            return button->AtkComponentBase.OwnerNode->AtkResNode.IsVisible() && button->IsEnabled;
+            var component = addon->GetComponentByNodeId(OfferListNodeId);
+            if (component is null || component->GetComponentType() != ComponentType.TreeList)
+            {
+                detail = $"一覧（node {OfferListNodeId}）を取れません";
+                return false;
+            }
+
+            var tree = (AtkComponentTreeList*)component;
+            var selected = tree->SelectedItemIndex;
+
+            if (selected < 0 || selected >= tree->Items.LongCount)
+            {
+                detail = $"一覧で何も選ばれていません（選択位置 {selected} / 行数 {tree->Items.LongCount}）";
+                return false;
+            }
+
+            var item = tree->Items[selected].Value;
+            if (item is null)
+            {
+                detail = $"選択位置 {selected} の行を取れません";
+                return false;
+            }
+
+            if ((item->Type & (TreeListItemType.Group | TreeListItemType.SectionHeader)) != 0)
+            {
+                detail = $"選択位置 {selected} は見出しです（{item->Type}）";
+                return false;
+            }
+
+            // 行番号は UIntValues[1] に入っている。AtkValues[33 + i*11] と同じ値で、
+            // 発火に渡すのもこれである（docs/10 の 3 回目の実測で確定）。
+            if (item->UIntValues.LongCount < 2)
+            {
+                detail = $"選択位置 {selected} に行番号が入っていません";
+                return false;
+            }
+
+            var rowIndex = (int)item->UIntValues[1];
+            if (rowIndex != offer.RowIndex)
+            {
+                detail = $"選ばれているのは行 {rowIndex} で、狙いの行 {offer.RowIndex}（{offer.ItemName}）ではありません";
+                return false;
+            }
+
+            detail = $"選択位置 {selected} = 行 {rowIndex}（{offer.ItemName}）";
+            return true;
         }
-        catch
+        catch (Exception ex)
         {
+            detail = $"選択を確かめられませんでした: {ex.Message}";
             return false;
         }
     }
 
     /// <summary>
-    /// 納品ボタンを押す。選択済みであることが前提。
+    /// 納品を撃つ。選んだ品が画面で選ばれていることを確かめてから呼ぶこと。
+    ///
+    /// 渡すのは実測で確定した <c>Fire(15, 0u)</c>。
+    /// これは納品ボタンを押したときにゲームが受け取っていた値そのものである。
     /// </summary>
-    public bool TryTrade(out string failureReason)
+    public bool TryDeliver(out string failureReason)
     {
         failureReason = string.Empty;
 
@@ -291,20 +414,15 @@ public sealed unsafe class CollectablesShopService(AnomalyLog anomalyLog)
             return false;
         }
 
-        if (!this.IsTradeReady())
-        {
-            failureReason = "納品ボタンがまだ押せる状態ではありません";
-            return false;
-        }
-
         try
         {
-            new AddonMaster.CollectablesShop((nint)addon).Trade();
+            // 実測は Fire(15, 0u)。第 2 引数は UInt で、行番号に関わらず 0 だった。
+            Callback.Fire(addon, true, DeliverCommand, 0u);
             return true;
         }
         catch (Exception ex)
         {
-            failureReason = $"納品ボタンを押せませんでした: {ex.Message}";
+            failureReason = $"納品を撃てませんでした: {ex.Message}";
             return false;
         }
     }

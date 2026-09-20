@@ -289,6 +289,7 @@ public sealed class CollectableCycleRunner(
         blockedDetail = string.Empty;
 
         var blocked = new List<string>();
+        var belowTier = new List<string>();
         var now = 0;
         var afterExchange = 0;
 
@@ -304,6 +305,14 @@ public sealed class CollectableCycleRunner(
                 // 何のスクリップになるか分からないものは、止める理由にしない。
                 // 納品してみれば分かる。
                 now++;
+                continue;
+            }
+
+            // 収集価値が下限に届かない品は、窓口へ行っても渡せない。
+            // ここで数に入れると、行っては 1 個も納品できずに戻るのを繰り返す。
+            if (!MeetsCollectability(itemId, name, reward, out var tierDetail))
+            {
+                belowTier.Add(tierDetail);
                 continue;
             }
 
@@ -323,14 +332,55 @@ public sealed class CollectableCycleRunner(
             blocked.Add($"{name}（{ItemName(reward.CurrencyItemId)} が上限）");
         }
 
-        if (now == 0 && afterExchange == 0 && blocked.Count > 0)
+        if (now == 0 && afterExchange == 0)
         {
-            blockedDetail =
-                $"{string.Join(" / ", blocked.Take(3))} を納品できません。" +
-                "そのスクリップを減らす交換設定がないため、納品しても上限で止まります";
+            if (blocked.Count > 0)
+            {
+                blockedDetail =
+                    $"{string.Join(" / ", blocked.Take(3))} を納品できません。" +
+                    "そのスクリップを減らす交換設定がないため、納品しても上限で止まります";
+            }
+            else if (belowTier.Count > 0)
+            {
+                blockedDetail =
+                    $"{string.Join(" / ", belowTier.Take(3))}。" +
+                    "作り方を見直すか、収集価値が下限を超える品を用意してください";
+            }
         }
 
         return (now, afterExchange);
+    }
+
+    /// <summary>
+    /// 手持ちのどれかが納品の下限に届いているか。
+    ///
+    /// 下限が読めない場合は止めない。判断材料が無いだけで、納品してみれば分かる。
+    /// </summary>
+    private static bool MeetsCollectability(uint itemId, string name, CollectableReward reward, out string detail)
+    {
+        detail = string.Empty;
+
+        if (reward.LowCollectability == 0)
+        {
+            return true;
+        }
+
+        var best = 0;
+        foreach (var value in CollectablesShopReader.ListCollectability(itemId))
+        {
+            if (value > best)
+            {
+                best = value;
+            }
+        }
+
+        if (reward.Accepts(best))
+        {
+            return true;
+        }
+
+        detail = $"{name} は収集価値 {best} で、納品の下限 {reward.LowCollectability} に届いていません";
+        return false;
     }
 
     /// <summary>このスクリップに、あと 1 回納品するだけの余裕があるか。</summary>

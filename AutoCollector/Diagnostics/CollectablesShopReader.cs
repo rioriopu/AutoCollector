@@ -52,7 +52,7 @@ public sealed unsafe class CollectablesShopReader
 
             if (open && !this.wasOpen && this.AutoDump)
             {
-                this.LastAutoDumpPath = this.Save(directory);
+                this.LastAutoDumpPath = this.Save(directory, "開いた直後");
             }
 
             this.wasOpen = open;
@@ -191,13 +191,14 @@ public sealed unsafe class CollectablesShopReader
     /// 画面と手持ちの収集品をまとめて書き出す。
     /// 得られた文字列をそのまま報告に使えるようにする。
     /// </summary>
-    public string Dump()
+    public string Dump(string label = "")
     {
         var sb = new StringBuilder();
 
         try
         {
-            sb.AppendLine($"=== 収集品納品画面のダンプ（{DateTime.Now:yyyy-MM-dd HH:mm:ss}）===");
+            var suffix = string.IsNullOrEmpty(label) ? string.Empty : $" / {label}";
+            sb.AppendLine($"=== 収集品納品画面のダンプ（{DateTime.Now:yyyy-MM-dd HH:mm:ss}{suffix}）===");
 
             if (!GenericHelpers.TryGetAddonByName<AtkUnitBase>(AddonName, out var addon) ||
                 !GenericHelpers.IsAddonReady(addon))
@@ -606,12 +607,18 @@ public sealed unsafe class CollectablesShopReader
         }
     }
 
-    /// <summary>ダンプをファイルへ書き出す。長いので画面ではなくファイルで渡す。</summary>
-    public string Save(string directory)
+    /// <summary>
+    /// ダンプをファイルへ書き出す。長いので画面ではなくファイルで渡す。
+    ///
+    /// <paramref name="label"/> はファイル名と見出しに入れる。
+    /// 画面が開いた瞬間のものか、品目を選んだあとのものかを取り違えないようにするため。
+    /// </summary>
+    public string Save(string directory, string label = "")
     {
-        var path = System.IO.Path.Combine(directory, $"CollectablesShop_{DateTime.Now:yyyyMMdd_HHmmss}.txt");
+        var tag = string.IsNullOrEmpty(label) ? string.Empty : $"_{label}";
+        var path = System.IO.Path.Combine(directory, $"CollectablesShop_{DateTime.Now:yyyyMMdd_HHmmss}{tag}.txt");
         System.IO.Directory.CreateDirectory(directory);
-        System.IO.File.WriteAllText(path, this.Dump(), Encoding.UTF8);
+        System.IO.File.WriteAllText(path, this.Dump(label), Encoding.UTF8);
         return path;
     }
 }

@@ -30,10 +30,20 @@ public sealed class CollectableDeliveryRunner(
     AnomalyLog anomalyLog,
     CollectablesShopService shop,
     CurrencyService currency,
-    SpecialCurrencyMap currencyMap)
+    SpecialCurrencyMap currencyMap,
+    CollectableRewardService rewards,
+    CollectablesShopReader reader)
 {
     /// <summary>納品ボタンが押せるようになるまでの確認回数の上限。</summary>
     private const int TradeReadyAttempts = 20;
+
+    /// <summary>
+    /// ボタンを待つのをやめて、実測の手順で納品するまでの確認回数。
+    ///
+    /// 呼び出しは 100 ミリ秒ごとなので、10 回でおよそ 1 秒。
+    /// うまくいっている環境では 1 回目で押せるようになるため、ここまで来ない。
+    /// </summary>
+    private const int TradeReadyFallbackAttempts = 10;
 
     /// <summary>
     /// 撃ってから読みにいくまでの間。
@@ -59,6 +69,8 @@ public sealed class CollectableDeliveryRunner(
     private readonly CollectablesShopService shop = shop;
     private readonly CurrencyService currency = currency;
     private readonly SpecialCurrencyMap currencyMap = currencyMap;
+    private readonly CollectableRewardService rewards = rewards;
+    private readonly CollectablesShopReader reader = reader;
 
     /// <summary>品目ごとに観測した報酬。1 回目の納品で分かる。</summary>
     private readonly Dictionary<uint, (uint ScripItemId, int Amount)> observedReward = [];
@@ -77,8 +89,32 @@ public sealed class CollectableDeliveryRunner(
 
     private CollectableOffer? target;
     private int ownedBefore;
+
+    /// <summary>
+    /// 撃つ前の手持ちの収集品。狙っていない品が減っていないかを見るために控える。
+    ///
+    /// 納品はいま選ばれている品に対して行われる。選択の確認を通しているとはいえ、
+    /// 別の品が渡されたことに気づかないまま続けると、被害が積み上がる。
+    /// </summary>
+    private IReadOnlyDictionary<uint, int> heldBefore = new Dictionary<uint, int>();
     private IReadOnlyList<(uint ItemId, string Name, int Count)> scripBefore = [];
     private int tradeAttempts;
+
+    /// <summary>最後に読んだ納品ボタンの状態。納品できなかったときの理由に入れる。</summary>
+    private string lastButtonDetail = string.Empty;
+
+    /// <summary>最後に読んだ選択の状態。納品できなかったときの理由に入れる。</summary>
+    private string lastSelectionDetail = string.Empty;
+
+    /// <summary>
+    /// 選んだあとの画面を書き出したか。
+    ///
+    /// 納品できないとき、画面が選択後にどうなっているのかが分からないと原因を追えない。
+    /// 自動で取っているダンプは画面が開いた瞬間のもので、選ぶ前の姿しか残らない。
+    /// 1 回の納品につき 1 度だけ、選んだあとの姿を残す。
+    /// </summary>
+    private bool dumpedAfterSelect;
+
     /// <summary>反映を待つ上限。ここを過ぎても変わらなければ原因を切り分ける。</summary>
     private DateTime waitUntilUtc;
 
@@ -115,6 +151,7 @@ public sealed class CollectableDeliveryRunner(
         this.observedReward.Clear();
         this.blocked.Clear();
         this.retried.Clear();
+        this.dumpedAfterSelect = false;
         this.Step = DeliveryStep.Select;
         this.StatusDetail = "納品する品を選んでいます";
         reason = string.Empty;
@@ -195,6 +232,7 @@ public sealed class CollectableDeliveryRunner(
         }
 
         var skipped = string.Empty;
+        var belowTier = string.Empty;
 
         foreach (var offer in offers)
         {
@@ -205,6 +243,18 @@ public sealed class CollectableDeliveryRunner(
 
             if (this.blocked.Contains(offer.ItemId))
             {
+                continue;
+            }
+
+            // 収集価値が下限に届かない品は、窓口にあっても渡せない。
+            // 選んでから納品できる状態にならず、待って諦めるだけになる。
+            if (!this.MeetsCollectability(offer, out var tierDetail))
+            {
+                if (string.IsNullOrEmpty(belowTier))
+                {
+                    belowTier = tierDetail;
+                }
+
                 continue;
             }
 
@@ -225,8 +275,11 @@ public sealed class CollectableDeliveryRunner(
 
             this.target = offer;
             this.ownedBefore = owned;
+            this.heldBefore = held;
             this.scripBefore = this.SampleScrips();
             this.tradeAttempts = 0;
+            this.lastButtonDetail = "未読";
+            this.lastSelectionDetail = "未確認";
 
             if (!this.shop.TrySelect(offer, out var selectFailure))
             {
@@ -241,44 +294,153 @@ public sealed class CollectableDeliveryRunner(
 
         var blockedNote = this.blocked.Count > 0 ? $"。納品できなかった品が {this.blocked.Count} 種類あります" : string.Empty;
 
-        this.Finish(
-            string.IsNullOrEmpty(skipped)
-                ? $"納品できる収集品がなくなりました{blockedNote}"
-                : $"残りはスクリップが溢れるため納品していません（{skipped}）{blockedNote}");
+        var reason = !string.IsNullOrEmpty(skipped)
+            ? $"残りはスクリップが溢れるため納品していません（{skipped}）"
+            : !string.IsNullOrEmpty(belowTier)
+                ? $"残りは収集価値が足りないため納品できません（{belowTier}）"
+                : "納品できる収集品がなくなりました";
+
+        this.Finish($"{reason}{blockedNote}");
     }
 
-    /// <summary>納品ボタンが押せるようになるのを待って押す。時間ではなく状態で判断する。</summary>
+    /// <summary>
+    /// 手持ちのどれかが納品の下限に届いているか。
+    ///
+    /// 下限はシート（CollectablesShopRefine）から引く。引けない場合は止めない。
+    /// 判断材料が無いだけで、納品してみれば分かる。
+    /// </summary>
+    private bool MeetsCollectability(CollectableOffer offer, out string detail)
+    {
+        detail = string.Empty;
+
+        if (!this.rewards.TryResolve(offer.ItemId, out var reward) || reward.LowCollectability == 0)
+        {
+            return true;
+        }
+
+        var best = 0;
+        foreach (var value in CollectablesShopReader.ListCollectability(offer.ItemId))
+        {
+            if (value > best)
+            {
+                best = value;
+            }
+        }
+
+        if (reward.Accepts(best))
+        {
+            return true;
+        }
+
+        detail = $"{offer.ItemName} は収集価値 {best} で、納品の下限 {reward.LowCollectability} に届いていません";
+        return false;
+    }
+
+    /// <summary>
+    /// 選択が効いたことを確かめて納品する。時間ではなく状態で判断する。
+    ///
+    /// 本来は納品ボタン（node 51）が現れたことを合図にしていた。
+    /// ところが実機で、選択は効いているのにボタンが現れない状態が出た。
+    /// ボタンが出ないまま 2 秒待って諦め、窓口へ行き直すだけを繰り返していた。
+    ///
+    /// ボタンの可視状態は「選択が効いた」ことの代わりに見ていたにすぎない。
+    /// 選択そのものは一覧（node 28）から直接読めるので、そちらで確かめる。
+    /// 確かめられたら、実測で確定している納品の発火をそのまま渡す。
+    /// </summary>
     private void TickWaitTrade()
     {
         this.tradeAttempts++;
 
-        if (this.shop.IsTradeReady())
+        var offer = this.target;
+        if (offer is null)
         {
-            if (!this.shop.TryTrade(out var tradeFailure))
+            this.Fail("納品対象を見失いました");
+            return;
+        }
+
+        var button = this.shop.ReadTradeButton();
+        this.lastButtonDetail = button.Detail;
+
+        if (button.Ready)
+        {
+            this.FireDelivery(offer, $"納品ボタンが押せる状態になりました（{this.tradeAttempts} 回目）");
+            return;
+        }
+
+        // ボタンが現れない。選択が狙いどおりなら、ボタンを待たずに納品する。
+        if (this.tradeAttempts >= TradeReadyFallbackAttempts)
+        {
+            this.DumpAfterSelect();
+
+            var confirmed = this.shop.TryConfirmSelection(offer, out var selectionDetail);
+            this.lastSelectionDetail = selectionDetail;
+
+            if (confirmed)
             {
-                this.Fail(tradeFailure);
+                this.FireDelivery(
+                    offer,
+                    $"納品ボタンが現れません（{button.Detail}）が、選択は合っています（{selectionDetail}）");
                 return;
             }
-
-            this.Step = DeliveryStep.Verify;
-
-            // **固定で待たない。反映されたかどうかで進む。**
-            //
-            // 以前は一律 1200 ミリ秒待っていた。実測ではスクリップは
-            // 撃ってから 0.2 秒ほどで入っており、残りの 1 秒は無駄に待っていた。
-            // 納品 1 個あたり約 1.5 秒かかっていたのはこれが原因。
-            //
-            // 撃った直後は読みにいかない。反映の途中を読むと、
-            // 減る前の所持数を見て「納品できなかった」と誤判定する。
-            this.verifyFromUtc = DateTime.UtcNow.Add(VerifySettle);
-            this.waitUntilUtc = DateTime.UtcNow.Add(VerifyLimit);
-            return;
         }
 
         if (this.tradeAttempts >= TradeReadyAttempts)
         {
-            this.Fail($"{this.target?.ItemName} を選びましたが、納品ボタンが押せる状態になりませんでした");
+            this.Fail(
+                $"{offer.ItemName} を選びましたが納品できる状態になりませんでした" +
+                $"（ボタン: {this.lastButtonDetail} / 選択: {this.lastSelectionDetail}）");
         }
+    }
+
+    /// <summary>
+    /// 選んだあとの画面を書き出す。
+    ///
+    /// 納品ボタンが現れないとき、選択が効いているのかどうかを
+    /// あとから確かめられるようにする。書き出しに失敗しても納品は止めない。
+    /// </summary>
+    private void DumpAfterSelect()
+    {
+        if (this.dumpedAfterSelect)
+        {
+            return;
+        }
+
+        this.dumpedAfterSelect = true;
+
+        try
+        {
+            var path = this.reader.Save(Plugin.ResolveLogDirectory(), "選んだあと");
+            this.anomalyLog.Info("Collect", $"納品ボタンが現れないため、選んだあとの画面を書き出しました: {path}");
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Warn("Collect", $"選んだあとの画面を書き出せませんでした: {ex.Message}");
+        }
+    }
+
+    /// <summary>納品を撃って、検証待ちへ移る。</summary>
+    private void FireDelivery(CollectableOffer offer, string note)
+    {
+        this.anomalyLog.Info("Collect", $"{offer.ItemName} を納品します。{note}");
+
+        if (!this.shop.TryDeliver(out var failure))
+        {
+            this.Fail(failure);
+            return;
+        }
+
+        this.Step = DeliveryStep.Verify;
+
+        // **固定で待たない。反映されたかどうかで進む。**
+        //
+        // 以前は一律 1200 ミリ秒待っていた。実測ではスクリップは
+        // 撃ってから 0.2 秒ほどで入っており、残りの 1 秒は無駄に待っていた。
+        // 納品 1 個あたり約 1.5 秒かかっていたのはこれが原因。
+        //
+        // 撃った直後は読みにいかない。反映の途中を読むと、
+        // 減る前の所持数を見て「納品できなかった」と誤判定する。
+        this.verifyFromUtc = DateTime.UtcNow.Add(VerifySettle);
+        this.waitUntilUtc = DateTime.UtcNow.Add(VerifyLimit);
     }
 
     /// <summary>撃ったことではなく、所持数の変化で成否を判断する。</summary>
@@ -298,13 +460,26 @@ public sealed class CollectableDeliveryRunner(
         }
 
         var ownedAfter = 0;
+        var heldAfter = new Dictionary<uint, int>();
         foreach (var (itemId, _, count) in CollectablesShopReader.ListHeldCollectables())
         {
+            heldAfter[itemId] = count;
+
             if (itemId == offer.ItemId)
             {
                 ownedAfter = count;
-                break;
             }
+        }
+
+        // 狙っていない収集品が減っていたら、そこで止める。
+        //
+        // 納品はいま選ばれている品に対して行われる。選択がずれていた場合、
+        // 気づかずに続けると手持ちを別の品から削っていくことになる。
+        // 何が起きたかは分かっているので、やり直さずに止める。
+        if (this.TryFindUnexpectedLoss(heldAfter, offer.ItemId, out var lossDetail))
+        {
+            this.Fail($"狙っていない収集品が減りました（{lossDetail}）。取り違えの恐れがあるため納品を止めます");
+            return;
         }
 
         var after = this.SampleScrips();
@@ -376,7 +551,8 @@ public sealed class CollectableDeliveryRunner(
             this.anomalyLog.Warn(
                 "Collect",
                 $"{offer.ItemName} は納品できませんでした（所持 {this.ownedBefore} のまま / スクリップの増加なし。" +
-                $"収集価値 {DescribeCollectability(offer.ItemId)}）。この品は飛ばして続けます");
+                $"収集価値 {DescribeCollectability(offer.ItemId)} / ボタン: {this.lastButtonDetail} / " +
+                $"選択: {this.lastSelectionDetail}）。この品は飛ばして続けます");
 
             this.target = null;
             this.Step = DeliveryStep.Select;
@@ -400,6 +576,45 @@ public sealed class CollectableDeliveryRunner(
         }
 
         this.Step = DeliveryStep.Select;
+    }
+
+    /// <summary>
+    /// 狙った品以外に減ったものがあるか。
+    ///
+    /// 減っていれば、納品が別の品に対して行われたことになる。
+    /// </summary>
+    private bool TryFindUnexpectedLoss(
+        IReadOnlyDictionary<uint, int> heldAfter,
+        uint expectedItemId,
+        out string detail)
+    {
+        detail = string.Empty;
+
+        // 1 件も読めなかった場合は、読めなかっただけかもしれない。
+        // 読めない値を根拠に「全部減った」と判断して止めない。
+        if (heldAfter.Count == 0)
+        {
+            return false;
+        }
+
+        foreach (var (itemId, before) in this.heldBefore)
+        {
+            if (itemId == expectedItemId)
+            {
+                continue;
+            }
+
+            var now = heldAfter.GetValueOrDefault(itemId);
+            if (now >= before)
+            {
+                continue;
+            }
+
+            detail = $"{Ui.StatusText.ItemName(itemId)} {before} → {now}";
+            return true;
+        }
+
+        return false;
     }
 
     /// <summary>
