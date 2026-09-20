@@ -83,6 +83,19 @@ public sealed record ExchangeDefinition
     /// <summary>TopicSelect.Name / CustomTalk.MainOption 由来のヒント。ショップ名で決まらないときの候補。</summary>
     public string? MenuHint { get; init; }
 
+    /// <summary>
+    /// SpecialShop.Item[].Category の行番号（SpecialShopItemCategory）。0 なら未設定。
+    ///
+    /// **交換画面は区分ごとに 1 つずつしか品を出さない。**
+    /// ジルコンの「ILv750ファイター装備」は全 37 件だが、開いた直後に見えるのは
+    /// 防具の 25 件だけで、アクセサリの 12 件は別の区分に隠れている。
+    /// 会話でショップを選び分けても、ここを合わせないと目的の品に届かない。
+    ///
+    /// 1=武具 / 2=防具 / 3=アクセサリ / 4=その他（名前はシートから引ける）。
+    /// 番号をコードに埋め込まず、シートの行番号をそのまま持つ。
+    /// </summary>
+    public uint ItemCategory { get; init; }
+
     /// <summary>InclusionShop 経由の場合の経路情報。null なら通常の SpecialShop。</summary>
     public InclusionPath? Inclusion { get; init; }
 

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using AutoCollector.Diagnostics;
 using AutoCollector.Game;
 using ECommons;
+using ECommons.Automation;
 using ECommons.DalamudServices;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 using Lumina.Excel.Sheets;
@@ -43,6 +44,9 @@ public sealed class ShopService(AnomalyLog anomalyLog, ShopAddonLayout layout)
 {
     private const string AddonName = "ShopExchangeCurrency";
 
+    /// <summary>表示する区分を切り替えるコマンド。実測で確定した値。</summary>
+    private const int CategoryCommand = 4;
+
     private readonly AnomalyLog anomalyLog = anomalyLog;
 
     public ShopAddonLayout Layout { get; } = layout;
@@ -52,6 +56,64 @@ public sealed class ShopService(AnomalyLog anomalyLog, ShopAddonLayout layout)
     {
         return GenericHelpers.TryGetAddonByName<AtkUnitBase>(AddonName, out var addon)
                && GenericHelpers.IsAddonReady(addon);
+    }
+
+    /// <summary>
+    /// 表示する区分を切り替える。
+    ///
+    /// **交換画面は区分ごとに 1 つずつしか品を出さない。**
+    /// ジルコンの「ILv750ファイター装備」は全 37 件だが、開いた直後に見えるのは
+    /// 防具の 25 件だけで、アクセサリの 12 件はこの切り替えを通さないと読めない。
+    /// 正しいショップを選んでも、ここを合わせないと目的の品に届かない。
+    ///
+    /// 渡す値は実測で確定している（2026-09-20）。
+    ///
+    /// <code>
+    /// Fire(4, -1, 1, 2u)   防具
+    /// Fire(4, -1, 1, 3u)   アクセサリ
+    /// Fire(4, -1, 1, 1u)   武具
+    /// </code>
+    ///
+    /// 第 4 引数は <c>SpecialShopItemCategory</c> の行番号そのもので、
+    /// 1=武具 / 2=防具 / 3=アクセサリ / 4=その他 と一致した。
+    /// **前 3 つは Int、第 4 引数だけ UInt。** 交換の発火（全部 Int）とは型が違う。
+    ///
+    /// **撃ったことを成功にしない。** 呼んだ側が一覧を読み直し、
+    /// 目的の品が現れたことを確かめてから次へ進むこと。
+    /// </summary>
+    public unsafe bool TrySelectCategory(uint categoryRowId, out string failureReason)
+    {
+        failureReason = string.Empty;
+
+        if (categoryRowId == 0)
+        {
+            failureReason = "区分が分かりません";
+            return false;
+        }
+
+        if (!Svc.Framework.IsInFrameworkUpdateThread)
+        {
+            failureReason = "Framework スレッド以外から実行されました";
+            return false;
+        }
+
+        if (!GenericHelpers.TryGetAddonByName<AtkUnitBase>(AddonName, out var addon) ||
+            !GenericHelpers.IsAddonReady(addon))
+        {
+            failureReason = "交換ショップが開いていません";
+            return false;
+        }
+
+        try
+        {
+            Callback.Fire(addon, true, CategoryCommand, -1, 1, categoryRowId);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            failureReason = $"区分を切り替えられませんでした: {ex.Message}";
+            return false;
+        }
     }
 
     /// <summary>配置が正しいかを目視確認するための診断情報を返す。</summary>

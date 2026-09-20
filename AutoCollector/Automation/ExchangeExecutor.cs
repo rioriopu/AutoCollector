@@ -352,6 +352,14 @@ public sealed unsafe class ExchangeExecutor(
     /// </summary>
     private static readonly TimeSpan SuppressWaitLimit = TimeSpan.FromMinutes(5);
 
+    /// <summary>
+    /// 区分を切り替えてから、一覧が入れ替わるのを待つ上限。
+    ///
+    /// 入れ替わったのを見た時点で先へ進むので、これは
+    /// 「入れ替わらなかった」と判断するまでの猶予でしかない。
+    /// </summary>
+    private static readonly TimeSpan CategorySwitchLimit = TimeSpan.FromSeconds(3);
+
     /// <summary>外部プラグインの手が空くのを待ち始めた区間の期限。</summary>
     private DateTime suppressWaitDeadlineUtc = DateTime.MinValue;
 
@@ -446,6 +454,21 @@ public sealed unsafe class ExchangeExecutor(
     /// プラグインを読み込み直すまで覚えておく。
     /// </summary>
     private readonly HashSet<uint> rejectedRewards = [];
+
+    /// <summary>この品で切り替えを試した区分。</summary>
+    private readonly HashSet<uint> triedCategories = [];
+
+    /// <summary>その記録がどの品のものか。品が変われば忘れる。</summary>
+    private uint triedCategoriesForItemId;
+
+    /// <summary>切り替えを頼んで、一覧が入れ替わるのを待っているか。</summary>
+    private bool categorySwitchPending;
+
+    /// <summary>切り替えを頼んだときの一覧の指紋。入れ替わったかの判断に使う。</summary>
+    private string categorySignature = string.Empty;
+
+    /// <summary>入れ替わりを待つ上限。</summary>
+    private DateTime categoryDeadlineUtc;
 
     /// <summary>納品を開始済みか。開始と終了の区別に使う。</summary>
     private bool deliveryStarted;
@@ -998,6 +1021,7 @@ public sealed unsafe class ExchangeExecutor(
         this.lastMenuSelection = string.Empty;
         this.lastMenuSignature = string.Empty;
         this.menuSignatureSinceUtc = DateTime.MinValue;
+        this.ResetCategoryState();
 
         // 納品は品数ぶん繰り返すため長くかかる。移動と会話を含めても
         // 15 分あれば足りる。これを超えるのは何かが噛み合っていないとき。
@@ -2538,8 +2562,158 @@ public sealed unsafe class ExchangeExecutor(
     }
 
     /// <summary>
+    /// 目的の品が見えるまで、区分（画面のタブ）を合わせる。
+    ///
+    /// true を返したら「この呼び出しでは撃たず、次の呼び出しで読み直す」という意味。
+    /// false なら、いま見えている一覧のままで判断してよい。
+    ///
+    /// **切り替えたことを成功にしない。** 一覧が入れ替わったのを見てから次を判断する。
+    /// 切り替え直後に読むと古い一覧が返り、「この区分にも無い」と誤って次へ進んでしまう。
+    /// </summary>
+    private bool TickCategory(
+        ExchangeDefinition definition,
+        IReadOnlyList<ShopEntry> entries,
+        ShopHeader header,
+        out string detail)
+    {
+        detail = string.Empty;
+
+        // 区分を持たないショップ（1 区分だけの窓）では何もしない。
+        if (definition.ItemCategory == 0)
+        {
+            return false;
+        }
+
+        var signature = DescribeEntries(entries);
+
+        // 切り替えを頼んだ直後。入れ替わるまで待つ。
+        //
+        // 件数が申告と合わないうちは、入れ替えの途中を読んでいる。
+        // そのまま先へ進むと、下の件数検査（P-10）に自分で引っかかる。
+        if (this.categorySwitchPending)
+        {
+            var settled = signature != this.categorySignature
+                && entries.Count == (int)header.DeclaredEntryCount;
+
+            if (!settled && DateTime.UtcNow < this.categoryDeadlineUtc)
+            {
+                return true;
+            }
+
+            this.categorySwitchPending = false;
+        }
+
+        // 見えているなら、それでよい。
+        foreach (var entry in entries)
+        {
+            if (entry.ItemId == definition.RewardItemId)
+            {
+                return false;
+            }
+        }
+
+        return this.TryBeginCategorySwitch(definition, signature, out detail);
+    }
+
+    /// <summary>
+    /// まだ試していない区分へ切り替える。試す先が無ければ false。
+    ///
+    /// 狙いの区分（シート由来）を最初に試し、それでも見つからなければ
+    /// 同じショップが持つ残りの区分も試す。区分の一覧は定義から作るので、
+    /// 番号も名前もコードに埋め込まない。
+    /// </summary>
+    private bool TryBeginCategorySwitch(ExchangeDefinition definition, string signature, out string detail)
+    {
+        detail = string.Empty;
+
+        // 品が変われば、試した記録も引き継がない。
+        // 同じ窓で次の品へ進むとき、前の品で試した区分を飛ばしてしまう。
+        if (this.triedCategoriesForItemId != definition.RewardItemId)
+        {
+            this.triedCategories.Clear();
+            this.triedCategoriesForItemId = definition.RewardItemId;
+        }
+
+        var order = new List<uint> { definition.ItemCategory };
+
+        foreach (var other in this.resolver.LiveResults)
+        {
+            if (other.ShopId != definition.ShopId || other.ItemCategory == 0 ||
+                order.Contains(other.ItemCategory))
+            {
+                continue;
+            }
+
+            order.Add(other.ItemCategory);
+        }
+
+        foreach (var category in order)
+        {
+            if (!this.triedCategories.Add(category))
+            {
+                continue;
+            }
+
+            if (!this.shopService.TrySelectCategory(category, out var failure))
+            {
+                this.anomalyLog.Warn("Shop", $"区分を切り替えられませんでした: {failure}");
+                continue;
+            }
+
+            this.categorySignature = signature;
+            this.categorySwitchPending = true;
+            this.categoryDeadlineUtc = DateTime.UtcNow.Add(CategorySwitchLimit);
+
+            detail = $"{ShopCategoryName(category)} の区分へ切り替えています";
+            this.anomalyLog.Info(
+                "Shop",
+                $"{Ui.StatusText.ItemName(definition.RewardItemId)} が画面に見えないため、{detail}");
+
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>区分の名前。シートから引く。引けなければ番号で出す。</summary>
+    private static string ShopCategoryName(uint rowId)
+    {
+        try
+        {
+            var name = Svc.Data.GetExcelSheet<SpecialShopItemCategory>()
+                ?.GetRowOrDefault(rowId)?.Name.ExtractText();
+
+            return string.IsNullOrEmpty(name) ? $"区分 {rowId}" : name;
+        }
+        catch
+        {
+            return $"区分 {rowId}";
+        }
+    }
+
+    /// <summary>一覧が入れ替わったかを見るための指紋。</summary>
+    private static string DescribeEntries(IReadOnlyList<ShopEntry> entries)
+        => $"{entries.Count}:{string.Join(",", entries.Select(x => x.ItemId))}";
+
+    /// <summary>区分の切り替え状態を初期に戻す。新しい移動を始めるときに通す。</summary>
+    private void ResetCategoryState()
+    {
+        this.triedCategories.Clear();
+        this.triedCategoriesForItemId = 0;
+        this.categorySwitchPending = false;
+        this.categorySignature = string.Empty;
+        this.categoryDeadlineUtc = DateTime.MinValue;
+    }
+
+    /// <summary>
     /// 事前条件をすべて評価し、通ったらその場で発火する。
-    /// この関数の中でフレームを跨がない。1 回で決着させ、失敗したら Error に落とす。
+    ///
+    /// **読み取りから発火までは 1 回の呼び出しで完結させる。** 途中でフレームを跨ぐと、
+    /// 読んだときの画面と撃つときの画面が違うものになりうる。失敗したら Error に落とす。
+    ///
+    /// 例外は区分（画面のタブ）合わせだけで、こちらは撃つ前に何度か呼び出しを跨ぐ。
+    /// 切り替えを頼んだ呼び出しでは撃たず、次の呼び出しで画面を読み直すところから始める。
+    /// 「読んでから撃つまでが 1 回」は守られている。
     /// </summary>
     private void TickArmed()
     {
@@ -2634,6 +2808,30 @@ public sealed unsafe class ExchangeExecutor(
             return;
         }
 
+        // **区分（画面のタブ）を合わせる。**
+        //
+        // 交換画面は区分ごとに 1 つずつしか品を出さない。
+        // 正しいショップを選んでも、防具の区分を開いているあいだは
+        // アクセサリの品が 1 件も見えない。
+        //
+        // 実機（2026-09-20）: ジルコンの「ILv750ファイター装備」は全 37 件だが、
+        // 読めたのは防具の 25 件だけで、キングダムテール・レンジャーイヤリングに
+        // 届かなかった。会話の選択は合っていた。
+        //
+        // **切り替えたこの呼び出しでは撃たない。** 次の呼び出しで読み直し、
+        // 目的の品が現れたことを確かめてから先へ進む。
+        if (this.TickCategory(definition, entries, header, out var categoryDetail))
+        {
+            this.pendingRequest = definition;
+
+            if (!string.IsNullOrEmpty(categoryDetail))
+            {
+                this.StatusDetail = categoryDetail;
+            }
+
+            return;
+        }
+
         // P-10: 欠けでも過剰でも撃たない
         if (entries.Count != (int)header.DeclaredEntryCount || header.UnreadableEntries != 0)
         {
@@ -2669,7 +2867,17 @@ public sealed unsafe class ExchangeExecutor(
                 ShopMatchKind.CostMismatch => ExchangeFailure.CostMismatch,
                 _ => ExchangeFailure.ShopMismatch,
             };
-            this.Fail(failure, match.Detail);
+
+            // どの区分まで試したのかを理由に添える。
+            // 「見つかりません」だけでは、区分の話なのか品の話なのか読めない。
+            var matchDetail = match.Detail;
+
+            if (match.Kind == ShopMatchKind.ItemNotFound && this.triedCategories.Count > 0)
+            {
+                matchDetail = $"{matchDetail}。区分は {string.Join(" / ", this.triedCategories.Select(ShopCategoryName))} まで試しました";
+            }
+
+            this.Fail(failure, matchDetail);
             return;
         }
 
