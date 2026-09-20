@@ -1795,10 +1795,25 @@ public sealed unsafe class ExchangeExecutor(
 
         if (this.Failure == ExchangeFailure.None)
         {
-            // 納品だった場合は、何個納品したかを残す。「完了しました」だけでは分からない。
-            this.StatusDetail = string.IsNullOrEmpty(this.deliverySummary)
-                ? "完了しました"
-                : this.deliverySummary;
+            // **1 回も交換していないなら「完了しました」で潰さない。**
+            //
+            // 撃てずに帰ってきた場合、その理由が StatusDetail に入っている。
+            // それを上書きすると、往復しているのに画面は成功に見える。
+            var didNothing = this.LastSessionCompleted == 0 &&
+                             string.IsNullOrEmpty(this.deliverySummary) &&
+                             !string.IsNullOrEmpty(this.StatusDetail);
+
+            if (didNothing)
+            {
+                this.StatusDetail = $"交換せずに戻りました: {this.StatusDetail}";
+            }
+            else
+            {
+                // 納品だった場合は、何個納品したかを残す。「完了しました」だけでは分からない。
+                this.StatusDetail = string.IsNullOrEmpty(this.deliverySummary)
+                    ? "完了しました"
+                    : this.deliverySummary;
+            }
         }
     }
 

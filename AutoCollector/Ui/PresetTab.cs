@@ -1126,6 +1126,12 @@ public sealed class PresetTab(Plugin plugin)
             return;
         }
 
+        // 設定として交換できない品があるなら、達成より先に出す。
+        foreach (var note in goal.Notes.Where(x => x.Contains("1 回も交換できません", StringComparison.Ordinal)))
+        {
+            ImGui.TextColored(ImGuiColors.DalamudYellow, $"  {note}");
+        }
+
         if (goal.Achieved)
         {
             ImGui.TextColored(ImGuiColors.HealerGreen, "目標に届いています");
@@ -1145,18 +1151,31 @@ public sealed class PresetTab(Plugin plugin)
             }
         }
 
-        // 要るスクリップ。届いていない品だけを並べる。
-        foreach (var item in goal.Items.Where(x => !x.Unlimited && x.Remaining > 0))
+        // 要るスクリップ。**まだ交換できる品だけ**を並べる。
+        //
+        // 以前は「残りが 1 個以上」で絞っていたため、端数だけ残った品が
+        // 「あと 1 個 = 0 回 = 0」という読めない行になっていた。
+        foreach (var item in goal.Items.Where(x => !x.Unlimited && x.Trades > 0))
         {
-            // 1 回で 2 個以上もらえる品があるので、回数で書く。
+            // **費用は 1 回あたり。数えるのは回数。**
+            // 1 回 1 個の品でも「個」と書くと、Trades を個数と読ませてしまう。
             var trade = item.PerTrade > 1
                 ? $"{item.Trades} 回（1 回 {item.PerTrade} 個）× {item.Cost:N0}"
-                : $"{item.Trades} 個 × {item.Cost:N0}";
+                : $"{item.Trades} 回 × {item.Cost:N0}";
 
             ImGui.TextColored(
                 ImGuiColors.DalamudGrey,
                 $"  {item.Name}: {item.Want} 個まで（いま {item.Held} 個）" +
                 $" → あと {item.Remaining} 個 = {trade} = {item.Subtotal:N0}");
+        }
+
+        // 端数だけ残った品は、別に書く。買えないことを明示する。
+        foreach (var item in goal.Items.Where(x => !x.Unlimited && x.Trades <= 0 && x.Remaining > 0))
+        {
+            ImGui.TextColored(
+                ImGuiColors.DalamudGrey,
+                $"  {item.Name}: あと {item.Remaining} 個ですが、" +
+                $"1 回で {item.PerTrade} 個入るため交換できません");
         }
 
         // **費用を引けない品があるなら、合計を断言しない。**
