@@ -888,9 +888,17 @@ public sealed class MonitorService(
             currencyCost: (int)definition.CurrencyCost,
             owned: owned,
             currency: currency,
-            // 所持枠は下見では見ない（上と同じ理由）。
-            freeSlots: int.MaxValue / 2,
-            keepFree: 0,
+            // **所持枠は下見でも見る。**
+            //
+            // 見ていなかったため、鞄が埋まっていても出発し、
+            // 着いてから撃てずに帰る往復が止まらなかった。
+            // 通貨が減らないので、次の判定でも同じ判断になる。
+            //
+            // 交換で残す枠は 2（ExchangeExecutor.KeepFreeSlots と同じ値）。
+            freeSlots: Plugin.P.CurrencyService.TryGetEmptyBagSlots(out var slots)
+                ? (int)slots
+                : int.MaxValue / 2,
+            keepFree: 2,
             limits: limits,
             maxBatch: 1);
 

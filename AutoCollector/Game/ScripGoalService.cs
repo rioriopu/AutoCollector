@@ -184,12 +184,24 @@ public sealed class ScripGoalService(
         var hasUnlimited = items.Any(x => x.Unlimited);
         var hasGoal = items.Any(x => !x.Unlimited);
         var endless = hasUnlimited;
-        // **端数は達成とみなす。**
+        // **「買った結果の端数」と「はじめから 1 回も買えない設定」は別物。**
         //
-        // 1 回で 2 個以上もらえる品は、上限が割り切れないと最後に端数が残る。
-        // その端数は交換できない（買うと上限を超える）ので、
-        // Remaining == 0 を条件にすると永久に達成にならない。
-        var achieved = hasGoal && !hasUnlimited &&
+        // 端数（上限 10・1 回 3 個 → 最後の 1 個）は達成としてよい。
+        // だが上限そのものが 1 回ぶんに満たない（上限 1・1 回 2 個）と、
+        // 所持 0 でも Trades が 0 になり、何も買わずに「達成」になってしまう。
+        // 交換リストの所持の上限は既定が 1 なので、素直に足すと必ずこれを踏む。
+        var unreachable = items
+            .Where(x => !x.Unlimited && x.PerTrade > 1 && x.Want < x.PerTrade)
+            .ToList();
+
+        foreach (var item in unreachable)
+        {
+            notes.Add(
+                $"{item.Name} は 1 回で {item.PerTrade} 個入るため、" +
+                $"所持の上限 {item.Want} では 1 回も交換できません。上限を {item.PerTrade} 以上にしてください");
+        }
+
+        var achieved = hasGoal && !hasUnlimited && unreachable.Count == 0 &&
                        items.Where(x => !x.Unlimited).All(x => x.Trades <= 0);
 
         // まだ買う必要がある品のうち、いちばん安い費用。
