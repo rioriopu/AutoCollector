@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using AutoCollector.Diagnostics;
@@ -195,6 +195,24 @@ public sealed class ExchangeResolver(
                     continue;
                 }
 
+                // この品がショップ画面のどの区分に出るか。
+                //
+                // **交換画面は区分ごとに 1 つずつしか品を出さない。**
+                // 同じショップでも、防具の区分を開いているあいだはアクセサリの品が見えない。
+                // 区分を合わせないと、正しいショップを選んでも目的の品に届かない。
+                //
+                // 複数入っている行が実データにあるため（武器ショップの先頭など）、
+                // 最初の非 0 を採る。
+                uint itemCategory = 0;
+                foreach (var category in entry.Category)
+                {
+                    if (category.RowId != 0)
+                    {
+                        itemCategory = category.RowId;
+                        break;
+                    }
+                }
+
                 // 報酬やコストが複数あるエントリは、1 通貨 1 アイテムのモデルで表せない。
                 // 定義としては残すが、交換の実行は事前条件で拒否する。
                 var costEntries = 0;
@@ -237,7 +255,8 @@ public sealed class ExchangeResolver(
                         cost.CurrencyCost,
                         cost.CostType,
                         rewardEntries == 1,
-                        costEntries == 1));
+                        costEntries == 1,
+                        itemCategory));
                 }
             }
         }
@@ -571,6 +590,7 @@ public sealed class ExchangeResolver(
                         CostType = entry.CostType,
                         SingleReward = entry.SingleReward,
                         SingleCost = entry.SingleCost,
+                        ItemCategory = entry.ItemCategory,
                         ShopName = this.shopNames.GetValueOrDefault(shopId, string.Empty),
                     });
                     continue;
@@ -592,6 +612,7 @@ public sealed class ExchangeResolver(
                         CostType = entry.CostType,
                         SingleReward = entry.SingleReward,
                         SingleCost = entry.SingleCost,
+                        ItemCategory = entry.ItemCategory,
                         ShopName = this.shopNames.GetValueOrDefault(shopId, string.Empty),
                         Inclusion = this.inclusionPaths.GetValueOrDefault((shopId, npc.NpcId)),
                         NpcDataId = npc.NpcId,
@@ -720,7 +741,8 @@ public sealed class ExchangeResolver(
         uint CurrencyCost,
         byte CostType,
         bool SingleReward,
-        bool SingleCost);
+        bool SingleCost,
+        uint ItemCategory);
 
     private sealed record NpcHandlerRecord(uint NpcId, HandlerPath Path, string? MenuHint);
 }

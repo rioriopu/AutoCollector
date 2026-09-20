@@ -716,10 +716,17 @@ public sealed class MonitorService(
             // そのまま交換側の関門にもなっているため起きやすい。
             // 残す枠 100 の設定では、交換所へ着くたびに必ず落ちる。
             // 数えていたため 2 周でプリセットが自動的に無効化されていた。
+            //
+            // 品が画面に見つからない（ExchangeItemNotFound）も設定の誤りではない。
+            // 交換画面は区分ごとにしか品を出さず、区分の切り替えに失敗すると
+            // 「正しく設定した品が画面に無い」状態になる。
+            // 実際、キングダムテール・レンジャーイヤリング（アクセサリの区分）で
+            // 交換できないまま止まった。設定は正しいのにプリセットが消えるのは筋が悪い。
             if (this.executor.Failure is ExchangeFailure.Aborted
                 or ExchangeFailure.ExternalPluginError
                 or ExchangeFailure.NoBagSpace
-                or ExchangeFailure.ShopClosedUnexpectedly)
+                or ExchangeFailure.ShopClosedUnexpectedly
+                or ExchangeFailure.ExchangeItemNotFound)
             {
                 this.anomalyLog.Info(
                     "Monitor",
