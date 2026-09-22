@@ -264,6 +264,27 @@ public sealed class GoalRunner(
             return;
         }
 
+        // **止められているあいだは走り出さない。**
+        //
+        // この旗が立っていると、移動と交換だけが「停止中です」で弾かれる。
+        // 製作と取り出しはこの実行器を通らないので弾かれない。
+        // 見ずに走り出すと、作るだけ作って納品できず、鞄が埋まって詰む。
+        //
+        // 実機（2026-09-22）: 製作は進むのに納品されず、
+        // 最後は「空き枠が 5 で、残す設定が 5 のため作れません」で止まった。
+        // 本当の理由は、その前に出ていた「納品へ進めませんでした: 停止中です」だった。
+        //
+        // 止めたあとに走り出さないのは、「すべて止める」を押した意味でもある。
+        // 戻すのは利用者の操作（「再開する」「周回を開始する」「素材を確かめて開始する」
+        // またはプリセットを入れ直す）だけ。
+        if (this.executor.IsAborted)
+        {
+            this.StoppedDetail = "止めています。「再開する」または「素材を確かめて開始する」で戻せます";
+            return;
+        }
+
+        this.StoppedDetail = string.Empty;
+
         // 目標の計算は所持数をひととおり数える。毎フレーム行う必要はない。
         if (DateTime.UtcNow < this.nextScanUtc)
         {
@@ -334,6 +355,13 @@ public sealed class GoalRunner(
     /// </summary>
     public IReadOnlyList<PlanMaterial> BlockedShortages(Guid presetId)
         => this.blocked.TryGetValue(presetId, out var block) ? block.Shortages : [];
+
+    /// <summary>
+    /// 止められていて走り出せない理由。走れる状態なら空。
+    ///
+    /// プリセットごとの「止まっています」とは別。こちらは全体が止められている状態。
+    /// </summary>
+    public string StoppedDetail { get; private set; } = string.Empty;
 
     /// <summary>止まっているプリセットがあるか。状況タブの見出しで使う。</summary>
     public bool HasBlocked => this.blocked.Count > 0;
@@ -530,6 +558,8 @@ public sealed class GoalRunner(
 
         // 3. 納品できる収集品を持っている。納品して貯める。
         // 上限に達したときの交換も CollectableCycleRunner が面倒をみる。
+        var deliveryFailure = string.Empty;
+
         if (this.HasDeliverable(goal.CurrencyItemId))
         {
             if (this.cycle.Start(out var cycleReason))
@@ -542,6 +572,12 @@ public sealed class GoalRunner(
                 return true;
             }
 
+            // **納品へ行けなかった理由を握っておく。**
+            //
+            // ここを記録に残すだけにしていたため、このあと作れずに終わったとき
+            // 「空き枠が 5 で、残す設定が 5 のため作れません」だけが理由として出ていた。
+            // 本当は納品できていれば枠が空いて作れる。直すべき場所が読み取れなかった。
+            deliveryFailure = cycleReason;
             this.Note($"納品へ進めませんでした: {cycleReason}");
         }
 
@@ -574,7 +610,13 @@ public sealed class GoalRunner(
             return false;
         }
 
-        reason = craftReason;
+        // 納品へ行けなかったなら、それを先に出す。
+        // 作れない理由だけを出すと、鞄が埋まっているのが原因に見えて
+        // 「残す空き枠」をいじる方へ誘導してしまう。本当は納品できれば枠が空く。
+        reason = string.IsNullOrEmpty(deliveryFailure)
+            ? craftReason
+            : $"納品へ進めませんでした（{deliveryFailure}）。{craftReason}";
+
         return false;
     }
 
