@@ -893,6 +893,16 @@ public sealed unsafe class ExchangeExecutor(
         }
     }
 
+    /// <summary>
+    /// 止められたまま解除されていないか。
+    ///
+    /// この旗が立っているあいだ、移動と交換はすべて「停止中です」で弾かれる。
+    /// **製作とリテイナーからの取り出しは弾かれない**（この実行器を通らないため）。
+    /// 束ねる側がこの旗を見ずに走り出すと、作るだけ作って納品できず、
+    /// 鞄が埋まって身動きが取れなくなる。
+    /// </summary>
+    public bool IsAborted => this.aborted;
+
     public void ClearAbort()
     {
         this.aborted = false;

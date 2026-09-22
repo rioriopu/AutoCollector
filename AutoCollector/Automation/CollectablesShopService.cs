@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using AutoCollector.Diagnostics;
 using ECommons;
@@ -74,6 +74,14 @@ public sealed unsafe class CollectablesShopService(AnomalyLog anomalyLog)
 
     /// <summary>納品できる品の一覧（左のツリー）のノード。</summary>
     private const uint OfferListNodeId = 28;
+
+    /// <summary>
+    /// いま選ばれている品を何個持っているかが並ぶ一覧（右）のノード。
+    ///
+    /// 開いた直後は 0 行。品を選ぶと、持っているスタックの数だけ行が並ぶ。
+    /// **選択が効いたかどうかは、ここが埋まったかで判断する。**
+    /// </summary>
+    private const uint HeldListNodeId = 31;
 
     /// <summary>一覧の先頭が入っている位置。</summary>
     private const uint FirstEntry = 33;
@@ -319,14 +327,25 @@ public sealed unsafe class CollectablesShopService(AnomalyLog anomalyLog)
     }
 
     /// <summary>
-    /// 選んだ品が、いま画面で選ばれている品と一致しているか。
+    /// 選んだ品が画面に反映されたか。
     ///
-    /// 納品を撃つ前の最後の関門。ここが一致していなければ、撃つと別の品を渡す。
-    /// 一覧（node 28）の選択位置から行を引き、そこに入っている行番号と照らす。
+    /// 納品を撃つ前の最後の関門。ここが確かめられなければ撃たない。
     ///
-    /// 見出し行は納品の対象ではないので、選択位置が見出しなら不一致として扱う。
+    /// **見るのは右の一覧（node 31）。** ここには「いま選ばれている品を何個持っているか」が
+    /// 1 スタック 1 行で並ぶ。開いた直後は 0 行で、品を選ぶと持っている数だけ並ぶ。
+    /// 持っている数と行数が一致すれば、狙った品が選ばれたと言い切れる。
+    ///
+    /// **左の一覧（node 28）の SelectedItemIndex は見ない。**
+    /// <c>Fire(12, 行番号)</c> で選んでも、この値は動かない。
+    /// 実機（2026-09-22）: スタッフドピーマン（行 1）を選んで右の一覧は 0 → 86 行に
+    /// 変わったのに、SelectedItemIndex は 1（＝タコスの行）のままだった。
+    /// これを見ていたため「選べていない」と誤判定し、2 秒待って諦める往復を繰り返していた。
+    /// タコス（行 0）だけ納品できていたのは、たまたまこの値と一致していたからでしかない。
     /// </summary>
-    public bool TryConfirmSelection(CollectableOffer offer, out string detail)
+    /// <param name="offer">選んだ品。</param>
+    /// <param name="expectedStacks">その品を何スタック持っているか。0 なら数では照らさない。</param>
+    /// <param name="detail">確かめた内容。撃てないときの理由にも使う。</param>
+    public bool TryConfirmSelection(CollectableOffer offer, int expectedStacks, out string detail)
     {
         detail = string.Empty;
 
@@ -338,51 +357,33 @@ public sealed unsafe class CollectablesShopService(AnomalyLog anomalyLog)
                 return false;
             }
 
-            var component = addon->GetComponentByNodeId(OfferListNodeId);
-            if (component is null || component->GetComponentType() != ComponentType.TreeList)
+            var component = addon->GetComponentByNodeId(HeldListNodeId);
+            if (component is null || component->GetComponentType() != ComponentType.List)
             {
-                detail = $"一覧（node {OfferListNodeId}）を取れません";
+                detail = $"手持ちの一覧（node {HeldListNodeId}）を取れません";
                 return false;
             }
 
-            var tree = (AtkComponentTreeList*)component;
-            var selected = tree->SelectedItemIndex;
+            var list = (AtkComponentList*)component;
+            var rows = list->ListLength;
 
-            if (selected < 0 || selected >= tree->Items.LongCount)
+            if (rows <= 0)
             {
-                detail = $"一覧で何も選ばれていません（選択位置 {selected} / 行数 {tree->Items.LongCount}）";
+                detail = "手持ちの一覧がまだ空です";
                 return false;
             }
 
-            var item = tree->Items[selected].Value;
-            if (item is null)
+            // 持っている数と行数が食い違うなら、別の品が選ばれている。
+            // ここを通さずに撃つと、狙っていない品を渡すことになる。
+            if (expectedStacks > 0 && rows != expectedStacks)
             {
-                detail = $"選択位置 {selected} の行を取れません";
+                detail =
+                    $"手持ちの一覧が {rows} 行で、{offer.ItemName} の所持 {expectedStacks} と合いません。" +
+                    "別の品が選ばれている可能性があります";
                 return false;
             }
 
-            if ((item->Type & (TreeListItemType.Group | TreeListItemType.SectionHeader)) != 0)
-            {
-                detail = $"選択位置 {selected} は見出しです（{item->Type}）";
-                return false;
-            }
-
-            // 行番号は UIntValues[1] に入っている。AtkValues[33 + i*11] と同じ値で、
-            // 発火に渡すのもこれである（docs/10 の 3 回目の実測で確定）。
-            if (item->UIntValues.LongCount < 2)
-            {
-                detail = $"選択位置 {selected} に行番号が入っていません";
-                return false;
-            }
-
-            var rowIndex = (int)item->UIntValues[1];
-            if (rowIndex != offer.RowIndex)
-            {
-                detail = $"選ばれているのは行 {rowIndex} で、狙いの行 {offer.RowIndex}（{offer.ItemName}）ではありません";
-                return false;
-            }
-
-            detail = $"選択位置 {selected} = 行 {rowIndex}（{offer.ItemName}）";
+            detail = $"{offer.ItemName} が選ばれています（手持ちの一覧 {rows} 行）";
             return true;
         }
         catch (Exception ex)
