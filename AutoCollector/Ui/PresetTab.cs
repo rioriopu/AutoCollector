@@ -184,6 +184,20 @@ public sealed class PresetTab(Plugin plugin)
         // 出す場所が 2 か所あるため、ここで戻さないと同じ行が 2 つ並ぶ。
         this.copyNoticeDrawn = false;
 
+        // 止められているなら、何よりも先に出す。
+        // ここが見えていないと、製作だけ動いて納品されない理由が分からない。
+        var stopped = this.plugin.GoalRunner.StoppedDetail;
+
+        if (!string.IsNullOrEmpty(stopped))
+        {
+            ImGui.TextColored(ImGuiColors.DalamudRed, $"停止中: {stopped}");
+
+            if (ImGui.Button("再開する##resumeall"))
+            {
+                this.plugin.ResumeAfterStop();
+            }
+        }
+
         // 監視は常に動いている。有効なプリセットが閾値へ達したら自動で交換所へ向かう。
         ImGui.TextColored(ImGuiColors.DalamudGrey, "有効なプリセットが閾値に達したら、自動で交換所へ向かいます");
 
@@ -223,6 +237,10 @@ public sealed class PresetTab(Plugin plugin)
                 if (enabled)
                 {
                     preset.DisabledReason = null;
+
+                    // 入れ直したなら「走らせたい」という意思表示。止めた旗も下ろす。
+                    // 下ろさないと、製作だけ動いて納品と交換が弾かれ続ける。
+                    this.plugin.ResumeAfterStop();
                 }
 
                 EzConfig.Save();
@@ -1532,6 +1550,12 @@ public sealed class PresetTab(Plugin plugin)
     {
         this.craftStartPresetId = preset.Id;
         this.InvalidateCaches();
+
+        // **止めた旗を先に下ろす。**
+        //
+        // 下ろさないと、製作と取り出しだけが動いて、納品と交換は
+        // 「停止中です」で弾かれ続ける。作るだけ作って鞄が埋まる。
+        this.plugin.ResumeAfterStop();
 
         var plan = this.CachedPlan(preset);
 

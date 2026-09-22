@@ -54,7 +54,12 @@ public sealed partial class MainWindow
 
         ImGui.SameLine();
 
-        if (this.plugin.AutoDutyKeeper.Suspended)
+        // **止まっている旗は 2 本ある。どちらか 1 本でも立っていたら出す。**
+        //
+        // 周回の維持（Suspended）だけを見ていた。交換側の封鎖（IsAborted）が
+        // 残っていても「止めています」が出ず、再開ボタンも出ない。
+        // その状態では製作と取り出しだけが動き、納品と交換は弾かれ続ける。
+        if (this.plugin.AutoDutyKeeper.Suspended || executor.IsAborted)
         {
             ImGui.TextColored(ImGuiColors.DalamudYellow, "  止めています");
 
