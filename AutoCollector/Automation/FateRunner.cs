@@ -190,12 +190,19 @@ public sealed class FateRunner(
     /// <summary>周回を止める。戦闘とプリセットを必ず元に戻す。</summary>
     public void Stop(string reason)
     {
+        // **解除は状態を見ずに先に行う。**
+        //
+        // 止まっている状態でも、プリセットを有効にしたまま何らかの理由で
+        // 段階だけが進んでいることがありうる。そのまま戻ると BMR が
+        // 動き続けてしまい、利用者からは「止めたのに戦い続ける」に見える。
+        // ReleaseCombat は適用していなければ即座に戻るので、余分な害は無い。
+        this.ReleaseCombat();
+
         if (this.Step is FateStep.Idle or FateStep.Done)
         {
             return;
         }
 
-        this.ReleaseCombat();
         this.navigation.Stop();
 
         this.StoppedReason = reason;
@@ -673,6 +680,22 @@ public sealed class FateRunner(
         }
     }
 
+    // BMR のモジュール名。RotationModuleRegistry は「名前空間 + 型名」で引く
+    // （BossMod.SourceGen の RuntimeFullName）。
+    private const string ModuleFateUtils = "BossMod.Autorotation.MiscAI.FateUtils";
+    private const string ModuleAutoTarget = "BossMod.Autorotation.MiscAI.AutoTarget";
+
+    // トラック名と選択肢名は enum の名前そのもの
+    // （RotationModule.Define が expectedIndex.ToString() を InternalName にする）。
+    private const string TrackHandin = "Handin";
+    private const string TrackCollect = "Collect";
+    private const string TrackSync = "Sync";
+    private const string TrackChocobo = "Chocobo";
+    private const string TrackFate = "FATE";
+    private const string OptionEnabled = "Enabled";
+    private const string OptionDisabled = "Disabled";
+    private const string OptionNone = "None";
+
     /// <summary>戦闘プリセットを有効にする。</summary>
     private void ApplyCombat(Config cfg)
     {
@@ -681,14 +704,62 @@ public sealed class FateRunner(
             return;
         }
 
-        if (this.bossMod.TrySetActivePreset(cfg.FateCombatPreset, out var accepted) && accepted)
+        if (!this.bossMod.TrySetActivePreset(cfg.FateCombatPreset, out var accepted) || !accepted)
         {
-            this.presetApplied = true;
-            this.appliedPresetName = cfg.FateCombatPreset;
+            this.anomalyLog.Warn("Fate", $"BossMod Reborn のプリセット「{cfg.FateCombatPreset}」を有効にできませんでした");
             return;
         }
 
-        this.anomalyLog.Warn("Fate", $"BossMod Reborn のプリセット「{cfg.FateCombatPreset}」を有効にできませんでした");
+        this.presetApplied = true;
+        this.appliedPresetName = cfg.FateCombatPreset;
+        this.ApplyFateStrategies(cfg, cfg.FateCombatPreset);
+    }
+
+    /// <summary>
+    /// FATE 向けの一時方針を立てる。
+    ///
+    /// <b>納品は BMR の FATE helper に任せる。</b>
+    /// 自前で NPC へ歩いて話しかける処理は書かない。
+    /// BMR 側は 10 個溜まった時点で自動的に納品へ向かい、
+    /// 向かう間は新しい敵に絡まず、着いたら話しかける。
+    /// 戻ってきたら通常の戦闘に戻る。要望の挙動をそのまま満たす。
+    ///
+    /// 立てた方針はプリセット本体を書き換えない。
+    /// 解除は ReleaseCombat でまとめて行う。
+    /// </summary>
+    private void ApplyFateStrategies(Config cfg, string preset)
+    {
+        // 納品 FATE のアイテムを 10 個溜めたら自動で納品しに行く。
+        TrySet(ModuleFateUtils, TrackHandin, cfg.FateCollectEnabled ? OptionEnabled : OptionDisabled);
+
+        // 地面に落ちているアイテムは拾わない。
+        //
+        // この選択肢は「拾うかどうか」ではなく
+        // 「戦闘の代わりに拾いに行くか」を決めるもの。
+        // 討伐で進めたいので必ず Disabled にする。
+        TrySet(ModuleFateUtils, TrackCollect, OptionDisabled);
+
+        // レベルシンクはゲームに任せる。こちらからは触らない。
+        TrySet(ModuleFateUtils, TrackSync, OptionNone);
+
+        // バディの面倒は BuddyService が見る。二重に動かさない。
+        // BMR 側は在庫があるかしか見ず、切れたときに買いに行かない。
+        TrySet(ModuleFateUtils, TrackChocobo, OptionDisabled);
+
+        // FATE 内の敵を優先して狙う。
+        TrySet(ModuleAutoTarget, TrackFate, OptionEnabled);
+
+        void TrySet(string module, string track, string value)
+        {
+            if (this.bossMod.TryAddTransientStrategy(preset, module, track, value, out var ok) && ok)
+            {
+                return;
+            }
+
+            // 失敗しても周回は続ける。BMR の版によって
+            // トラック名が変わっている可能性があるため、記録だけ残す。
+            this.anomalyLog.Warn("Fate", $"BossMod Reborn の方針を設定できませんでした: {module}.{track} = {value}");
+        }
     }
 
     /// <summary>
