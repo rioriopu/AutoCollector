@@ -115,6 +115,8 @@ public sealed class Plugin : IDalamudPlugin
 
     internal FateScanner FateScanner { get; private set; } = null!;
 
+    internal FateZoneCatalog FateZoneCatalog { get; private set; } = null!;
+
     internal BuddyService BuddyService { get; private set; } = null!;
 
     internal FateRunner FateRunner { get; private set; } = null!;
@@ -515,6 +517,7 @@ public sealed class Plugin : IDalamudPlugin
         // 移動は専用の NavigationService を持たせる。交換の移動と取り合わないようにするため。
         this.BossMod = new BossModIpc(this.AnomalyLog);
         this.FateScanner = new FateScanner(this.AnomalyLog);
+        this.FateZoneCatalog = new FateZoneCatalog(this.AnomalyLog);
         this.BuddyService = new BuddyService(this.AnomalyLog);
         this.FateRunner = new FateRunner(
             this.AnomalyLog,

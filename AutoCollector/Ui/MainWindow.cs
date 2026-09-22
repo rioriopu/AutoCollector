@@ -35,6 +35,9 @@ public sealed partial class MainWindow(Plugin plugin)
     private List<(string Label, AtkValueProbe Probe)> cachedDiagnostics = [];
     private readonly PresetTab presetTab = new(plugin);
 
+    /// <summary>FATE 自動周回。交換とは独立した機能なので、タブも別にする。</summary>
+    private readonly FateTab fateTab = new(plugin);
+
     public void Draw()
     {
         using var tabs = ImRaii.TabBar("##autocollector_tabs");
@@ -45,6 +48,7 @@ public sealed partial class MainWindow(Plugin plugin)
 
         this.DrawStatusTab();
         this.presetTab.Draw(ref this.jumpToPresetTab);
+        this.fateTab.Draw();
 
         // 開発・調査用のタブはデバッグモードのときだけ出す。
         if (Plugin.C.DebugMode)
