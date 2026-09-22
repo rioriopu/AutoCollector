@@ -22,6 +22,12 @@ public enum BuddyStep
 
     /// <summary>3 回試しても呼び出せなかった。周回は続ける。</summary>
     Failed,
+
+    /// <summary>バディを持っていない。以後いっさい呼び出さない。</summary>
+    NotOwned,
+
+    /// <summary>厩舎に預けている。呼び出せないので見送る。</summary>
+    Stabled,
 }
 
 /// <summary>
@@ -96,17 +102,49 @@ public sealed unsafe class BuddyService(AnomalyLog anomalyLog)
         }
     }
 
-    /// <summary>厩舎に預けているか。預けている間は呼び出せない。</summary>
-    public static bool IsStabled
+    /// <summary>
+    /// バディ（チョコボ）を持っているか。
+    ///
+    /// <b>持っていない人がいる。</b>持っていない状態で呼び出そうとすると、
+    /// ギサールの野菜を使っても何も起きず、そのまま試行を繰り返して詰まる。
+    ///
+    /// 判定には CompanionInfo.Rank を使う。
+    /// 未所持なら 0、所持していれば 1 以上になる。
+    /// 呼び出していない状態でも Rank は残るので、
+    /// 「いま出ているか」ではなく「持っているか」を見られる。
+    /// </summary>
+    public static bool HasBuddy
     {
         get
         {
             try
             {
                 var ui = UIState.Instance();
-                // Companion が null で TimeLeft が 0 のままなら、預けているか未解放。
-                // どちらにせよ呼び出せないので同じ扱いにする。
-                return ui is not null && ui->Buddy.CompanionInfo.TimeLeft <= 0f && ui->Buddy.CompanionInfo.Companion is null;
+                return ui is not null && ui->Buddy.CompanionInfo.Rank > 0;
+            }
+            catch
+            {
+                // 読めないときは「持っていない」に倒す。
+                // 持っていないのに呼ぼうとして詰まるより、
+                // 持っているのに呼ばないほうが害が小さい。
+                return false;
+            }
+        }
+    }
+
+    /// <summary>
+    /// 厩舎に預けているか。預けている間は呼び出せない。
+    ///
+    /// 預けているかどうかは PlayerState のフラグで分かる。
+    /// </summary>
+    public static bool IsStabled
+    {
+        get
+        {
+            try
+            {
+                var ps = PlayerState.Instance();
+                return ps is not null && ps->IsPlayerStateFlagSet(PlayerStateFlag.IsBuddyInStable);
             }
             catch
             {
@@ -115,7 +153,13 @@ public sealed unsafe class BuddyService(AnomalyLog anomalyLog)
         }
     }
 
-    /// <summary>状態を初期に戻す。周回の開始・停止で呼ぶ。</summary>
+    /// <summary>
+    /// 状態を初期に戻す。周回の開始・停止で呼ぶ。
+    ///
+    /// 「持っていない」「預けている」は握り直す。
+    /// 預け直したり、周回の合間に迎えに行ったりすることがあるため、
+    /// 一度きりの判定にしてしまうと変化に追随できない。
+    /// </summary>
     public void Reset()
     {
         this.Step = BuddyStep.Idle;
@@ -142,6 +186,35 @@ public sealed unsafe class BuddyService(AnomalyLog anomalyLog)
             || Svc.Condition[Dalamud.Game.ClientState.Conditions.ConditionFlag.Unconscious]
             || Svc.Condition[Dalamud.Game.ClientState.Conditions.ConditionFlag.Mounted])
         {
+            return false;
+        }
+
+        // バディを持っていない人がいる。持っていないまま呼ぼうとすると、
+        // 野菜を使っても何も起きず、試行を繰り返して詰まる。
+        // 一度「持っていない」と分かったら、以後は黙って見送る。
+        if (this.Step == BuddyStep.NotOwned)
+        {
+            return false;
+        }
+
+        if (!HasBuddy)
+        {
+            this.Step = BuddyStep.NotOwned;
+            this.StatusDetail = "バディを持っていないため呼び出しません";
+            this.anomalyLog.Info("Buddy", "バディ（チョコボ）を持っていないため、呼び出しは行いません");
+            return false;
+        }
+
+        // 厩舎に預けている間は呼び出せない。預けたままでも周回は続ける。
+        if (IsStabled)
+        {
+            if (this.Step != BuddyStep.Stabled)
+            {
+                this.Step = BuddyStep.Stabled;
+                this.StatusDetail = "バディを厩舎に預けているため呼び出しません";
+                this.anomalyLog.Info("Buddy", "バディを厩舎に預けているため、呼び出しは行いません");
+            }
+
             return false;
         }
 
