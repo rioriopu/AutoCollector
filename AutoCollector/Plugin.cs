@@ -109,6 +109,16 @@ public sealed class Plugin : IDalamudPlugin
 
     internal AutoDutySetup AutoDutySetup { get; private set; } = null!;
 
+    // ---- FATE 自動周回（交換機能とは独立） ----
+
+    internal BossModIpc BossMod { get; private set; } = null!;
+
+    internal FateScanner FateScanner { get; private set; } = null!;
+
+    internal BuddyService BuddyService { get; private set; } = null!;
+
+    internal FateRunner FateRunner { get; private set; } = null!;
+
     /// <summary>
     /// エリアを移ってから呼び鈴を探し続ける時間。
     ///
@@ -501,6 +511,20 @@ public sealed class Plugin : IDalamudPlugin
             this.AutoRetainer,
             this.ExchangeExecutor);
 
+        // FATE 自動周回。交換とは独立して動く。
+        // 移動は専用の NavigationService を持たせる。交換の移動と取り合わないようにするため。
+        this.BossMod = new BossModIpc(this.AnomalyLog);
+        this.FateScanner = new FateScanner(this.AnomalyLog);
+        this.BuddyService = new BuddyService(this.AnomalyLog);
+        this.FateRunner = new FateRunner(
+            this.AnomalyLog,
+            this.FateScanner,
+            new NavigationService(this.AnomalyLog, this.Vnavmesh),
+            this.BossMod,
+            this.BuddyService,
+            this.Lifestream,
+            this.AetheryteService);
+
         Svc.Framework.Update += this.OnFrameworkUpdate;
 
         this.mainWindow = new MainWindow(this);
@@ -626,6 +650,13 @@ public sealed class Plugin : IDalamudPlugin
             // 走っていなければ即座に戻るため、ふだんの負荷は増えない。
             this.CollectableDelivery.Tick();
 
+            // **FATE 周回も間引かない。**
+            //
+            // 達成度 100% を見た瞬間に離れることが、この機能の要になっている。
+            // 100 ミリ秒ごとにしか見ないと、そのぶん離脱が遅れてその場に留まる。
+            // 走っていなければ即座に戻るので、ふだんの負荷は増えない。
+            this.FateRunner.Tick();
+
             var now = DateTime.UtcNow;
             if (now < this.nextTickUtc)
             {
@@ -718,6 +749,13 @@ public sealed class Plugin : IDalamudPlugin
         // 画面が開いているあいだ撃ち続けることになる。
         // 束ねている側を止めただけでは、納品そのものは止まらない。
         this.CollectableDelivery?.Stop(reason);
+
+        // **FATE 周回も止める。**
+        //
+        // 交換とは独立して動いているので、交換側を止めても止まらない。
+        // Stop の中で BossMod のプリセットと一時方針を必ず解除する。
+        // 解除し損ねると、周回を止めたのに戦闘 AI だけが動き続ける。
+        this.FateRunner?.Stop(reason);
 
         // 何よりも先に発火経路を封鎖する。inFlight はクリアしない（未解決として残す）。
         this.ExchangeExecutor?.Abort(reason);
