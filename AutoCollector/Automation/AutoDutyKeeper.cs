@@ -24,7 +24,9 @@ public sealed class AutoDutyKeeper(
     AnomalyLog anomalyLog,
     AutoDutyIpc autoDuty,
     AutoRetainerIpc autoRetainer,
-    ExchangeExecutor executor)
+    ExchangeExecutor executor,
+    AutoDutySetup setup,
+    MonitorService monitor)
 {
     /// <summary>
     /// 再開したのに、コンテンツへ入らないまますぐ止まった回数の上限。
@@ -52,6 +54,22 @@ public sealed class AutoDutyKeeper(
     private readonly AutoDutyIpc autoDuty = autoDuty;
     private readonly AutoRetainerIpc autoRetainer = autoRetainer;
     private readonly ExchangeExecutor executor = executor;
+
+    /// <summary>
+    /// AutoDuty 側の設定の点検。版が古くて読み書きできないかを見るために持つ。
+    ///
+    /// **Plugin.P 経由で取りに行かない。** 静的な入り口から掴むと、
+    /// 誰が誰に依存しているのかが呼び出し側から読めなくなる。
+    /// 稼ぎ方をモジュールへ分けるとき、この依存がそのまま引き継がれる。
+    /// </summary>
+    private readonly AutoDutySetup setup = setup;
+
+    /// <summary>
+    /// 閾値の監視。まだ渡せていない交換があるかを見るために持つ。
+    ///
+    /// 同じ理由で、こちらも引数で受け取る。
+    /// </summary>
+    private readonly MonitorService monitor = monitor;
 
     private bool sawRunning;
     private bool enteredDutySinceRestart = true;
@@ -159,7 +177,7 @@ public sealed class AutoDutyKeeper(
         {
             holdReason = "止めています";
         }
-        else if (Plugin.P.AutoDutySetup is { NeedsAutoDutyUpdate: true })
+        else if (this.setup is { NeedsAutoDutyUpdate: true })
         {
             // 古い版では設定を確かめられない。任せると交換に入れないまま回り続ける。
             holdReason = "AutoDuty を更新してください。古い版では周回を任せられません";
@@ -395,7 +413,7 @@ public sealed class AutoDutyKeeper(
         // 実際、2 周目の軍票交換と納品が終わったところで止まる形で再現した。
         // 待つ意味があるのは「AD がまだ後片づけをしている」あいだだけで、
         // 完全に止まったあとは、再開させることが交換への近道になる。
-        if (Plugin.P.MonitorService is { HasPendingExchange: true, Snapshot.AutomationRunning: true })
+        if (this.monitor is { HasPendingExchange: true, Snapshot.AutomationRunning: true })
         {
             if (this.pendingSinceUtc == DateTime.MinValue)
             {

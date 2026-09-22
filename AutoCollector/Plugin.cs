@@ -499,7 +499,9 @@ public sealed class Plugin : IDalamudPlugin
             this.AnomalyLog,
             this.AutoDuty,
             this.AutoRetainer,
-            this.ExchangeExecutor);
+            this.ExchangeExecutor,
+            this.AutoDutySetup,
+            this.MonitorService);
 
         Svc.Framework.Update += this.OnFrameworkUpdate;
 
