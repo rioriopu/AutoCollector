@@ -319,7 +319,7 @@ public sealed class Config
     public bool FateSwapZoneWhenEmpty { get; set; } = true;
 
     /// <summary>マップを移るまでに待つ時間（秒）。すぐ湧くことがあるため少し待つ。</summary>
-    public int FateZoneSwapWaitSeconds { get; set; } = 30;
+    public int FateZoneSwapWaitSeconds { get; set; } = 10;
 
     /// <summary>残り時間がこれ未満の FATE は狙わない（秒）。着く前に終わるため。</summary>
     public int FateMinTimeRemainingSec { get; set; } = 120;
@@ -356,8 +356,8 @@ public sealed class Config
     /// <summary>戦闘に使う BossMod Reborn のプリセット名。空なら切り替えない。</summary>
     public string FateCombatPreset { get; set; } = string.Empty;
 
-    /// <summary>バディ（チョコボ）を自動で呼び出すか。</summary>
-    public bool FateBuddyEnabled { get; set; }
+    /// <summary>バディ（チョコボ）を自動で呼び出すか。所持していなければ自動で見送る。</summary>
+    public bool FateBuddyEnabled { get; set; } = true;
 
     /// <summary>バディの残りがこれを切ったら呼び直す（秒）。</summary>
     public int FateBuddyMinSecondsRemaining { get; set; } = 300;
@@ -384,7 +384,7 @@ public sealed class Config
     public FateDeathAction FateDeathAction { get; set; } = FateDeathAction.Wait;
 
     /// <summary>レイズを待つ上限（秒）。</summary>
-    public int FateRaiseWaitSeconds { get; set; } = 30;
+    public int FateRaiseWaitSeconds { get; set; } = 15;
 
     /// <summary>
     /// FATE 周回中は交換を始めないか。

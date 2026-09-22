@@ -163,6 +163,15 @@ public sealed class FateRunner(
             return false;
         }
 
+        // 利用者がプリセット名を指定していなければ、こちらで用意する。
+        // どれを選べばよいか分からないのが普通なので、名前を知らなくても動くようにする。
+        if (string.IsNullOrWhiteSpace(cfg.FateCombatPreset)
+            && !FateCombatPreset.Ensure(this.bossMod, this.anomalyLog))
+        {
+            reason = $"BossMod Reborn にプリセット「{FateCombatPreset.Name}」を用意できませんでした";
+            return false;
+        }
+
         this.blacklist.Clear();
         this.stuckCounts.Clear();
         this.target = null;
@@ -696,23 +705,33 @@ public sealed class FateRunner(
     private const string OptionDisabled = "Disabled";
     private const string OptionNone = "None";
 
-    /// <summary>戦闘プリセットを有効にする。</summary>
+    /// <summary>
+    /// 戦闘プリセットを有効にする。
+    ///
+    /// 設定が空なら、こちらで用意したプリセット（<see cref="FateCombatPreset"/>）を使う。
+    /// 利用者が名前を知らなくても、FATE の敵だけを狙い、
+    /// 絡まれたら反撃する設定で動き出せる。
+    /// </summary>
     private void ApplyCombat(Config cfg)
     {
-        if (this.presetApplied || string.IsNullOrWhiteSpace(cfg.FateCombatPreset))
+        if (this.presetApplied)
         {
             return;
         }
 
-        if (!this.bossMod.TrySetActivePreset(cfg.FateCombatPreset, out var accepted) || !accepted)
+        var name = string.IsNullOrWhiteSpace(cfg.FateCombatPreset)
+            ? FateCombatPreset.Name
+            : cfg.FateCombatPreset;
+
+        if (!this.bossMod.TrySetActivePreset(name, out var accepted) || !accepted)
         {
-            this.anomalyLog.Warn("Fate", $"BossMod Reborn のプリセット「{cfg.FateCombatPreset}」を有効にできませんでした");
+            this.anomalyLog.Warn("Fate", $"BossMod Reborn のプリセット「{name}」を有効にできませんでした");
             return;
         }
 
         this.presetApplied = true;
-        this.appliedPresetName = cfg.FateCombatPreset;
-        this.ApplyFateStrategies(cfg, cfg.FateCombatPreset);
+        this.appliedPresetName = name;
+        this.ApplyFateStrategies(cfg, name);
     }
 
     /// <summary>

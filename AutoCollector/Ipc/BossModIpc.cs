@@ -54,6 +54,19 @@ public sealed class BossModIpc(AnomalyLog anomalyLog) : IpcGateBase("BossModRebo
     public bool TryGetPreset(string name, out string? serialized)
         => this.TryInvoke("Presets.Get", () => this.Func<string, string?>(Prefix + "Presets.Get").InvokeFunc(name), out serialized);
 
+    /// <summary>
+    /// プリセットを作る。
+    ///
+    /// 渡すのは JSON。形式は BMR の JsonPresetConverter に従う
+    /// （Modules のキーは型の FullName、Track と Option は enum の名前）。
+    /// overwrite が false なら、同じ名前があるときは作らずに false を返す。
+    /// </summary>
+    public bool TryCreatePreset(string serialized, bool overwrite, out bool created)
+        => this.TryInvoke(
+            "Presets.Create",
+            () => this.Func<string, bool, bool>(Prefix + "Presets.Create").InvokeFunc(serialized, overwrite),
+            out created);
+
     // ---- 一時方針（プリセットを書き換えずにモジュールの挙動を変える） ----
 
     /// <summary>

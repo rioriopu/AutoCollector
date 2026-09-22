@@ -308,9 +308,16 @@ public sealed class FateTab(Plugin plugin)
     {
         ImGui.Text("戦闘と離脱");
 
+        ImGui.TextColored(
+            ImGuiColors.DalamudGrey,
+            "空欄のままで構いません。周回を始めるときに、こちらで専用のプリセットを");
+        ImGui.TextColored(
+            ImGuiColors.DalamudGrey,
+            $"BossMod Reborn へ用意します（「{FateCombatPreset.Name}」）。");
+
         var preset = cfg.FateCombatPreset;
         ImGui.SetNextItemWidth(240);
-        if (ImGui.InputText("BossMod Reborn のプリセット名", ref preset, 128))
+        if (ImGui.InputText("使うプリセット名（空欄 = 自動）", ref preset, 128))
         {
             cfg.FateCombatPreset = preset;
             EzConfig.Save();
@@ -319,8 +326,14 @@ public sealed class FateTab(Plugin plugin)
         if (ImGui.IsItemHovered())
         {
             ImGui.SetTooltip(
-                "FATE の中で有効にするプリセットの名前です。\n"
-                + "空にすると切り替えません（すでに有効なものをそのまま使います）。");
+                "空欄なら、こちらで作ったプリセットを使います。設定はこうなっています:\n"
+                + "\n"
+                + "  ・FATE の中のモンスターは自分から攻撃しに行く\n"
+                + "  ・FATE 以外のモンスターには自分から絡まない\n"
+                + "  ・ただし攻撃を受けたら殴り返す\n"
+                + "\n"
+                + "すでに同じ名前のプリセットがあれば作り直しません。\n"
+                + "中身を変えたいときは BossMod Reborn 側で編集してください。");
         }
 
         var prefetch = cfg.FatePrefetchPct;
@@ -358,6 +371,25 @@ public sealed class FateTab(Plugin plugin)
         }
 
         ImGui.Indent();
+
+        // 持っていない人がいる。持っていなければ呼び出しは行わない。
+        if (!BuddyService.HasBuddy)
+        {
+            ImGui.TextColored(
+                ImGuiColors.DalamudYellow,
+                "バディを持っていないため、呼び出しは行いません（周回はそのまま続きます）");
+            ImGui.Unindent();
+            return;
+        }
+
+        if (BuddyService.IsStabled)
+        {
+            ImGui.TextColored(
+                ImGuiColors.DalamudYellow,
+                "バディを厩舎に預けているため、呼び出しは行いません");
+            ImGui.Unindent();
+            return;
+        }
 
         var left = (int)BuddyService.TimeLeftSeconds;
         var greens = BuddyService.GreensCount;
@@ -417,7 +449,7 @@ public sealed class FateTab(Plugin plugin)
         }
 
         var blocks = cfg.FateBlocksExchange;
-        if (ImGui.Checkbox("FATE 周回中は交換を始めない", ref blocks))
+        if (ImGui.Checkbox("FATE 周回中は、通貨の自動交換に行かない", ref blocks))
         {
             cfg.FateBlocksExchange = blocks;
             EzConfig.Save();
@@ -426,8 +458,12 @@ public sealed class FateTab(Plugin plugin)
         if (ImGui.IsItemHovered())
         {
             ImGui.SetTooltip(
-                "交換は周回を止めてテレポートするため、FATE の最中に割り込むと\n"
-                + "いま戦っている FATE を取りこぼします。\n"
+                "このプラグインのもう一つの機能（通貨が閾値に達したら交換所へ行く）との調整です。\n"
+                + "\n"
+                + "入れておくと、FATE 周回の最中は交換に行きません。\n"
+                + "外すと、周回中でも詩学などが閾値に達した時点で\n"
+                + "FATE を放り出して交換所へテレポートします。\n"
+                + "\n"
                 + "すでに始まっている交換が途中で止まることはありません。");
         }
     }
