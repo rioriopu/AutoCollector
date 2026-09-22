@@ -73,6 +73,79 @@ public sealed class ExchangeResolver(
 
     public IReadOnlyList<ExchangeDefinition> Results => this.results;
 
+    /// <summary>ShopId → そのショップが持つ品目の数。撃つ前の index の上限に使う。</summary>
+    private readonly Dictionary<uint, int> shopItemCounts = [];
+
+    /// <summary>
+    /// そのショップが持つ品目の数を返す。
+    ///
+    /// **画面に出ている件数を index の上限に使ってはいけない。**
+    /// 交換画面は区分（武具 / 防具 / アクセサリ / その他）ごとにしか品を出さないが、
+    /// 発火に渡す index は**ショップ全体での通し番号**で、画面の件数とは無関係である。
+    ///
+    /// 実データ（2026-09-23）: ジルコンの Shop 1770911 は全 37 件。
+    /// アクセサリへ切り替えると画面は 12 件になるが、その 12 件の index は 25〜36。
+    /// 画面の件数を上限にすると、12 件すべてが範囲外として弾かれる。
+    ///
+    /// 同じ画面を動かしている ICE の実働テーブルでも、防具タブは 20 件しか出ないのに
+    /// index は 14〜42 を使っている（fork-ICE/ICE/Utilities/Shop_Cosmocredits.cs）。
+    ///
+    /// 数はシートから実行時に引く。件数をコードへ埋め込まない。
+    /// 索引の構築状態に依存しないよう、ここで直接シートを読んで覚える。
+    /// </summary>
+    public bool TryGetShopItemCount(uint shopId, out int count)
+    {
+        count = 0;
+
+        if (shopId == 0)
+        {
+            return false;
+        }
+
+        if (this.shopItemCounts.TryGetValue(shopId, out count))
+        {
+            return true;
+        }
+
+        try
+        {
+            var shops = Svc.Data.GetExcelSheet<SpecialShop>();
+
+            if (shops is null || !shops.TryGetRow(shopId, out var shop))
+            {
+                return false;
+            }
+
+            var found = 0;
+
+            foreach (var entry in shop.Item)
+            {
+                foreach (var receive in entry.ReceiveItems)
+                {
+                    if (receive.Item.RowId != 0)
+                    {
+                        found++;
+                        break;
+                    }
+                }
+            }
+
+            if (found == 0)
+            {
+                return false;
+            }
+
+            this.shopItemCounts[shopId] = found;
+            count = found;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Warn("Resolver", $"Shop {shopId} の品目数を読めませんでした: {ex.Message}");
+            return false;
+        }
+    }
+
     /// <summary>指定通貨で購入できる交換定義の索引構築を開始する。</summary>
     public void BeginBuild(uint currencyItemId) => this.BeginBuild(currencyItemId, false);
 

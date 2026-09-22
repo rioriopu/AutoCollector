@@ -2894,11 +2894,39 @@ public sealed unsafe class ExchangeExecutor(
         var entry = match.Entry;
 
         // P-11 / P-13
-        if (entry.Index >= header.DeclaredEntryCount)
+        //
+        // **上限は画面の件数ではなく、ショップが持つ品目の数。**
+        //
+        // 交換画面は区分ごとにしか品を出さないが、発火に渡す index は
+        // ショップ全体での通し番号で、画面の件数とは無関係である。
+        //
+        // 実データ（2026-09-23）: ジルコンの Shop 1770911 は全 37 件。
+        // アクセサリへ切り替えると画面は 12 件になるが、その index は 25〜36。
+        // 画面の件数を上限にしていたため、区分を正しく切り替えても
+        // アクセサリ 12 件すべてが撃つ前に弾かれていた。
+        // 防具が通っていたのは、最初の区分だけ index が 0 から始まるという偶然による。
+        if (!this.resolver.TryGetShopItemCount(definition.ShopId, out var shopItemCount))
         {
-            this.Fail(ExchangeFailure.IndexOutOfRange, $"index {entry.Index} がエントリ数 {header.DeclaredEntryCount} の範囲外です");
+            this.Fail(
+                ExchangeFailure.IndexOutOfRange,
+                $"Shop {definition.ShopId} の品目数を取得できませんでした");
             return;
         }
+
+        if (entry.Index >= shopItemCount)
+        {
+            this.Fail(
+                ExchangeFailure.IndexOutOfRange,
+                $"index {entry.Index} が Shop {definition.ShopId} の品目数 {shopItemCount} の範囲外です");
+            return;
+        }
+
+        // 次に同じ壊れ方をしたとき、記録だけで切り分けられるようにする。
+        this.anomalyLog.Info(
+            "Shop",
+            $"撃つ直前: {Ui.StatusText.ItemName(definition.RewardItemId)} / index {entry.Index} / " +
+            $"画面の申告 {header.DeclaredEntryCount} / 読めた {entries.Count} / " +
+            $"ショップの品目数 {shopItemCount} / 区分 {ShopCategoryName(definition.ItemCategory)}");
 
         int callbackIndex;
         try
