@@ -354,6 +354,21 @@ public sealed class CollectableDeliveryRunner(
             return;
         }
 
+        // **選択が効いたことを確かめられたら、その場で撃つ。**
+        //
+        // 納品ボタン（node 51）は現れないことがある。実機（2026-09-22）では、
+        // 選択が効いて手持ちの一覧が 86 行に変わっても隠れたままだった。
+        // ボタンを待つのは時間の無駄でしかない。
+        var confirmed = this.shop.TryConfirmSelection(offer, this.ownedBefore, out var selectionDetail);
+        this.lastSelectionDetail = selectionDetail;
+
+        if (confirmed)
+        {
+            this.FireDelivery(offer, selectionDetail);
+            return;
+        }
+
+        // 確かめられないあいだは、ボタンが押せるならそちらを信じる。
         var button = this.shop.ReadTradeButton();
         this.lastButtonDetail = button.Detail;
 
@@ -365,21 +380,10 @@ public sealed class CollectableDeliveryRunner(
 
         var waited = DateTime.UtcNow - this.selectedAtUtc;
 
-        // ボタンが現れない。選択が狙いどおりなら、ボタンを待たずに納品する。
+        // 画面の様子を 1 度だけ残す。原因を追う材料にする。
         if (waited >= TradeReadyFallbackAfter)
         {
             this.DumpAfterSelect();
-
-            var confirmed = this.shop.TryConfirmSelection(offer, out var selectionDetail);
-            this.lastSelectionDetail = selectionDetail;
-
-            if (confirmed)
-            {
-                this.FireDelivery(
-                    offer,
-                    $"納品ボタンが現れません（{button.Detail}）が、選択は合っています（{selectionDetail}）");
-                return;
-            }
         }
 
         if (waited >= TradeReadyLimit)
