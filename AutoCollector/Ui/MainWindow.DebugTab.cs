@@ -630,9 +630,9 @@ public sealed partial class MainWindow
             attempt++;
 
             var button = service.ReadTradeButton();
-            var confirmed = service.TryConfirmSelection(offer, out var selectionDetail);
+            var confirmed = service.TryConfirmSelection(offer, ownedBefore, out var selectionDetail);
 
-            if (button.Ready || (attempt >= 10 && confirmed))
+            if (confirmed || button.Ready)
             {
                 if (!service.TryDeliver(out var deliverFailure))
                 {
