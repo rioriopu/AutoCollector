@@ -230,6 +230,20 @@ public sealed class MonitorService(
             return;
         }
 
+        // FATE 周回中は新しい交換を始めない。
+        //
+        // 交換は周回を止めてテレポートするため、FATE の最中に割り込むと
+        // いま戦っている FATE を取りこぼす。
+        //
+        // **すでに進行中の交換は止めない。**
+        // 上の判定を先に通しているので、ここへ来るのは「これから始める」場合だけ。
+        // 途中で止めると、通貨を払ったのに品を受け取っていない状態になりうる。
+        if (Plugin.C.FateBlocksExchange && Plugin.P?.FateRunner is { IsRunning: true })
+        {
+            this.LastDecision = "FATE 周回中のため、交換を待機しています";
+            return;
+        }
+
         if (this.executor.InFlight is not null)
         {
             this.LastDecision = "前回の交換の結果が未確認のため、監視を停止しています";
