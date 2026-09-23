@@ -453,6 +453,7 @@ public sealed class Plugin : IDalamudPlugin
             this.AetheryteService,
             this.Lifestream,
             this.Combat,
+            this.Earners,
             this.AutoRetainer,
             this.Crafter,
             this.InclusionShopService,
@@ -509,7 +510,8 @@ public sealed class Plugin : IDalamudPlugin
             this.MonitorService,
             this.ExchangeExecutor,
             this.CurrencyService,
-            this.CollectableRewardService);
+            this.CollectableRewardService,
+            this.Earners);
 
         this.AutoDutySetup = new AutoDutySetup(this.AutoDuty, this.AnomalyLog);
         this.AutoDutyKeeper = new AutoDutyKeeper(

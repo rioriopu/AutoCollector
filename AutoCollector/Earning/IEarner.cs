@@ -101,7 +101,10 @@ public interface IEarner
     string DescribeRunning();
 
     /// <summary>
-    /// 自力で通貨を増やせるか。
+    /// このプリセットで、自力で通貨を増やせるか。
+    ///
+    /// **プリセットごとに違う。**同じ稼ぎ手でも、
+    /// 「製作で稼ぐ」を入れていないプリセットでは通貨を増やさない。
     ///
     /// 交換の歯止めで「終わりを決めずに回してよいか」の判断にも使う。
     /// 製作で稼ぐプリセットは素材が尽きるまで回すのが正規の遊び方なので、
@@ -110,7 +113,7 @@ public interface IEarner
     /// **旗を 2 本に割らないこと。** 用途が 2 つあるからといって
     /// 別々の値を持つと、片方だけ直して食い違う。
     /// </summary>
-    bool SuppliesCurrency { get; }
+    bool SuppliesCurrencyFor(ExchangePreset preset);
 
     /// <summary>
     /// これから交換で中断する、という合図。

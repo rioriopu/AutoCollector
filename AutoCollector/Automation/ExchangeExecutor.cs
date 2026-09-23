@@ -281,6 +281,7 @@ public sealed unsafe class ExchangeExecutor(
     AetheryteService aetheryte,
     LifestreamIpc lifestream,
     CombatEarner combat,
+    EarnerRegistry earners,
     AutoRetainerIpc autoRetainer,
     CrafterEarner crafter,
     InclusionShopService inclusionShop,
@@ -407,6 +408,8 @@ public sealed unsafe class ExchangeExecutor(
     private readonly AetheryteService aetheryte = aetheryte;
     private readonly LifestreamIpc lifestream = lifestream;
     private readonly CombatEarner combat = combat;
+
+    private readonly EarnerRegistry earners = earners;
 
     /// <summary>復帰の段の後始末を済ませたか。毎フレーム閉じ直さないための旗。</summary>
     private bool resumeCleanupDone;
@@ -3578,8 +3581,9 @@ public sealed unsafe class ExchangeExecutor(
             targetQuantity: current.TargetQuantity,
 
             // 製作で稼ぐプリセットは「素材が尽きるまで」が正規の遊び方。
-            allowOpenEnded: Plugin.C.Presets
-                .FirstOrDefault(x => x.Id == current.PresetId)?.CraftToEarn ?? false);
+            // **稼ぎ手に聞く。**設定の名前をここに書き写さない。
+            allowOpenEnded: Plugin.C.Presets.FirstOrDefault(x => x.Id == current.PresetId) is { } preset
+                            && this.earners.AnySuppliesCurrencyFor(preset));
     }
 
     /// <summary>

@@ -893,7 +893,8 @@ public sealed class MonitorService(
 
             // 製作で稼ぐプリセットは「素材が尽きるまで」が正規の遊び方。
             // 終了条件が無いことを理由に弾かない。
-            allowOpenEnded: preset.CraftToEarn);
+            // **稼ぎ手に聞く。**設定の名前をここに書き写さない。
+            allowOpenEnded: this.earners.AnySuppliesCurrencyFor(preset));
 
         var allowance = ExchangeLimits.Evaluate(
             perTrade: (int)definition.RewardQuantity,
