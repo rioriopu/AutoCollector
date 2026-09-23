@@ -3,6 +3,9 @@ using System.Collections.Generic;
 using System.Linq;
 using AutoCollector.Automation;
 using AutoCollector.Diagnostics;
+using AutoCollector.Earning;
+using AutoCollector.Earning.Combat;
+using AutoCollector.Earning.Crafter;
 using AutoCollector.Ipc;
 using AutoCollector.Game;
 using AutoCollector.Ui;
@@ -101,7 +104,8 @@ public sealed class Plugin : IDalamudPlugin
 
     internal ArtisanIpc Artisan { get; private set; } = null!;
 
-    internal ExternalAutomationGate AutomationGate { get; private set; } = null!;
+    /// <summary>稼ぎ手の登録簿。戦闘・クラフター（将来はギャザラー）を束ねる。</summary>
+    internal EarnerRegistry Earners { get; private set; } = null!;
 
     internal MonitorService MonitorService { get; private set; } = null!;
 
@@ -423,7 +427,12 @@ public sealed class Plugin : IDalamudPlugin
         this.AutoDuty = new AutoDutyIpc(this.AnomalyLog);
         this.Artisan = new ArtisanIpc(this.AnomalyLog);
         this.AutoRetainer = new AutoRetainerIpc(this.AnomalyLog);
-        this.AutomationGate = new ExternalAutomationGate(this.AutoDuty, this.Artisan);
+        // **稼ぎ手の登録簿。** 誰が動いているか・誰を止めたかはここが持つ。
+        //
+        // 登録の順は画面に出る順。AutoDuty を先に出す（従来と同じ並び）。
+        this.Earners = new EarnerRegistry();
+        this.Earners.Register(new CombatEarner(this.AutoDuty, this.AnomalyLog));
+        this.Earners.Register(new CrafterEarner(this.Artisan));
         this.ExchangeExecutor = new ExchangeExecutor(
             this.AnomalyLog,
             this.ShopService,
@@ -448,7 +457,7 @@ public sealed class Plugin : IDalamudPlugin
             this.CurrencyCatalog,
             this.ExchangeResolver,
             this.ExchangeExecutor,
-            this.AutomationGate);
+            this.Earners);
         this.CollectableCycle = new CollectableCycleRunner(
             this.AnomalyLog,
             this.ExchangeExecutor,
