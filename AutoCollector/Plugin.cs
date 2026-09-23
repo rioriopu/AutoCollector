@@ -6,6 +6,7 @@ using AutoCollector.Diagnostics;
 using AutoCollector.Earning;
 using AutoCollector.Earning.Combat;
 using AutoCollector.Earning.Crafter;
+using AutoCollector.Earning.Gatherer;
 using EstellUtils.UI;
 using AutoCollector.Ipc;
 using AutoCollector.Game;
@@ -113,6 +114,12 @@ public sealed class Plugin : IDalamudPlugin
 
     /// <summary>クラフターで稼ぐ（Artisan）。Artisan を触るのはここだけ。</summary>
     internal CrafterEarner Crafter { get; private set; } = null!;
+
+    /// <summary>ギャザラーで稼ぐ。いまは振り分けにだけ使う。</summary>
+    internal GathererEarner Gatherer { get; private set; } = null!;
+
+    /// <summary>収集品の出どころ（製作か採集か）を数える。</summary>
+    internal CollectableSourceService CollectableSource { get; private set; } = null!;
 
     internal MonitorService MonitorService { get; private set; } = null!;
 
@@ -436,12 +443,17 @@ public sealed class Plugin : IDalamudPlugin
         this.AutoRetainer = new AutoRetainerIpc(this.AnomalyLog);
         // **稼ぎ手の登録簿。** 誰が動いているか・誰を止めたかはここが持つ。
         //
-        // 登録の順は画面に出る順。AutoDuty を先に出す（従来と同じ並び）。
+        // **登録の順が、画面に出る順。**
+        // 戦闘 → クラフター → ギャザラー → （振り分けられないものは最後に「その他」）
+        this.CollectableSource = new CollectableSourceService(this.AnomalyLog, this.CollectableRewardService);
+
         this.Earners = new EarnerRegistry();
         this.Combat = new CombatEarner(this.AutoDuty, this.AnomalyLog, this.TomestoneService);
-        this.Crafter = new CrafterEarner(this.Artisan, this.AnomalyLog, this.CraftPlanService);
+        this.Crafter = new CrafterEarner(this.Artisan, this.AnomalyLog, this.CollectableSource);
+        this.Gatherer = new GathererEarner(this.CollectableSource);
         this.Earners.Register(this.Combat);
         this.Earners.Register(this.Crafter);
+        this.Earners.Register(this.Gatherer);
         this.ExchangeExecutor = new ExchangeExecutor(
             this.AnomalyLog,
             this.ShopService,

@@ -13,11 +13,12 @@ namespace AutoCollector.Earning.Crafter;
 /// 稼ぎの手順（製作・納品・リテイナーからの取り出し）は
 /// <c>GoalRunner</c> に残っており、段 6 で移す。
 /// </summary>
-public sealed class CrafterEarner(ArtisanIpc artisan, AnomalyLog anomalyLog, CraftPlanService craftPlans) : IEarner
+public sealed class CrafterEarner(
+    ArtisanIpc artisan, AnomalyLog anomalyLog, CollectableSourceService source) : IEarner
 {
     private readonly ArtisanIpc artisan = artisan;
     private readonly AnomalyLog anomalyLog = anomalyLog;
-    private readonly CraftPlanService craftPlans = craftPlans;
+    private readonly CollectableSourceService source = source;
 
     /// <summary>同じ待ちを記録に書き続けないための間引き。</summary>
     private DateTime lastWaitLogUtc = DateTime.MinValue;
@@ -65,14 +66,9 @@ public sealed class CrafterEarner(ArtisanIpc artisan, AnomalyLog anomalyLog, Cra
     /// </summary>
     public bool CanEarn(uint currencyItemId)
     {
-        if (currencyItemId == 0)
-        {
-            return false;
-        }
-
         try
         {
-            return this.craftPlans.HasCraftableFor(currencyItemId);
+            return this.source.IsCraft(currencyItemId);
         }
         catch (Exception ex)
         {
