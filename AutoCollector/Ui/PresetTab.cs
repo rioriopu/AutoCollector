@@ -640,14 +640,31 @@ public sealed class PresetTab(Plugin plugin)
         }
 
         // --- 製作するジョブ（系統の右） ---
-        ImGui.SameLine();
-        this.DrawCraftJobCombo(preset, ref changed);
+        //
+        // **製作で稼げる通貨のときだけ出す。**
+        // トームストーンは収集品の納品では増えない。周回で貯めるもの。
+        // 出していると、戦闘のプリセットに製作の操作が並び、
+        // 「作る収集品が選ばれていません」という的外れな指示まで出る。
+        var craftable = this.plugin.Crafter.CanEarn(currencyItemId);
 
-        // ジョブを選んでいるあいだは、表を製作リストに差し替える。
-        if (preset.CraftJob >= 0)
+        if (craftable)
         {
-            this.DrawCraftPicker(preset, currencyItemId, ref changed);
-            return;
+            ImGui.SameLine();
+            this.DrawCraftJobCombo(preset, ref changed);
+
+            // ジョブを選んでいるあいだは、表を製作リストに差し替える。
+            if (preset.CraftJob >= 0)
+            {
+                this.DrawCraftPicker(preset, currencyItemId, ref changed);
+                return;
+            }
+        }
+        else if (preset.CraftJob >= 0 || preset.CraftCollectableItemId != 0 || preset.CraftToEarn)
+        {
+            // 通貨を選び直して製作で稼げなくなった場合、古い選択が残る。
+            // 残ったままだと、画面に出ていない設定が動きに効いてしまう。
+            ClearCraftChoice(preset);
+            changed = true;
         }
 
         // --- 種別 ---
@@ -1323,7 +1340,18 @@ public sealed class PresetTab(Plugin plugin)
 
         if (goal.MissingScrips > 0)
         {
-            if (goal.Collectable is null)
+            // **この通貨を製作で稼げないなら、製作の話をしない。**
+            //
+            // トームストーンは収集品の納品では増えない。周回で貯めるもの。
+            // それなのに「作る収集品を選んでください」と出していた。
+            // 製作と何の関係も無い設定に、製作の指示が出ることになる。
+            if (!this.plugin.Crafter.CanEarn(goal.CurrencyItemId))
+            {
+                ImGui.TextColored(
+                    ImGuiColors.DalamudGrey,
+                    $"  {goal.CurrencyName} は製作では増えません。周回で貯まるのを待ちます");
+            }
+            else if (goal.Collectable is null)
             {
                 ImGui.TextColored(
                     ImGuiColors.DalamudYellow,
@@ -1399,6 +1427,14 @@ public sealed class PresetTab(Plugin plugin)
         }
 
         ImGui.TextUnformatted($"いまの{goal.CurrencyName}: {goal.HeldScrips:N0}");
+
+        if (!this.plugin.Crafter.CanEarn(goal.CurrencyItemId))
+        {
+            ImGui.TextColored(
+                ImGuiColors.DalamudGrey,
+                $"  {goal.CurrencyName} は製作では増えません。周回で貯まるのを待ちます");
+            return;
+        }
 
         if (goal.Collectable is null)
         {

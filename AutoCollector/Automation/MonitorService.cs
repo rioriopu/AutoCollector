@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using AutoCollector.Diagnostics;
+using AutoCollector.Earning;
 using AutoCollector.Game;
 using AutoCollector.Ui;
 using ECommons.Configuration;
@@ -90,7 +91,7 @@ public sealed class MonitorService(
     CurrencyCatalog currencyCatalog,
     ExchangeResolver resolver,
     ExchangeExecutor executor,
-    ExternalAutomationGate automationGate)
+    EarnerRegistry earners)
 {
     /// <summary>同じプリセットで連続してこの回数失敗したら、そのプリセットを無効化する。</summary>
     private const int FailureLimit = 2;
@@ -111,7 +112,7 @@ public sealed class MonitorService(
     private readonly CurrencyCatalog currencyCatalog = currencyCatalog;
     private readonly ExchangeResolver resolver = resolver;
     private readonly ExchangeExecutor executor = executor;
-    private readonly ExternalAutomationGate automationGate = automationGate;
+    private readonly EarnerRegistry earners = earners;
 
     private DateTime nextCheckUtc = DateTime.MinValue;
     /// <summary>
@@ -264,10 +265,14 @@ public sealed class MonitorService(
             // 閾値に達しているのに動けない、という状態は伝える。
             // 「待機しています」だけだと、交換する物が無いのか、
             // 相手待ちなのかが読めない。
+            // **名前は登録簿から作る。**
+            // ここに書き並べると、稼ぎ手を足したときに文だけ古くなる。
+            var names = this.earners.DescribeAvailable();
+
             this.LastDecision = this.Snapshot.ReachedCount > 0
-                ? "交換したいものがありますが、AutoDuty や Artisan が動作していないため待機しています。"
+                ? $"交換したいものがありますが、{names}が動作していないため待機しています。"
                   + "「周回を開始する」で始められます"
-                : "AutoDuty や Artisan が動作していないため、自動交換は待機しています";
+                : $"{names}が動作していないため、自動交換は待機しています";
             return;
         }
 
@@ -550,7 +555,7 @@ public sealed class MonitorService(
 
         this.nextSnapshotUtc = now.AddSeconds(1);
 
-        var automationRunning = this.automationGate.IsAnyRunning(out var automationDetail);
+        var automationRunning = this.earners.IsAnyRunning(out var automationDetail);
         var safe = SafetyGuard.IsSafeToStart(out var safetyReason, out var safetyKind);
         uint? freeSlots = this.currencyService.TryGetEmptyBagSlots(out var slots) ? slots : null;
 
@@ -897,7 +902,8 @@ public sealed class MonitorService(
 
             // 製作で稼ぐプリセットは「素材が尽きるまで」が正規の遊び方。
             // 終了条件が無いことを理由に弾かない。
-            allowOpenEnded: preset.CraftToEarn);
+            // **稼ぎ手に聞く。**設定の名前をここに書き写さない。
+            allowOpenEnded: this.earners.AnySuppliesCurrencyFor(preset));
 
         var allowance = ExchangeLimits.Evaluate(
             perTrade: (int)definition.RewardQuantity,
