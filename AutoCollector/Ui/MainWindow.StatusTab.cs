@@ -419,9 +419,9 @@ public sealed partial class MainWindow
     {
         var phase = step switch
         {
-            ExchangeStep.WaitingSafeWindow or ExchangeStep.SuppressExternal or ExchangeStep.StopAutoDuty => 0,
+            ExchangeStep.WaitingSafeWindow or ExchangeStep.SuppressExternal or ExchangeStep.SuspendEarners => 0,
             ExchangeStep.Teleport or ExchangeStep.AethernetHop or ExchangeStep.Navigate => 1,
-            ExchangeStep.ResumeAutoDuty => 3,
+            ExchangeStep.ResumeEarners => 3,
             _ => 2,
         };
 

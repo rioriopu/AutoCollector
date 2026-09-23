@@ -3,6 +3,9 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
 using AutoCollector.Diagnostics;
+using AutoCollector.Earning;
+using AutoCollector.Earning.Combat;
+using AutoCollector.Earning.Crafter;
 using AutoCollector.Game;
 using AutoCollector.Ipc;
 using ECommons;
@@ -28,8 +31,8 @@ public enum ExchangeStep
     /// <summary>外部プラグインの新規開始を抑制している。</summary>
     SuppressExternal,
 
-    /// <summary>AutoDuty を停止している。</summary>
-    StopAutoDuty,
+    /// <summary>稼いでいる自動処理を中断している。</summary>
+    SuspendEarners,
 
     /// <summary>目的のエリアへテレポートしている。</summary>
     Teleport,
@@ -79,7 +82,7 @@ public enum ExchangeStep
     CloseDeliveryWindow,
 
     /// <summary>AutoDuty を再開している。</summary>
-    ResumeAutoDuty,
+    ResumeEarners,
 
     Done,
     Error,
@@ -298,9 +301,10 @@ public sealed unsafe class ExchangeExecutor(
     AddonOwnershipTracker ownership,
     AetheryteService aetheryte,
     LifestreamIpc lifestream,
-    AutoDutyIpc autoDuty,
+    CombatEarner combat,
+    EarnerRegistry earners,
     AutoRetainerIpc autoRetainer,
-    ArtisanIpc artisan,
+    CrafterEarner crafter,
     InclusionShopService inclusionShop,
     CollectablesShopService collectablesShop,
     CollectableDeliveryRunner collectableDelivery)
@@ -424,9 +428,14 @@ public sealed unsafe class ExchangeExecutor(
     private readonly AddonOwnershipTracker ownership = ownership;
     private readonly AetheryteService aetheryte = aetheryte;
     private readonly LifestreamIpc lifestream = lifestream;
-    private readonly AutoDutyIpc autoDuty = autoDuty;
+    private readonly CombatEarner combat = combat;
+
+    private readonly EarnerRegistry earners = earners;
+
+    /// <summary>復帰の段の後始末を済ませたか。毎フレーム閉じ直さないための旗。</summary>
+    private bool resumeCleanupDone;
     private readonly AutoRetainerIpc autoRetainer = autoRetainer;
-    private readonly ArtisanIpc artisan = artisan;
+    private readonly CrafterEarner crafter = crafter;
     private readonly InclusionShopService inclusionShop = inclusionShop;
     private readonly CollectablesShopService collectablesShop = collectablesShop;
     private readonly CollectableDeliveryRunner collectableDelivery = collectableDelivery;
@@ -509,25 +518,13 @@ public sealed unsafe class ExchangeExecutor(
     private Vector3 navigationDestination;
     private int reapproachAttempts;
     private int destinationUpdates;
-    private ReturnContext? returnContext;
     private ExchangeSession? session;
     private DateTime lastWaitLogUtc;
 
     /// <summary>待機中に観測した Duty のエリア。AutoDuty を再開するときに渡す。</summary>
-    private uint observedDutyTerritoryId;
-    private int stopAttempts;
 
     /// <summary>待機中の状態を次に記録する時刻。</summary>
     private DateTime nextContextLogUtc = DateTime.MinValue;
-
-    /// <summary>
-    /// 待っている間に AutoDuty が動いているのを観測したか。
-    ///
-    /// サイクルの終わりを待つ方式では、交換を始める時点で AutoDuty は既に停止している。
-    /// 「停止しているから元々動いていなかった」と誤認すると交換後に再開しなくなるため、
-    /// 待機中に見た状態を根拠にする。
-    /// </summary>
-    private bool sawAutoDutyRunning;
 
     /// <summary>移動から始める場合の対象。null なら手動でショップを開いた状態からの実行。</summary>
     private ExchangeDefinition? travelTarget;
@@ -590,12 +587,10 @@ public sealed unsafe class ExchangeExecutor(
         {
             var parts = new List<string>();
 
-            if (this.autoDuty.IsLoaded)
+            var combatState = this.combat.DescribeState();
+            if (combatState.Length > 0)
             {
-                var stopped = this.autoDuty.TryIsStopped(out var s) ? s.ToString() : "?";
-                var looping = this.autoDuty.TryIsLooping(out var l) ? l.ToString() : "?";
-                var navigating = this.autoDuty.TryIsNavigating(out var n) ? n.ToString() : "?";
-                parts.Add($"AD(停止={stopped} 周回={looping} 移動={navigating})");
+                parts.Add(combatState);
             }
 
             if (this.autoRetainer.IsLoaded)
@@ -604,9 +599,10 @@ public sealed unsafe class ExchangeExecutor(
                 parts.Add($"AR(処理中={this.autoRetainer.IsBusyFailClosed()} 抑制={suppressed} 本体抑制={this.autoRetainer.SuppressedByUs})");
             }
 
-            if (this.artisan.IsLoaded)
+            var crafterState = this.crafter.DescribeState();
+            if (crafterState.Length > 0)
             {
-                parts.Add($"Artisan(処理中={this.artisan.IsBusyFailClosed()} 本体停止={this.artisan.StoppedByUs})");
+                parts.Add(crafterState);
             }
 
             parts.Add($"エリア={Svc.ClientState.TerritoryType}");
@@ -674,7 +670,7 @@ public sealed unsafe class ExchangeExecutor(
     /// <summary>
     /// 直前に記録した再開先。UI から手動で再開するときに使う。
     /// </summary>
-    public uint LastResumeTerritoryId => this.returnContext?.AutoDutyTerritoryId ?? this.observedDutyTerritoryId;
+    public uint LastResumeTerritoryId => this.combat.ResumeTerritoryId;
 
     /// <summary>手動で AutoDuty を再開する。</summary>
     public bool TryResumeAutoDutyManually(out string reason)
@@ -683,35 +679,7 @@ public sealed unsafe class ExchangeExecutor(
         // 維持だけ戻すと、周回は回るのに交換が「停止中です」で弾かれ続ける。
         Plugin.P.ResumeAfterStop();
 
-        var territory = this.LastResumeTerritoryId;
-
-        if (territory == 0)
-        {
-            reason = "再開先のエリアが分かりません";
-            return false;
-        }
-
-        if (!this.autoDuty.IsLoaded)
-        {
-            reason = "AutoDuty が導入されていません";
-            return false;
-        }
-
-        if (!this.autoDuty.TryContentHasPath(territory, out var hasPath) || !hasPath)
-        {
-            reason = $"{NpcLocationService.GetTerritoryName(territory)} に AutoDuty の経路がありません";
-            return false;
-        }
-
-        if (!this.autoDuty.TryRun(territory))
-        {
-            reason = "AutoDuty へ再開を依頼できませんでした";
-            return false;
-        }
-
-        this.anomalyLog.Info("AutoDuty", $"{NpcLocationService.GetTerritoryName(territory)} で AutoDuty を再開しました");
-        reason = string.Empty;
-        return true;
+        return this.combat.TryResumeManually(out reason);
     }
 
     /// <summary>エラー状態を解除して、また実行できるようにする。</summary>
@@ -728,7 +696,7 @@ public sealed unsafe class ExchangeExecutor(
         this.aborted = false;
 
         this.autoRetainer.Release();
-        this.artisan.Release();
+        this.crafter.ResumeAfterStop();
     }
 
     /// <summary>結果未確定の記録を、ユーザーの確認を経てクリアする。</summary>
@@ -746,7 +714,7 @@ public sealed unsafe class ExchangeExecutor(
         // ここへ来る経路によっては抑制が残っている可能性がある。
         // 抑制したまま放置すると AutoRetainer が動かなくなるため、必ず解く。
         this.autoRetainer.Release();
-        this.artisan.Release();
+        this.crafter.ResumeAfterStop();
 
         if (this.Step == ExchangeStep.Error)
         {
@@ -849,14 +817,14 @@ public sealed unsafe class ExchangeExecutor(
         try
         {
             this.autoRetainer.Release();
-        this.artisan.Release();
+            this.crafter.ResumeAfterStop();
         }
         catch (Exception ex)
         {
             this.anomalyLog.Error("Cleanup", $"AutoRetainer の抑制を解除できませんでした: {ex.Message}");
         }
 
-        this.returnContext = null;
+        this.combat.ForgetInterrupt();
         this.ownership.Clear();
     }
 
@@ -1041,8 +1009,8 @@ public sealed unsafe class ExchangeExecutor(
         this.reapproachAttempts = 0;
         this.destinationUpdates = 0;
         this.nextArmedAllowedUtc = DateTime.MinValue;
-        this.stopAttempts = 0;
-        this.sawAutoDutyRunning = false;
+        this.combat.ResetObservation();
+        this.resumeCleanupDone = false;
         this.aethernetRoute = plannedRoute;
         this.deliveryStarted = false;
         this.aethernetTransferAttempts = 0;
@@ -1123,8 +1091,8 @@ public sealed unsafe class ExchangeExecutor(
                 this.TickSuppressExternal();
                 break;
 
-            case ExchangeStep.StopAutoDuty:
-                this.TickStopAutoDuty();
+            case ExchangeStep.SuspendEarners:
+                this.TickSuspendEarners();
                 break;
 
             case ExchangeStep.DeliverCollectables:
@@ -1135,8 +1103,8 @@ public sealed unsafe class ExchangeExecutor(
                 this.TickCloseDeliveryWindow();
                 return;
 
-            case ExchangeStep.ResumeAutoDuty:
-                this.TickResumeAutoDuty();
+            case ExchangeStep.ResumeEarners:
+                this.TickResumeEarners();
                 break;
 
             case ExchangeStep.Teleport:
@@ -1204,24 +1172,10 @@ public sealed unsafe class ExchangeExecutor(
             return;
         }
 
-        // Duty 中に待たされている間に、そのエリアを覚えておく。
-        // ここで記録しておかないと、あとで AutoDuty を再開するときに渡すエリアが分からない。
-        if (Player.IsInDuty)
-        {
-            var current = Svc.ClientState.TerritoryType;
-            if (current != 0 && current != this.observedDutyTerritoryId)
-            {
-                this.observedDutyTerritoryId = current;
-            }
-
-        }
-
-        // AutoDuty が動いているうちに記録しておく。
-        // 交換を始めるのは停止したあとなので、その時点では動いていた証拠が残らない。
-        if (this.autoDuty.IsLoaded && this.autoDuty.TryIsStopped(out var adStopped) && !adStopped)
-        {
-            this.sawAutoDutyRunning = true;
-        }
+        // 待たされている間に、稼ぎ手へ「いまの様子」を控えさせる。
+        // 交換を始めるのは止まったあとなので、その時点では
+        // 動いていた証拠も、どのエリアを回っていたかも残らない。
+        this.combat.Observe();
 
         if (!SafetyGuard.IsSafeToStart(out var reason))
         {
@@ -1272,21 +1226,15 @@ public sealed unsafe class ExchangeExecutor(
     /// </summary>
     private bool WaitForAutoDutyCycleEnd()
     {
-        if (!this.autoDuty.IsLoaded)
+        if (this.combat.WaitForCycleEnd(out var cycleDetail))
         {
             return true;
         }
 
-        if (!this.autoDuty.TryIsStopped(out var stopped))
+        if (cycleDetail.Length > 0)
         {
-            // 状態が読めないうちは割り込まない。
-            this.StatusDetail = "AutoDuty の状態を取得できません";
+            this.StatusDetail = cycleDetail;
             return false;
-        }
-
-        if (stopped)
-        {
-            return true;
         }
 
         this.StatusDetail = "AutoDuty の周回が終わるのを待っています";
@@ -1343,7 +1291,7 @@ public sealed unsafe class ExchangeExecutor(
 
         if (!this.autoRetainer.IsLoaded || !Plugin.C.SuppressAutoRetainer)
         {
-            this.Step = ExchangeStep.StopAutoDuty;
+            this.Step = ExchangeStep.SuspendEarners;
             this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(10);
             return;
         }
@@ -1382,11 +1330,11 @@ public sealed unsafe class ExchangeExecutor(
             return;
         }
 
-        this.Step = ExchangeStep.StopAutoDuty;
+        this.Step = ExchangeStep.SuspendEarners;
         this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(20);
         this.StatusDetail = "AutoDuty の状態を確認しています";
 
-        this.TickStopAutoDuty();
+        this.TickSuspendEarners();
     }
 
     /// <summary>
@@ -1397,64 +1345,13 @@ public sealed unsafe class ExchangeExecutor(
     /// </summary>
     private bool StopArtisanForExchange()
     {
-        if (!this.artisan.IsLoaded || !Plugin.C.StopArtisan)
+        var result = this.crafter.TickSuspend();
+
+        if (result.Progress == EarnerProgress.InProgress)
         {
-            return true;
-        }
-
-        if (!this.artisan.StoppedByUs)
-        {
-            // **動いていないなら止める必要が無い。**
-            //
-            // 製作していない人の交換まで、Artisan の都合で止めていた。
-            // 止めるのは操作を取り合わないためなので、相手が何もしていないなら用が無い。
-            if (!this.artisan.IsRunning())
+            if (result.Detail.Length > 0)
             {
-                return true;
-            }
-
-            if (!this.artisan.Stop())
-            {
-                // **止められなかったことを、交換の失敗にしない。**
-                //
-                // ここで Fail していたため、2 回続くとプリセットが自動で無効化された。
-                // 実際の報告では、製作と無関係な周回の交換がこれで丸ごと止まっていた。
-                //
-                // 相手が手を離すのを待つ。待ちには上限があり
-                // （SuppressWaitLimit）、超えれば中止として終わる。
-                // 中止は設定の誤りではないので、プリセットは無効化されない。
-                this.StatusDetail = "Artisan へ停止を依頼できません。手が空くのを待っています";
-
-                if (DateTime.UtcNow - this.lastWaitLogUtc > TimeSpan.FromSeconds(60))
-                {
-                    this.lastWaitLogUtc = DateTime.UtcNow;
-                    var detail = string.IsNullOrEmpty(this.artisan.LastError)
-                        ? string.Empty
-                        : $"（{this.artisan.LastError}）";
-
-                    this.anomalyLog.Warn(
-                        "Suppress",
-                        $"Artisan へ停止を依頼できませんでした{detail}。手が空くのを待っています");
-                }
-
-                return false;
-            }
-
-            this.anomalyLog.Info("Suppress", "交換の間、Artisan の製作を止めました");
-
-            // 止めた直後は製作画面から抜ける処理が残っている。次の呼び出しで確認する。
-            return false;
-        }
-
-        // 製作画面から抜け終わるまで待つ。抜ける前に移動すると操作が噛み合わない。
-        if (this.artisan.IsBusyFailClosed())
-        {
-            this.StatusDetail = "Artisan の製作が止まるのを待っています";
-
-            if (DateTime.UtcNow - this.lastWaitLogUtc > TimeSpan.FromSeconds(60))
-            {
-                this.lastWaitLogUtc = DateTime.UtcNow;
-                this.anomalyLog.Info("Wait", "Artisan の製作が止まるのを待っています");
+                this.StatusDetail = result.Detail;
             }
 
             return false;
@@ -1463,8 +1360,12 @@ public sealed unsafe class ExchangeExecutor(
         return true;
     }
 
-    /// <summary>AutoDuty を止める。止める前の状態を記録して、後で戻せるようにする。</summary>
-    private void TickStopAutoDuty()
+    /// <summary>
+    /// 稼いでいる自動処理を中断する。止める前の状態は稼ぎ手が覚えており、後で戻せる。
+    ///
+    /// **打ち切りはここで決める。**稼ぎ手は時間切れを判断しない。
+    /// </summary>
+    private void TickSuspendEarners()
     {
         var target = this.travelTarget;
         if (target is null)
@@ -1475,109 +1376,25 @@ public sealed unsafe class ExchangeExecutor(
 
         // まだ止めていないなら、安全条件を確認し直す。
         // 止めたあとは途中で戻ると中途半端になるため確認しない。
-        if (this.stopAttempts == 0 && this.ReturnToWaitIfUnsafe())
+        if (!this.combat.HasAttemptedStop && this.ReturnToWaitIfUnsafe())
         {
             return;
         }
 
-        if (!this.autoDuty.IsLoaded)
-        {
-            this.returnContext = null;
-            this.BeginTravel(target);
-            return;
-        }
+        var result = this.combat.TickSuspend();
 
-        // 初回だけ、停止前の状態を記録する。
-        if (this.returnContext is null)
-        {
-            // 待機中に動いているのを見ていたなら、いま停止していても再開の対象にする。
-            var wasRunning = this.autoDuty.IsRunningFailClosed() || this.sawAutoDutyRunning;
-            this.autoDuty.TryIsLooping(out var looping);
-
-            // **再開先は「経路があるところ」を選ぶ。現在地に落とさない。**
-            //
-            // 自分で見た Duty のエリアを優先するが、それは待機中に
-            // コンテンツの中にいたときしか記録されない。
-            // 交換はたいてい GC 納品のあと、街から始まるため空のままになる。
-            //
-            // そこで現在地へ落ちていた。街には AutoDuty の経路が無いので、
-            // 「ソリューション・ナイン に経路が無いため再開できません」と出て
-            // 毎回失敗していた（周回の維持が別途拾うので実害は無かったが、
-            // 記録にエラーが残り、原因を探す手間になる）。
-            //
-            // 周回していたエリアは AutoDutyKeeper が覚えている。そちらを次に見る。
-            uint resumeTerritory = 0;
-
-            foreach (var candidate in new[]
-                     {
-                         this.observedDutyTerritoryId,
-                         Plugin.C.LastDutyTerritoryId,
-                         Svc.ClientState.TerritoryType,
-                     })
-            {
-                if (candidate == 0)
-                {
-                    continue;
-                }
-
-                if (this.autoDuty.TryContentHasPath(candidate, out var usable) && usable)
-                {
-                    resumeTerritory = candidate;
-                    break;
-                }
-            }
-
-            // どれも使えないなら、覚えている値をそのまま持っておく。
-            // 再開の段で理由を出す。
-            if (resumeTerritory == 0)
-            {
-                resumeTerritory = this.observedDutyTerritoryId != 0
-                    ? this.observedDutyTerritoryId
-                    : Plugin.C.LastDutyTerritoryId;
-            }
-
-            this.returnContext = new ReturnContext
-            {
-                WasAutoDutyRunning = wasRunning,
-                AutoDutyTerritoryId = resumeTerritory,
-                WasLooping = looping,
-            };
-
-            if (wasRunning)
-            {
-                var hasPathForResume = this.autoDuty.TryContentHasPath(resumeTerritory, out var canResume) && canResume;
-                this.anomalyLog.Info(
-                    "AutoDuty",
-                    hasPathForResume
-                        ? $"再開先として {NpcLocationService.GetTerritoryName(resumeTerritory)} を記録しました"
-                        : $"再開先の候補 {NpcLocationService.GetTerritoryName(resumeTerritory)} に AutoDuty の経路がありません。交換後の再開はできない見込みです");
-            }
-
-            if (!wasRunning)
-            {
-                this.BeginTravel(target);
-                return;
-            }
-
-            this.anomalyLog.Info("AutoDuty", "AutoDuty を停止します");
-        }
-
-        if (this.autoDuty.TryIsStopped(out var stopped) && stopped)
+        // **止めていない相手のぶんまで待たない。**
+        // 導入されていない・もともと動いていない場合も「終わった」を返す。
+        if (result.Progress == EarnerProgress.Done)
         {
             this.BeginTravel(target);
             return;
         }
 
-        // 窓は短い。最初の 1 回は間を置かずに送る。
-        // ここで 1 秒待つと、その間に AutoDuty が次のコンテンツへ入ってしまい、
-        // 交換の機会を逃して次の周回まで持ち越しになる。
-        if (this.stopAttempts > 0 && !EzThrottler.Throttle("AutoCollector.StopAutoDuty", 1000))
+        if (result.Detail.Length > 0)
         {
-            return;
+            this.StatusDetail = result.Detail;
         }
-
-        this.stopAttempts++;
-        this.autoDuty.TryStop();
 
         if (DateTime.UtcNow > this.stepDeadlineUtc)
         {
@@ -1651,7 +1468,7 @@ public sealed unsafe class ExchangeExecutor(
             {
                 this.anomalyLog.Error("Collectables", "納品が終わりませんでした");
                 this.Failure = ExchangeFailure.Aborted;
-                this.Step = ExchangeStep.ResumeAutoDuty;
+                this.Step = ExchangeStep.ResumeEarners;
                 this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(20);
             }
 
@@ -1726,7 +1543,7 @@ public sealed unsafe class ExchangeExecutor(
                 this.anomalyLog.Info("Cleanup", $"納品画面を閉じました（{this.closeAttempts} 手目）");
             }
 
-            this.Step = ExchangeStep.ResumeAutoDuty;
+            this.Step = ExchangeStep.ResumeEarners;
             this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(20);
             return;
         }
@@ -1735,7 +1552,7 @@ public sealed unsafe class ExchangeExecutor(
         if (!this.ownership.TryGetOwned("CollectablesShop", out var addon))
         {
             this.anomalyLog.Info("Cleanup", "納品画面は自分が開いたものではないため閉じません");
-            this.Step = ExchangeStep.ResumeAutoDuty;
+            this.Step = ExchangeStep.ResumeEarners;
             this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(20);
             return;
         }
@@ -1749,7 +1566,7 @@ public sealed unsafe class ExchangeExecutor(
         if (DateTime.UtcNow > this.stepDeadlineUtc)
         {
             this.anomalyLog.Error("Cleanup", "納品画面を閉じられませんでした。手動で閉じてください");
-            this.Step = ExchangeStep.ResumeAutoDuty;
+            this.Step = ExchangeStep.ResumeEarners;
             this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(20);
             return;
         }
@@ -1775,23 +1592,11 @@ public sealed unsafe class ExchangeExecutor(
         }
     }
 
-    private void TickResumeAutoDuty()
+    private void TickResumeEarners()
     {
-        var context = this.returnContext;
-
-        if (context is null || !context.WasAutoDutyRunning || !this.autoDuty.IsLoaded)
-        {
-            this.FinishAfterExchange();
-            return;
-        }
-
-        if (this.autoDuty.TryIsNavigating(out var navigating) && navigating)
-        {
-            this.FinishAfterExchange();
-            return;
-        }
-
-        if (this.autoDuty.TryIsLooping(out var looping) && looping)
+        // 戻す必要がもう無いかを、手を出さずに先に見る。
+        // 自分で動き出している／もう周回に戻っている場合はここで終い。
+        if (this.combat.PeekResume().Progress == EarnerProgress.Done)
         {
             this.FinishAfterExchange();
             return;
@@ -1806,38 +1611,45 @@ public sealed unsafe class ExchangeExecutor(
             return;
         }
 
-        if (!EzThrottler.Throttle("AutoCollector.ResumeAutoDuty", 2000))
+        // **後始末は 1 回だけ。** 毎フレーム閉じ直さない。
+        if (!this.resumeCleanupDone)
         {
-            return;
+            this.resumeCleanupDone = true;
+
+            // 抑制を解く前に、自分が開いたショップを閉じる。
+            // 開いたまま解除すると、AutoRetainer が動き出したときに
+            // こちらのウィンドウが残っていて操作が噛み合わなくなる。
+            this.CloseOwned("ShopExchangeCurrency", useCloseFirst: true);
+            this.CloseOwned("InclusionShop", useCloseFirst: true);
+
+            // 稼ぎ手を動かす前に抑制を解く。
+            // AutoDuty はループ間処理で AutoRetainer を呼ぶため、抑制したまま再開すると
+            // リテイナー処理が動かないまま次の周回に入る。
+            this.autoRetainer.Release();
+            this.crafter.ResumeAfterStop();
         }
 
-        // 抑制を解く前に、自分が開いたショップを閉じる。
-        // 開いたまま解除すると、AutoRetainer が動き出したときに
-        // こちらのウィンドウが残っていて操作が噛み合わなくなる。
-        this.CloseOwned("ShopExchangeCurrency", useCloseFirst: true);
-        this.CloseOwned("InclusionShop", useCloseFirst: true);
+        var result = this.combat.TickResume();
 
-        // AutoDuty を動かす前に抑制を解く。
-        // AutoDuty はループ間処理で AutoRetainer を呼ぶため、抑制したまま再開すると
-        // リテイナー処理が動かないまま次の周回に入る。
-        this.autoRetainer.Release();
-        this.artisan.Release();
-
-        if (!this.autoDuty.TryContentHasPath(context.AutoDutyTerritoryId, out var hasPath) || !hasPath)
+        switch (result.Progress)
         {
-            // 周回の維持がこのあと拾うので、ここで止まっても周回は続く。
-            // 止まったと誤解させないよう、警告に留める。
-            this.anomalyLog.Warn(
-                "AutoDuty",
-                $"{NpcLocationService.GetTerritoryName(context.AutoDutyTerritoryId)} に AutoDuty の経路が無いため、ここからは再開できません。" +
-                "周回の維持が引き継ぎます（引き継がれない場合は状況タブの「AutoDuty を再開」から）");
-            this.Failure = ExchangeFailure.AutoDutyResumeFailed;
-            this.FinishAfterExchange();
-            return;
-        }
+            case EarnerProgress.Done:
+                this.FinishAfterExchange();
+                return;
 
-        this.anomalyLog.Info("AutoDuty", "AutoDuty を再開します（周回カウンタは 0 から数え直しになります）");
-        this.autoDuty.TryRun(context.AutoDutyTerritoryId);
+            case EarnerProgress.Failed:
+                this.Failure = ExchangeFailure.AutoDutyResumeFailed;
+                this.FinishAfterExchange();
+                return;
+
+            default:
+                if (result.Detail.Length > 0)
+                {
+                    this.StatusDetail = result.Detail;
+                }
+
+                return;
+        }
     }
 
     /// <summary>交換後の後始末。開いたショップを閉じ、抑制を解除して終了する。</summary>
@@ -1849,8 +1661,8 @@ public sealed unsafe class ExchangeExecutor(
         this.CloseOwned("InclusionShop", useCloseFirst: true);
 
         this.autoRetainer.Release();
-        this.artisan.Release();
-        this.returnContext = null;
+        this.crafter.ResumeAfterStop();
+        this.combat.ForgetInterrupt();
 
         // session を片付ける前に控える。片付けたあとは交換回数を出す手段が無くなる。
         this.LastSessionCompleted = this.session?.Completed ?? 0;
@@ -3037,7 +2849,7 @@ public sealed unsafe class ExchangeExecutor(
                 return;
             }
 
-            this.Step = ExchangeStep.ResumeAutoDuty;
+            this.Step = ExchangeStep.ResumeEarners;
             this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(20);
             this.StatusDetail = allowance.Reason;
             return;
@@ -3197,7 +3009,7 @@ public sealed unsafe class ExchangeExecutor(
                 return;
             }
 
-            this.Step = ExchangeStep.ResumeAutoDuty;
+            this.Step = ExchangeStep.ResumeEarners;
             this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(20);
             this.StatusDetail = batchBlock;
             return;
@@ -3522,7 +3334,7 @@ public sealed unsafe class ExchangeExecutor(
                     return;
                 }
 
-                this.Step = ExchangeStep.ResumeAutoDuty;
+                this.Step = ExchangeStep.ResumeEarners;
                 this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(20);
                 return;
             }
@@ -3645,7 +3457,7 @@ public sealed unsafe class ExchangeExecutor(
             this.anomalyLog.Info("Exchange", $"交換を終了します（{this.session?.Completed ?? 0} 回）: {stopReason}");
 
             // 止めていたものを元に戻す。
-            this.Step = ExchangeStep.ResumeAutoDuty;
+            this.Step = ExchangeStep.ResumeEarners;
             this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(20);
             return true;
         }
@@ -3849,8 +3661,9 @@ public sealed unsafe class ExchangeExecutor(
             targetQuantity: current.TargetQuantity,
 
             // 製作で稼ぐプリセットは「素材が尽きるまで」が正規の遊び方。
-            allowOpenEnded: Plugin.C.Presets
-                .FirstOrDefault(x => x.Id == current.PresetId)?.CraftToEarn ?? false);
+            // **稼ぎ手に聞く。**設定の名前をここに書き写さない。
+            allowOpenEnded: Plugin.C.Presets.FirstOrDefault(x => x.Id == current.PresetId) is { } preset
+                            && this.earners.AnySuppliesCurrencyFor(preset));
     }
 
     /// <summary>
@@ -4397,12 +4210,12 @@ public sealed unsafe class ExchangeExecutor(
         //
         // 2026-09-14 実測: 通貨不足で終わったあと、3 分放置しても復帰しなかった。
         //
-        // Cleanup は returnContext を消すので、AutoDuty の再開に使うぶんは取っておく。
-        var context = this.returnContext;
+        // Cleanup は中断の記憶を消すので、AutoDuty の再開に使うぶんは取っておく。
+        var interrupt = this.combat.Interrupt;
 
         this.Cleanup();
 
-        this.returnContext = context;
+        this.combat.Interrupt = interrupt;
         this.ReleaseHeldControl();
     }
 
@@ -4434,21 +4247,7 @@ public sealed unsafe class ExchangeExecutor(
     {
         // 自分が止めた AutoDuty は、交換に失敗しても元に戻す。
         // 止めっぱなしにすると周回が止まったまま棒立ちになる。
-        try
-        {
-            if (Plugin.C.ResumeAutoDutyOnFailure &&
-                this.returnContext is { WasAutoDutyRunning: true } context &&
-                this.autoDuty.IsLoaded &&
-                this.autoDuty.TryContentHasPath(context.AutoDutyTerritoryId, out var hasPath) && hasPath)
-            {
-                this.anomalyLog.Info("AutoDuty", "交換に失敗しましたが、停止前に動いていた AutoDuty を再開します");
-                this.autoDuty.TryRun(context.AutoDutyTerritoryId);
-            }
-        }
-        catch (Exception ex)
-        {
-            this.anomalyLog.Warn("Cleanup", $"AutoDuty を再開できませんでした: {ex.Message}");
-        }
+        this.combat.ResumeAfterFailure();
 
         try
         {
@@ -4462,7 +4261,7 @@ public sealed unsafe class ExchangeExecutor(
         try
         {
             this.autoRetainer.Release();
-        this.artisan.Release();
+            this.crafter.ResumeAfterStop();
         }
         catch (Exception ex)
         {
@@ -4471,6 +4270,6 @@ public sealed unsafe class ExchangeExecutor(
 
         this.session = null;
         this.travelTarget = null;
-        this.returnContext = null;
+        this.combat.ForgetInterrupt();
     }
 }

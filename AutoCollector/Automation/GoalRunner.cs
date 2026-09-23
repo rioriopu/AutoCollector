@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using AutoCollector.Diagnostics;
+using AutoCollector.Earning;
+using AutoCollector.Earning.Crafter;
 using AutoCollector.Game;
 using Dalamud.Game.ClientState.Conditions;
 using ECommons.DalamudServices;
@@ -83,8 +85,14 @@ public sealed class GoalRunner(
     MonitorService monitor,
     ExchangeExecutor executor,
     CurrencyService currency,
-    CollectableRewardService rewards)
+    CollectableRewardService rewards,
+    EarnerRegistry earners,
+    CrafterEarner crafter)
 {
+    private readonly EarnerRegistry earners = earners;
+
+    private readonly CrafterEarner crafter = crafter;
+
     /// <summary>
     /// 暴走への歯止め。これを超えたら理由に関わらず打ち切る。
     ///
@@ -304,7 +312,7 @@ public sealed class GoalRunner(
 
             // 欲しいアイテムが選ばれていなければ、目標が立たない。
             // 走らせると、何も買えない交換へ 2 回行って打ち切られるだけになる。
-            if (!preset.CraftToEarn || preset.Rewards.Count == 0)
+            if (!this.earners.AnySuppliesCurrencyFor(preset) || preset.Rewards.Count == 0)
             {
                 continue;
             }
@@ -624,6 +632,14 @@ public sealed class GoalRunner(
     private bool BeginCraft(ExchangePreset preset, ScripGoal goal, out string reason)
     {
         reason = string.Empty;
+
+        // **この通貨を製作で稼げないなら、製作へ進まない。**
+        // トームストーンは収集品の納品では増えない。周回で貯まるのを待つ。
+        if (!this.crafter.CanEarn(preset.CurrencyItemId))
+        {
+            reason = $"{goal.CurrencyName} は製作では増えません。周回で貯まるのを待ちます";
+            return false;
+        }
 
         if (preset.CraftCollectableItemId == 0)
         {

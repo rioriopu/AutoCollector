@@ -23,7 +23,7 @@ public static class StatusText
     {
         ExchangeStep.WaitingSafeWindow => "始められる状態を待っています",
         ExchangeStep.SuppressExternal => "他のプラグインの新規処理を止めています",
-        ExchangeStep.StopAutoDuty => "AutoDuty をいったん止めています",
+        ExchangeStep.SuspendEarners => "自動処理をいったん止めています",
         ExchangeStep.Teleport => "交換所のあるエリアへ移動しています",
         ExchangeStep.AethernetHop => "街の中を転送で移動しています",
         ExchangeStep.Navigate => "交換所まで歩いています",
@@ -32,7 +32,7 @@ public static class StatusText
         ExchangeStep.Armed => "交換の直前確認をしています",
         ExchangeStep.WaitOutcome => "交換の結果を確認しています",
         ExchangeStep.ConfirmDialog => "確認ダイアログに答えています",
-        ExchangeStep.ResumeAutoDuty => "AutoDuty を再開しています",
+        ExchangeStep.ResumeEarners => "自動処理を再開しています",
         ExchangeStep.Done => "終わりました",
         ExchangeStep.Error => "止まりました",
         _ => "待機中",
