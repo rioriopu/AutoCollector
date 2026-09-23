@@ -171,6 +171,27 @@ public sealed class PurchaseAttempt
     public bool Resolved { get; set; }
 
     public string Outcome { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 通貨のほかに払ったもの。武器の交換で要る強化素材など。
+    /// 通貨と同じく、撃つ直前の所持数を控えて「減ったこと」を確認する。
+    /// </summary>
+    public List<ExtraCostSnapshot> ExtraCosts { get; set; } = [];
+}
+
+/// <summary>
+/// 通貨以外に払うもの 1 種類ぶんの、撃つ直前の記録。
+/// <see cref="ExtraCostSnapshot.Quantity"/> はまとめ買いの回数を掛けたあとの値。
+/// </summary>
+public sealed class ExtraCostSnapshot
+{
+    public uint ItemId { get; set; }
+
+    public string Name { get; set; } = string.Empty;
+
+    public uint Quantity { get; set; }
+
+    public int Before { get; set; }
 }
 
 /// <summary>
@@ -2775,9 +2796,12 @@ public sealed unsafe class ExchangeExecutor(
         }
 
         // P-6
-        if (!definition.SingleReward || !definition.SingleCost)
+        if (!definition.CanExecute)
         {
-            this.Fail(ExchangeFailure.MultiCostOrMultiRewardEntry, "報酬またはコストが複数あるエントリです。交換結果を検証できないため実行しません");
+            var reason = !definition.SingleReward
+                ? "報酬が複数あるエントリです。交換結果を検証できないため実行しません"
+                : "払うものを特定できないエントリです。交換結果を検証できないため実行しません";
+            this.Fail(ExchangeFailure.MultiCostOrMultiRewardEntry, reason);
             return;
         }
 
@@ -2894,11 +2918,39 @@ public sealed unsafe class ExchangeExecutor(
         var entry = match.Entry;
 
         // P-11 / P-13
-        if (entry.Index >= header.DeclaredEntryCount)
+        //
+        // **上限は画面の件数ではなく、ショップが持つ品目の数。**
+        //
+        // 交換画面は区分ごとにしか品を出さないが、発火に渡す index は
+        // ショップ全体での通し番号で、画面の件数とは無関係である。
+        //
+        // 実データ（2026-09-23）: ジルコンの Shop 1770911 は全 37 件。
+        // アクセサリへ切り替えると画面は 12 件になるが、その index は 25〜36。
+        // 画面の件数を上限にしていたため、区分を正しく切り替えても
+        // アクセサリ 12 件すべてが撃つ前に弾かれていた。
+        // 防具が通っていたのは、最初の区分だけ index が 0 から始まるという偶然による。
+        if (!this.resolver.TryGetShopItemCount(definition.ShopId, out var shopItemCount))
         {
-            this.Fail(ExchangeFailure.IndexOutOfRange, $"index {entry.Index} がエントリ数 {header.DeclaredEntryCount} の範囲外です");
+            this.Fail(
+                ExchangeFailure.IndexOutOfRange,
+                $"Shop {definition.ShopId} の品目数を取得できませんでした");
             return;
         }
+
+        if (entry.Index >= shopItemCount)
+        {
+            this.Fail(
+                ExchangeFailure.IndexOutOfRange,
+                $"index {entry.Index} が Shop {definition.ShopId} の品目数 {shopItemCount} の範囲外です");
+            return;
+        }
+
+        // 次に同じ壊れ方をしたとき、記録だけで切り分けられるようにする。
+        this.anomalyLog.Info(
+            "Shop",
+            $"撃つ直前: {Ui.StatusText.ItemName(definition.RewardItemId)} / index {entry.Index} / " +
+            $"画面の申告 {header.DeclaredEntryCount} / 読めた {entries.Count} / " +
+            $"ショップの品目数 {shopItemCount} / 区分 {ShopCategoryName(definition.ItemCategory)}");
 
         int callbackIndex;
         try
@@ -3003,6 +3055,7 @@ public sealed unsafe class ExchangeExecutor(
             RewardQuantity = definition.RewardQuantity,
             RewardBefore = rewardBefore,
             CurrencyBefore = currencyBefore,
+            ExtraCosts = this.SnapshotExtraCosts(definition, 1),
             FiredAtUtc = DateTime.UtcNow,
         };
         EzConfig.Save();
@@ -3165,6 +3218,7 @@ public sealed unsafe class ExchangeExecutor(
             RewardQuantity = definition.RewardQuantity * (uint)amount,
             RewardBefore = rewardBefore,
             CurrencyBefore = currencyBefore,
+            ExtraCosts = this.SnapshotExtraCosts(definition, amount),
             Amount = amount,
             FiredAtUtc = DateTime.UtcNow,
         };
@@ -3477,7 +3531,8 @@ public sealed unsafe class ExchangeExecutor(
             {
                 this.FailUnresolved(
                     ExchangeFailure.ExchangeUnexpectedDelta,
-                    $"想定外の変化です。通貨 {attempt.CurrencyBefore} → {currencyNow} / {attempt.RewardName} {attempt.RewardBefore} → {rewardNow}");
+                    $"想定外の変化です。通貨 {attempt.CurrencyBefore} → {currencyNow} / " +
+                    $"{attempt.RewardName} {attempt.RewardBefore} → {rewardNow}{this.DescribeExtraCosts(attempt)}");
                 return;
             }
 
@@ -3501,10 +3556,35 @@ public sealed unsafe class ExchangeExecutor(
         var rewardOk = rewardAfter >= attempt.RewardBefore + (int)attempt.RewardQuantity;
         var currencyOk = currencyAfter <= attempt.CurrencyBefore - (int)attempt.CurrencyCost;
 
-        if (rewardOk && currencyOk)
+        // **通貨以外に払ったものも、減ったことを確認する。**
+        //
+        // 武器の交換は通貨と強化素材の両方を取る。通貨の減りだけを見ていると、
+        // 素材が足りず交換が成立しなかった場合に「通貨だけ減った」ような
+        // 中途半端な状態を成功と読んでしまう。払うと分かっているものは全部見る。
+        var extrasOk = true;
+        var extraDetail = string.Empty;
+        foreach (var extra in attempt.ExtraCosts)
+        {
+            if (!this.currencyService.TryGetCount(extra.ItemId, out var extraAfter, includeEquipped: true, includeArmory: true))
+            {
+                // 読めないものは「減った」と断定できない。成功にしない。
+                extrasOk = false;
+                extraDetail += $" / {extra.Name} 所持数を読めません";
+                continue;
+            }
+
+            if (extraAfter > extra.Before - (int)extra.Quantity)
+            {
+                extrasOk = false;
+            }
+
+            extraDetail += $" / {extra.Name} {extra.Before} → {extraAfter}";
+        }
+
+        if (rewardOk && currencyOk && extrasOk)
         {
             attempt.Resolved = true;
-            attempt.Outcome = $"成功: 通貨 {attempt.CurrencyBefore} → {currencyAfter} / {attempt.RewardName} {attempt.RewardBefore} → {rewardAfter}";
+            attempt.Outcome = $"成功: 通貨 {attempt.CurrencyBefore} → {currencyAfter} / {attempt.RewardName} {attempt.RewardBefore} → {rewardAfter}{extraDetail}";
             this.anomalyLog.Info("Exchange", attempt.Outcome);
 
             Plugin.C.InFlight = null;
@@ -3786,7 +3866,78 @@ public sealed unsafe class ExchangeExecutor(
             freeSlots: freeSlots,
             keepFree: keepFree,
             limits: this.BuildLimits(),
-            maxBatch: maxBatch);
+            maxBatch: maxBatch,
+            extraCosts: this.ReadExtraCosts(definition));
+
+    /// <summary>
+    /// 通貨以外に払ったものが、いまいくつになっているかを文字にする。
+    /// 結果が読めなかったときに、何が動いていないのかを残すために使う。
+    /// </summary>
+    private string DescribeExtraCosts(PurchaseAttempt attempt)
+    {
+        var text = string.Empty;
+        foreach (var extra in attempt.ExtraCosts)
+        {
+            text += this.currencyService.TryGetCount(extra.ItemId, out var now, includeEquipped: true, includeArmory: true)
+                ? $" / {extra.Name} {extra.Before} → {now}（必要 {extra.Quantity}）"
+                : $" / {extra.Name} 所持数を読めません";
+        }
+
+        return text;
+    }
+
+    /// <summary>
+    /// 撃つ直前の、通貨以外に払うものの所持数を控える。
+    ///
+    /// 通貨と同じ決まりで、まとめ買いの回数を掛けたあとの必要数を入れる。
+    /// 検証側はこの値と突き合わせる。
+    /// </summary>
+    private List<ExtraCostSnapshot> SnapshotExtraCosts(ExchangeDefinition definition, int amount)
+    {
+        var result = new List<ExtraCostSnapshot>(definition.ExtraCosts.Count);
+        foreach (var extra in definition.ExtraCosts)
+        {
+            var held = this.currencyService.TryGetCount(extra.ItemId, out var count, includeEquipped: true, includeArmory: true)
+                ? count
+                : 0;
+
+            result.Add(new ExtraCostSnapshot
+            {
+                ItemId = extra.ItemId,
+                Name = Ui.StatusText.ItemName(extra.ItemId),
+                Quantity = extra.Quantity * (uint)Math.Max(1, amount),
+                Before = held,
+            });
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// 通貨のほかに払うものを、いまの所持数つきで読む。
+    ///
+    /// 所持数を読めなかったものは「所持 0」として扱う。
+    /// 読めないまま通すと、持っていないのに撃ちにいくことになる。
+    /// </summary>
+    private IReadOnlyList<ExtraCostCheck>? ReadExtraCosts(ExchangeDefinition definition)
+    {
+        if (definition.ExtraCosts.Count == 0)
+        {
+            return null;
+        }
+
+        var result = new List<ExtraCostCheck>(definition.ExtraCosts.Count);
+        foreach (var extra in definition.ExtraCosts)
+        {
+            var held = this.currencyService.TryGetCount(extra.ItemId, out var count, includeEquipped: true, includeArmory: true)
+                ? count
+                : 0;
+
+            result.Add(new ExtraCostCheck(Ui.StatusText.ItemName(extra.ItemId), (int)extra.Quantity, held));
+        }
+
+        return result;
+    }
 
     /// <summary>
     /// 同じショップでもう一度交換してよいか。

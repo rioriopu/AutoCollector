@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using AutoCollector.Diagnostics;
@@ -297,8 +297,10 @@ public sealed class ScripGoalService(
             {
                 var definition = this.resolver.Resolve(currencyItemId, rewardItemId, 0);
 
-                // 報酬やコストが複数あるものは交換を実行できない。費用としても採らない。
-                if (definition is { SingleReward: true, SingleCost: true } && definition.CurrencyCost > 0)
+                // 交換を実行できない形のものは費用としても採らない。
+                // コストが複数あるだけなら実行できるので、ここでは除かない
+                // （素材が足りるかは交換の直前に見る）。
+                if (definition is { CanExecute: true } && definition.CurrencyCost > 0)
                 {
                     var found = (definition.CurrencyCost, Math.Max(1u, definition.RewardQuantity));
                     this.costCache[key] = found;
