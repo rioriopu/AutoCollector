@@ -107,6 +107,12 @@ public sealed class Plugin : IDalamudPlugin
     /// <summary>稼ぎ手の登録簿。戦闘・クラフター（将来はギャザラー）を束ねる。</summary>
     internal EarnerRegistry Earners { get; private set; } = null!;
 
+    /// <summary>戦闘で稼ぐ（AutoDuty）。AutoDuty を触るのはここだけ。</summary>
+    internal CombatEarner Combat { get; private set; } = null!;
+
+    /// <summary>クラフターで稼ぐ（Artisan）。Artisan を触るのはここだけ。</summary>
+    internal CrafterEarner Crafter { get; private set; } = null!;
+
     internal MonitorService MonitorService { get; private set; } = null!;
 
     internal AutoDutyKeeper AutoDutyKeeper { get; private set; } = null!;
@@ -431,8 +437,10 @@ public sealed class Plugin : IDalamudPlugin
         //
         // 登録の順は画面に出る順。AutoDuty を先に出す（従来と同じ並び）。
         this.Earners = new EarnerRegistry();
-        this.Earners.Register(new CombatEarner(this.AutoDuty, this.AnomalyLog));
-        this.Earners.Register(new CrafterEarner(this.Artisan));
+        this.Combat = new CombatEarner(this.AutoDuty, this.AnomalyLog);
+        this.Crafter = new CrafterEarner(this.Artisan, this.AnomalyLog);
+        this.Earners.Register(this.Combat);
+        this.Earners.Register(this.Crafter);
         this.ExchangeExecutor = new ExchangeExecutor(
             this.AnomalyLog,
             this.ShopService,
@@ -444,9 +452,9 @@ public sealed class Plugin : IDalamudPlugin
             this.AddonOwnership,
             this.AetheryteService,
             this.Lifestream,
-            this.AutoDuty,
+            this.Combat,
             this.AutoRetainer,
-            this.Artisan,
+            this.Crafter,
             this.InclusionShopService,
             this.CollectablesShopService,
             this.CollectableDelivery);
@@ -698,6 +706,15 @@ public sealed class Plugin : IDalamudPlugin
     internal void ResumeAfterStop()
     {
         this.AutoDutyKeeper?.Resume();
+
+        // **止めたぶんは必ず戻す。**
+        // 立てた旗を下ろし損なうと、周回は回るのに交換が弾かれ続ける（F-60）。
+        // 誰を止めたかは登録簿が持っているので、ここで条件を書かない。
+        foreach (var error in this.Earners?.ResumeAllAfterStop() ?? [])
+        {
+            this.AnomalyLog.Warn("Stop", $"戻せませんでした: {error}");
+        }
+
         this.ExchangeExecutor?.ClearAbort();
     }
 
@@ -746,18 +763,14 @@ public sealed class Plugin : IDalamudPlugin
         // 自走する力があるため、止めたつもりで回り続ける。
         //
         // 利用者が明示的に止めたときだけ通す。協調的な抑制で済む相手ではない。
-        try
+        //
+        // **順序を変えない。**ここは載荷条件になっている。
+        if (stopExternalAutomation)
         {
-            if (stopExternalAutomation &&
-                this.AutoDuty is { IsLoaded: true } && this.AutoDuty.IsRunningFailClosed())
+            foreach (var error in this.Earners.StopAllForEmergency())
             {
-                this.AutoDuty.TryStop();
-                this.AnomalyLog.Info("AutoDuty", "走っていた周回も止めました");
+                this.AnomalyLog.Warn("Stop", $"止められませんでした: {error}");
             }
-        }
-        catch (Exception ex)
-        {
-            this.AnomalyLog.Warn("Stop", $"AutoDuty を止められませんでした: {ex.Message}");
         }
 
         this.AnomalyLog.Warn("Stop", $"緊急停止しました: {reason}");

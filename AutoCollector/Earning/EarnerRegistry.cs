@@ -28,6 +28,21 @@ namespace AutoCollector.Earning;
 /// BeginResumeAll()           復帰を始める（1 回だけ）
 /// TickResumeAll()            Done を返すまで毎フレーム
 /// </code>
+///
+/// ## まとめて中断する口は、まだ交換から呼んでいない
+///
+/// **止める順序が載荷条件になっているため。**
+///
+/// <code>
+/// Artisan を止める → AutoRetainer を抑制する → AutoDuty を止める
+/// </code>
+///
+/// 真ん中の AutoRetainer は稼ぎ手ではない（協調的な抑制の相手）。
+/// まとめて中断すると AutoDuty が先に止まり、
+/// 抑制が立つ前にリテイナー処理が始まる隙間ができる。
+///
+/// いまは交換の側が稼ぎ手を 1 つずつ呼び、この順序を保っている。
+/// <see cref="StopAllForEmergency"/> と <see cref="ResumeAllAfterStop"/> は使っている。
 /// </summary>
 public sealed class EarnerRegistry
 {
