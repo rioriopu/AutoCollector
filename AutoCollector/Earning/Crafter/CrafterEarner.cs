@@ -1,5 +1,7 @@
 using System;
+using System.Linq;
 using AutoCollector.Diagnostics;
+using AutoCollector.Game;
 using AutoCollector.Ipc;
 
 namespace AutoCollector.Earning.Crafter;
@@ -11,10 +13,11 @@ namespace AutoCollector.Earning.Crafter;
 /// 稼ぎの手順（製作・納品・リテイナーからの取り出し）は
 /// <c>GoalRunner</c> に残っており、段 6 で移す。
 /// </summary>
-public sealed class CrafterEarner(ArtisanIpc artisan, AnomalyLog anomalyLog) : IEarner
+public sealed class CrafterEarner(ArtisanIpc artisan, AnomalyLog anomalyLog, CraftPlanService craftPlans) : IEarner
 {
     private readonly ArtisanIpc artisan = artisan;
     private readonly AnomalyLog anomalyLog = anomalyLog;
+    private readonly CraftPlanService craftPlans = craftPlans;
 
     /// <summary>同じ待ちを記録に書き続けないための間引き。</summary>
     private DateTime lastWaitLogUtc = DateTime.MinValue;
@@ -33,13 +36,50 @@ public sealed class CrafterEarner(ArtisanIpc artisan, AnomalyLog anomalyLog) : I
     public string DescribeRunning() => "Artisan";
 
     /// <summary>
-    /// 「製作で稼ぐ」が入っているプリセットは、自力でスクリップを増やせる。
+    /// 「製作で稼ぐ」が入っていて、**かつその通貨を製作で稼げる**プリセットは、
+    /// 自力でスクリップを増やせる。
     ///
     /// 素材の取り出し → 製作 → 納品 → 交換 を、目標に届くまで繰り返す。
     /// **素材が尽きるまで回すのが正規の遊び方**なので、
     /// 終了条件が無いことだけを理由に交換を弾いてはいけない。
+    ///
+    /// 設定が入っているだけでは足りない。
+    /// トームストーンのプリセットで印を入れても、製作では 1 つも増えない。
     /// </summary>
-    public bool SuppliesCurrencyFor(ExchangePreset preset) => preset.CraftToEarn;
+    public bool SuppliesCurrencyFor(ExchangePreset preset)
+        => preset.CraftToEarn && this.CanEarn(preset.CurrencyItemId);
+
+    /// <summary>
+    /// この通貨を製作で稼げるか。
+    ///
+    /// **ゲームデータで決まる。**この通貨を報酬にする収集品が 1 つでもあれば稼げる。
+    /// 通貨の名前や種別をコードへ埋め込まない。
+    ///
+    /// スクリップは収集品の納品で増える。
+    /// トームストーンは増えない（周回で貯めるもの）。
+    /// その区別がつかないため、**トームストーンのプリセットにまで
+    /// 「作る収集品が選ばれていません」と出していた。**
+    /// 製作とは何の関係も無い設定に、製作の指示が出ることになる。
+    /// </summary>
+    public bool CanEarn(uint currencyItemId)
+    {
+        if (currencyItemId == 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            return this.craftPlans.ListCraftable(currencyItemId).Count > 0;
+        }
+        catch (Exception ex)
+        {
+            // 索引を作れないうちは「稼げない」に倒す。
+            // 稼げると誤って出すと、選べない一覧を見せることになる。
+            this.anomalyLog.Warn("Crafter", $"ItemId {currencyItemId} を製作で稼げるか判断できませんでした: {ex.Message}");
+            return false;
+        }
+    }
 
     public void MarkInterrupting() => this.lastWaitLogUtc = DateTime.MinValue;
 
