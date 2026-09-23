@@ -286,51 +286,77 @@ public sealed class ExchangeResolver(
                     }
                 }
 
-                // 報酬やコストが複数あるエントリは、1 通貨 1 アイテムのモデルで表せない。
-                // 定義としては残すが、交換の実行は事前条件で拒否する。
-                var costEntries = 0;
-                foreach (var cost in entry.ItemCosts)
-                {
-                    if (cost.CurrencyCost != 0 && cost.ItemCost.RowId != 0)
-                    {
-                        costEntries++;
-                    }
-                }
+                // **コストは 1 種類とは限らない。**
+                //
+                // 武器の交換は「詩片 + 強化素材」のように 2 つ払う。
+                // 対象の通貨ぶんだけを見て残りを捨てると、
+                // 素材を持っていないのに交換所まで行って空振りする。
+                //
+                // ここで払うものを全部拾っておき、実行前の確認と、
+                // 交換後の「払ったぶんが減ったか」の検証に使う。
+                // 対象の通貨ぶんと、それ以外とに仕分ける。
+                //
+                // **1 エントリにつき記録は 1 件にする。**
+                // コスト行ごとに記録を作ると、同じ通貨が 2 行に分かれている
+                // エントリで同じ index の記録が 2 件でき、重複として弾かれる。
+                var currencyCost = 0u;
+                byte currencyCostType = 0;
+                var hasCurrency = false;
+                var extras = new List<ExchangeCost>();
+                var unresolved = false;
 
                 foreach (var cost in entry.ItemCosts)
                 {
-                    if (cost.CurrencyCost == 0)
+                    // 使っていないコスト枠。以前からここで数えていない。
+                    if (cost.CurrencyCost == 0 || cost.ItemCost.RowId == 0)
                     {
                         continue;
                     }
 
+                    // 実 ItemId へ解決できないものも「払うものがある」事実は残す。
+                    // 何を払うか確定できない以上、そのエントリは実行させない。
                     if (!this.TryResolveCostCurrency(cost.CostType, cost.ItemCost.RowId, out var costItemId))
                     {
+                        unresolved = true;
                         continue;
                     }
 
-                    if (costItemId != this.targetCurrencyItemId)
+                    if (costItemId == this.targetCurrencyItemId)
                     {
+                        // 同じ通貨が複数行に分かれていることがある。足し合わせる。
+                        currencyCost += cost.CurrencyCost;
+                        currencyCostType = cost.CostType;
+                        hasCurrency = true;
                         continue;
                     }
 
-                    if (!this.shopEntries.TryGetValue(shop.RowId, out var list))
-                    {
-                        this.shopEntries[shop.RowId] = list = [];
-                        this.shopNames[shop.RowId] = shop.Name.ExtractText();
-                    }
-
-                    list.Add(new ShopEntryRecord(
-                        entryIndex,
-                        rewardItemId,
-                        rewardCount == 0 ? 1u : rewardCount,
-                        rewardHq,
-                        cost.CurrencyCost,
-                        cost.CostType,
-                        rewardEntries == 1,
-                        costEntries == 1,
-                        itemCategory));
+                    extras.Add(new ExchangeCost(costItemId, cost.CurrencyCost));
                 }
+
+                // この通貨では買えないエントリ。
+                if (!hasCurrency)
+                {
+                    continue;
+                }
+
+                if (!this.shopEntries.TryGetValue(shop.RowId, out var list))
+                {
+                    this.shopEntries[shop.RowId] = list = [];
+                    this.shopNames[shop.RowId] = shop.Name.ExtractText();
+                }
+
+                list.Add(new ShopEntryRecord(
+                    entryIndex,
+                    rewardItemId,
+                    rewardCount == 0 ? 1u : rewardCount,
+                    rewardHq,
+                    currencyCost,
+                    currencyCostType,
+                    rewardEntries == 1,
+                    extras.Count == 0 && !unresolved,
+                    itemCategory,
+                    extras,
+                    unresolved));
             }
         }
 
@@ -663,6 +689,8 @@ public sealed class ExchangeResolver(
                         CostType = entry.CostType,
                         SingleReward = entry.SingleReward,
                         SingleCost = entry.SingleCost,
+                        ExtraCosts = entry.ExtraCosts,
+                        HasUnresolvedCost = entry.HasUnresolvedCost,
                         ItemCategory = entry.ItemCategory,
                         ShopName = this.shopNames.GetValueOrDefault(shopId, string.Empty),
                     });
@@ -685,6 +713,8 @@ public sealed class ExchangeResolver(
                         CostType = entry.CostType,
                         SingleReward = entry.SingleReward,
                         SingleCost = entry.SingleCost,
+                        ExtraCosts = entry.ExtraCosts,
+                        HasUnresolvedCost = entry.HasUnresolvedCost,
                         ItemCategory = entry.ItemCategory,
                         ShopName = this.shopNames.GetValueOrDefault(shopId, string.Empty),
                         Inclusion = this.inclusionPaths.GetValueOrDefault((shopId, npc.NpcId)),
@@ -815,7 +845,9 @@ public sealed class ExchangeResolver(
         byte CostType,
         bool SingleReward,
         bool SingleCost,
-        uint ItemCategory);
+        uint ItemCategory,
+        IReadOnlyList<ExchangeCost> ExtraCosts,
+        bool HasUnresolvedCost);
 
     private sealed record NpcHandlerRecord(uint NpcId, HandlerPath Path, string? MenuHint);
 }

@@ -880,12 +880,19 @@ public sealed class PresetTab(Plugin plugin)
     /// <summary>
     /// 実際に交換できるエントリか。
     ///
-    /// 報酬やコストが複数あるものは「通貨が減った AND アイテムが増えた」で
-    /// 検証しきれないため、<c>ExchangeExecutor</c> が実行を拒む。
-    /// 選ばせてはいけない。
+    /// 報酬が複数あるものは「アイテムが増えた」で検証しきれないため、
+    /// <c>ExchangeExecutor</c> が実行を拒む。選ばせてはいけない。
+    ///
+    /// コストは複数でも、払うものがすべて実アイテムとして確定していれば交換できる。
+    /// 武器の交換は通貨と強化素材の 2 つを取るが、
+    /// 払ったぶんが減ったことまで確認できるので実行してよい。
+    ///
+    /// **判断は <c>ExchangeDefinition.CanExecute</c> に集めてある。ここで書き直さない。**
+    /// 以前ここと実行側で別々に条件を持っていたため、
+    /// 片方だけ直すと「撃てるのに選べない」状態ができた。
     /// </summary>
     private static bool IsExecutable(ExchangeDefinition definition)
-        => definition.SingleReward && definition.SingleCost;
+        => definition.CanExecute;
 
     /// <summary>
     /// 「アイテム交換」窓口に載らない通貨の品を選ぶ。
@@ -1020,7 +1027,7 @@ public sealed class PresetTab(Plugin plugin)
                 var area = NpcLocationService.GetTerritoryName(cheapest.TerritoryId);
                 ImGui.TextColored(
                     ImGuiColors.DalamudGrey,
-                    $"  {cheapest.CurrencyCost:N0}  （{cheapest.NpcName} / {area}）");
+                    $"  {cheapest.CurrencyCost:N0}{DescribeExtraCosts(cheapest)}  （{cheapest.NpcName} / {area}）");
             }
         }
 
@@ -1108,6 +1115,65 @@ public sealed class PresetTab(Plugin plugin)
         {
             preset.PreferredNpcDataId = index == 0 ? 0 : npcs[index - 1].NpcDataId;
             changed = true;
+        }
+
+        this.DrawExtraCostStock(usable);
+    }
+
+    /// <summary>
+    /// 通貨のほかに払うものを、値段の隣に短く添える。「 ＋ 強化繊維 ×4」のような形。
+    /// </summary>
+    private static string DescribeExtraCosts(ExchangeDefinition definition)
+    {
+        if (definition.ExtraCosts.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        var parts = definition.ExtraCosts
+            .Select(x => x.Quantity > 1
+                ? $"{StatusText.ItemName(x.ItemId)} ×{x.Quantity}"
+                : StatusText.ItemName(x.ItemId));
+
+        return "  ＋ " + string.Join(" / ", parts);
+    }
+
+    /// <summary>
+    /// 通貨のほかに払うものについて、必要数と所持数を出す。
+    ///
+    /// 武器の交換は通貨だけでは成立しない。足りないまま開始すると
+    /// 交換所まで行って断られる。出発前に画面で分かるようにしておく。
+    /// </summary>
+    private void DrawExtraCostStock(List<ExchangeDefinition> usable)
+    {
+        // どの窓口を選んでも要るものは同じなので、1 件ぶん見れば足りる。
+        var definition = usable.FirstOrDefault(x => x.ExtraCosts.Count > 0);
+        if (definition is null)
+        {
+            return;
+        }
+
+        ImGui.TextColored(ImGuiColors.DalamudGrey, "  この交換は通貨のほかに次も払います");
+
+        foreach (var extra in definition.ExtraCosts)
+        {
+            var name = StatusText.ItemName(extra.ItemId);
+            var held = this.plugin.CurrencyService.TryGetCount(extra.ItemId, out var count, includeEquipped: true, includeArmory: true)
+                ? count
+                : 0;
+
+            var enough = held >= extra.Quantity;
+            ImGui.TextColored(
+                enough ? ImGuiColors.HealerGreen : ImGuiColors.DalamudYellow,
+                $"    {name} ×{extra.Quantity}（所持 {held}）");
+
+            // 名前を押したらコピーできる。ほかの不足表示と揃える。
+            if (ImGui.IsItemClicked())
+            {
+                ImGui.SetClipboardText(name);
+                this.copiedName = name;
+                this.copiedAtUtc = DateTime.UtcNow;
+            }
         }
     }
 

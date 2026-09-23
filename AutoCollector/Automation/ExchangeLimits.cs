@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace AutoCollector.Automation;
 
@@ -136,6 +137,14 @@ public readonly record struct ExchangeAllowance(int Trades, string Reason, bool 
 /// ここが返すのは交換の回数。1 回の交換で受け取る個数は品によって違う。
 /// 端数は切り捨てる。1 回撃つと超えてしまうなら撃たない。
 /// </summary>
+/// <summary>
+/// 通貨のほかに払うもの 1 種類ぶんの、判断に要る値。
+/// </summary>
+/// <param name="Name">画面に出す名前。</param>
+/// <param name="Quantity">1 回の交換で払う個数。</param>
+/// <param name="Held">いまの所持数。</param>
+public sealed record ExtraCostCheck(string Name, int Quantity, int Held);
+
 public static class ExchangeLimits
 {
     /// <summary>
@@ -149,6 +158,7 @@ public static class ExchangeLimits
     /// <param name="keepFree">残しておく所持枠。</param>
     /// <param name="limits">利用者が決めた歯止め。</param>
     /// <param name="maxBatch">1 回の発火で撃てる上限。窓口が数量を選べないなら 1。</param>
+    /// <param name="extraCosts">通貨のほかに払うもの（名前・1 回あたりの必要数・いまの所持数）。無ければ null。</param>
     public static ExchangeAllowance Evaluate(
         int perTrade,
         int currencyCost,
@@ -157,7 +167,8 @@ public static class ExchangeLimits
         int freeSlots,
         int keepFree,
         ExchangeLimitSet limits,
-        int maxBatch)
+        int maxBatch,
+        IReadOnlyList<ExtraCostCheck>? extraCosts = null)
     {
         perTrade = Math.Max(1, perTrade);
         maxBatch = Math.Max(1, maxBatch);
@@ -193,6 +204,22 @@ public static class ExchangeLimits
         if (currencyCost > 0 && currency < currencyCost)
         {
             return ExchangeAllowance.Block($"通貨が足りません（所持 {currency} / 必要 {currencyCost}）");
+        }
+
+        // --- 通貨以外に払うもの。武器の交換で要る強化素材など ---
+        //
+        // 通貨と同じ扱いにする。足りなければこの品は交換できないが、
+        // 別の品は交換できるかもしれないので、移動そのものは終わらせない。
+        if (extraCosts is not null)
+        {
+            foreach (var extra in extraCosts)
+            {
+                if (extra.Quantity > 0 && extra.Held < extra.Quantity)
+                {
+                    return ExchangeAllowance.Block(
+                        $"{extra.Name} が足りません（所持 {extra.Held} / 必要 {extra.Quantity}）");
+                }
+            }
         }
 
         // --- 所持の上限 ---
@@ -283,6 +310,18 @@ public static class ExchangeLimits
         if (currencyCost > 0)
         {
             trades = Math.Min(trades, currency / currencyCost);
+        }
+
+        // --- 通貨以外に払うもので何回ぶん賄えるか ---
+        if (extraCosts is not null)
+        {
+            foreach (var extra in extraCosts)
+            {
+                if (extra.Quantity > 0)
+                {
+                    trades = Math.Min(trades, extra.Held / extra.Quantity);
+                }
+            }
         }
 
         // --- 所持枠。品が重なるかどうかは分からないので 1 回 1 枠として見る ---
