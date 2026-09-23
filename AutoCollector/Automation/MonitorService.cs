@@ -726,7 +726,16 @@ public sealed class MonitorService(
                 or ExchangeFailure.ExternalPluginError
                 or ExchangeFailure.NoBagSpace
                 or ExchangeFailure.ShopClosedUnexpectedly
-                or ExchangeFailure.ExchangeItemNotFound)
+                or ExchangeFailure.ExchangeItemNotFound
+
+                // 画面の読み方が合っていないだけの失敗も、設定の誤りではない。
+                //
+                // 区分を絞った窓では index が画面の件数を超えるのが正常で、
+                // それを範囲外と誤判定していた（F-70）。正しく設定した
+                // アクセサリのプリセットが 2 周で自動的に無効化されていた。
+                or ExchangeFailure.IndexOutOfRange
+                or ExchangeFailure.IndexDuplicated
+                or ExchangeFailure.EntryCountMismatch)
             {
                 this.anomalyLog.Info(
                     "Monitor",

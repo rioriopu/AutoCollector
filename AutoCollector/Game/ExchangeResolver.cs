@@ -73,6 +73,79 @@ public sealed class ExchangeResolver(
 
     public IReadOnlyList<ExchangeDefinition> Results => this.results;
 
+    /// <summary>ShopId → そのショップが持つ品目の数。撃つ前の index の上限に使う。</summary>
+    private readonly Dictionary<uint, int> shopItemCounts = [];
+
+    /// <summary>
+    /// そのショップが持つ品目の数を返す。
+    ///
+    /// **画面に出ている件数を index の上限に使ってはいけない。**
+    /// 交換画面は区分（武具 / 防具 / アクセサリ / その他）ごとにしか品を出さないが、
+    /// 発火に渡す index は**ショップ全体での通し番号**で、画面の件数とは無関係である。
+    ///
+    /// 実データ（2026-09-23）: ジルコンの Shop 1770911 は全 37 件。
+    /// アクセサリへ切り替えると画面は 12 件になるが、その 12 件の index は 25〜36。
+    /// 画面の件数を上限にすると、12 件すべてが範囲外として弾かれる。
+    ///
+    /// 同じ画面を動かしている ICE の実働テーブルでも、防具タブは 20 件しか出ないのに
+    /// index は 14〜42 を使っている（fork-ICE/ICE/Utilities/Shop_Cosmocredits.cs）。
+    ///
+    /// 数はシートから実行時に引く。件数をコードへ埋め込まない。
+    /// 索引の構築状態に依存しないよう、ここで直接シートを読んで覚える。
+    /// </summary>
+    public bool TryGetShopItemCount(uint shopId, out int count)
+    {
+        count = 0;
+
+        if (shopId == 0)
+        {
+            return false;
+        }
+
+        if (this.shopItemCounts.TryGetValue(shopId, out count))
+        {
+            return true;
+        }
+
+        try
+        {
+            var shops = Svc.Data.GetExcelSheet<SpecialShop>();
+
+            if (shops is null || !shops.TryGetRow(shopId, out var shop))
+            {
+                return false;
+            }
+
+            var found = 0;
+
+            foreach (var entry in shop.Item)
+            {
+                foreach (var receive in entry.ReceiveItems)
+                {
+                    if (receive.Item.RowId != 0)
+                    {
+                        found++;
+                        break;
+                    }
+                }
+            }
+
+            if (found == 0)
+            {
+                return false;
+            }
+
+            this.shopItemCounts[shopId] = found;
+            count = found;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Warn("Resolver", $"Shop {shopId} の品目数を読めませんでした: {ex.Message}");
+            return false;
+        }
+    }
+
     /// <summary>指定通貨で購入できる交換定義の索引構築を開始する。</summary>
     public void BeginBuild(uint currencyItemId) => this.BeginBuild(currencyItemId, false);
 
@@ -213,51 +286,77 @@ public sealed class ExchangeResolver(
                     }
                 }
 
-                // 報酬やコストが複数あるエントリは、1 通貨 1 アイテムのモデルで表せない。
-                // 定義としては残すが、交換の実行は事前条件で拒否する。
-                var costEntries = 0;
-                foreach (var cost in entry.ItemCosts)
-                {
-                    if (cost.CurrencyCost != 0 && cost.ItemCost.RowId != 0)
-                    {
-                        costEntries++;
-                    }
-                }
+                // **コストは 1 種類とは限らない。**
+                //
+                // 武器の交換は「詩片 + 強化素材」のように 2 つ払う。
+                // 対象の通貨ぶんだけを見て残りを捨てると、
+                // 素材を持っていないのに交換所まで行って空振りする。
+                //
+                // ここで払うものを全部拾っておき、実行前の確認と、
+                // 交換後の「払ったぶんが減ったか」の検証に使う。
+                // 対象の通貨ぶんと、それ以外とに仕分ける。
+                //
+                // **1 エントリにつき記録は 1 件にする。**
+                // コスト行ごとに記録を作ると、同じ通貨が 2 行に分かれている
+                // エントリで同じ index の記録が 2 件でき、重複として弾かれる。
+                var currencyCost = 0u;
+                byte currencyCostType = 0;
+                var hasCurrency = false;
+                var extras = new List<ExchangeCost>();
+                var unresolved = false;
 
                 foreach (var cost in entry.ItemCosts)
                 {
-                    if (cost.CurrencyCost == 0)
+                    // 使っていないコスト枠。以前からここで数えていない。
+                    if (cost.CurrencyCost == 0 || cost.ItemCost.RowId == 0)
                     {
                         continue;
                     }
 
+                    // 実 ItemId へ解決できないものも「払うものがある」事実は残す。
+                    // 何を払うか確定できない以上、そのエントリは実行させない。
                     if (!this.TryResolveCostCurrency(cost.CostType, cost.ItemCost.RowId, out var costItemId))
                     {
+                        unresolved = true;
                         continue;
                     }
 
-                    if (costItemId != this.targetCurrencyItemId)
+                    if (costItemId == this.targetCurrencyItemId)
                     {
+                        // 同じ通貨が複数行に分かれていることがある。足し合わせる。
+                        currencyCost += cost.CurrencyCost;
+                        currencyCostType = cost.CostType;
+                        hasCurrency = true;
                         continue;
                     }
 
-                    if (!this.shopEntries.TryGetValue(shop.RowId, out var list))
-                    {
-                        this.shopEntries[shop.RowId] = list = [];
-                        this.shopNames[shop.RowId] = shop.Name.ExtractText();
-                    }
-
-                    list.Add(new ShopEntryRecord(
-                        entryIndex,
-                        rewardItemId,
-                        rewardCount == 0 ? 1u : rewardCount,
-                        rewardHq,
-                        cost.CurrencyCost,
-                        cost.CostType,
-                        rewardEntries == 1,
-                        costEntries == 1,
-                        itemCategory));
+                    extras.Add(new ExchangeCost(costItemId, cost.CurrencyCost));
                 }
+
+                // この通貨では買えないエントリ。
+                if (!hasCurrency)
+                {
+                    continue;
+                }
+
+                if (!this.shopEntries.TryGetValue(shop.RowId, out var list))
+                {
+                    this.shopEntries[shop.RowId] = list = [];
+                    this.shopNames[shop.RowId] = shop.Name.ExtractText();
+                }
+
+                list.Add(new ShopEntryRecord(
+                    entryIndex,
+                    rewardItemId,
+                    rewardCount == 0 ? 1u : rewardCount,
+                    rewardHq,
+                    currencyCost,
+                    currencyCostType,
+                    rewardEntries == 1,
+                    extras.Count == 0 && !unresolved,
+                    itemCategory,
+                    extras,
+                    unresolved));
             }
         }
 
@@ -590,6 +689,8 @@ public sealed class ExchangeResolver(
                         CostType = entry.CostType,
                         SingleReward = entry.SingleReward,
                         SingleCost = entry.SingleCost,
+                        ExtraCosts = entry.ExtraCosts,
+                        HasUnresolvedCost = entry.HasUnresolvedCost,
                         ItemCategory = entry.ItemCategory,
                         ShopName = this.shopNames.GetValueOrDefault(shopId, string.Empty),
                     });
@@ -612,6 +713,8 @@ public sealed class ExchangeResolver(
                         CostType = entry.CostType,
                         SingleReward = entry.SingleReward,
                         SingleCost = entry.SingleCost,
+                        ExtraCosts = entry.ExtraCosts,
+                        HasUnresolvedCost = entry.HasUnresolvedCost,
                         ItemCategory = entry.ItemCategory,
                         ShopName = this.shopNames.GetValueOrDefault(shopId, string.Empty),
                         Inclusion = this.inclusionPaths.GetValueOrDefault((shopId, npc.NpcId)),
@@ -742,7 +845,9 @@ public sealed class ExchangeResolver(
         byte CostType,
         bool SingleReward,
         bool SingleCost,
-        uint ItemCategory);
+        uint ItemCategory,
+        IReadOnlyList<ExchangeCost> ExtraCosts,
+        bool HasUnresolvedCost);
 
     private sealed record NpcHandlerRecord(uint NpcId, HandlerPath Path, string? MenuHint);
 }

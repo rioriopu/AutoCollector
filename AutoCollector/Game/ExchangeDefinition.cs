@@ -1,4 +1,5 @@
-﻿using System.Numerics;
+﻿using System.Collections.Generic;
+using System.Numerics;
 
 namespace AutoCollector.Game;
 
@@ -20,6 +21,14 @@ public enum HandlerPath
     /// <summary>InclusionShop を経由する。スクリップ交換はこの経路。</summary>
     InclusionShop,
 }
+
+/// <summary>
+/// 対象の通貨とは別に払うもの 1 種類ぶん。
+/// 武器の交換のように「詩片 + 強化素材」を要求するエントリで使う。
+/// </summary>
+/// <param name="ItemId">払うアイテムの ItemId。実 ItemId に解決済みのものだけが入る。</param>
+/// <param name="Quantity">1 回の交換で払う個数。</param>
+public sealed record ExchangeCost(uint ItemId, uint Quantity);
 
 /// <summary>
 /// 1 件の交換（この通貨をこれだけ払って、このアイテムをこれだけ得る）の定義。
@@ -57,9 +66,30 @@ public sealed record ExchangeDefinition
 
     /// <summary>
     /// このエントリのコストがちょうど 1 種類か。
-    /// false だと通貨以外も消費するため、「通貨が減った AND アイテムが増えた」では検証しきれない。
+    /// false のときは対象の通貨以外も払う。何をいくつ払うかは <see cref="ExtraCosts"/> に入る。
     /// </summary>
     public required bool SingleCost { get; init; }
+
+    /// <summary>
+    /// 対象の通貨以外に払うもの。武器の交換で要る強化素材などがここに入る。
+    /// <see cref="SingleCost"/> が true なら空。
+    /// </summary>
+    public IReadOnlyList<ExchangeCost> ExtraCosts { get; init; } = [];
+
+    /// <summary>
+    /// 実 ItemId へ解決できないコスト表現が混ざっているか。
+    /// true のものは何を払うのか確定できないため、交換を実行しない。
+    /// </summary>
+    public bool HasUnresolvedCost { get; init; }
+
+    /// <summary>
+    /// 交換を実行できる形か。
+    ///
+    /// 報酬が複数あるエントリは「アイテムが増えた」で検証しきれないので実行しない。
+    /// コストは複数でも、払うものがすべて実アイテムとして確定していれば実行できる
+    /// （払ったぶんが減ったことまで確認する）。
+    /// </summary>
+    public bool CanExecute => this.SingleReward && !this.HasUnresolvedCost;
 
     /// <summary>ENpcBase.RowId（＝ゲーム内オブジェクトの BaseId）。0 なら NPC 未解決。</summary>
     public uint NpcDataId { get; init; }
