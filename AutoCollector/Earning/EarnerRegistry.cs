@@ -324,6 +324,34 @@ public sealed class EarnerRegistry
             : string.Join(" や ", names);
     }
 
+    /// <summary>
+    /// この通貨を増やせる稼ぎ手。いなければ null。
+    ///
+    /// **導入されていない稼ぎ手も見る。**
+    /// 「どの遊び方の通貨か」はゲームデータで決まっていて、
+    /// 連携先が入っているかとは関係が無い。
+    /// 入っていないことを理由に見出しが変わると、一覧が並べ替わって驚く。
+    /// </summary>
+    public IEarner? FindFor(uint currencyItemId)
+        => this.earners.FirstOrDefault(x => x.CanEarn(currencyItemId));
+
+    /// <summary>
+    /// この通貨の稼ぎ方の名前。分からなければ「その他」。
+    ///
+    /// ギャザラーの稼ぎ手を足すまで、ギャザラースクリップはここへ落ちる。
+    /// **落ちること自体は正しい。**いまは採集で稼ぐ段取りを持っていない。
+    /// </summary>
+    public string KindNameFor(uint currencyItemId)
+        => this.FindFor(currencyItemId)?.KindName ?? "その他";
+
+    /// <summary>稼ぎ方の名前を、登録した順に並べたもの。最後に「その他」を足す。</summary>
+    public IReadOnlyList<string> ListKindNames()
+    {
+        var names = this.earners.Select(x => x.KindName).ToList();
+        names.Add("その他");
+        return names;
+    }
+
     /// <summary>いま自分が止めている稼ぎ手の表示名。記録と画面のため。</summary>
     public string DescribeSuspended()
     {

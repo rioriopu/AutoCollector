@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using AutoCollector.Diagnostics;
 using AutoCollector.Game;
 using AutoCollector.Ipc;
@@ -26,7 +27,7 @@ public sealed record CombatInterrupt(bool WasRunning, uint ResumeTerritoryId, bo
 /// 以前は交換の実行側が AutoDuty を直接触っており、
 /// 止めるとき立てた旗を戻す側が全部下ろせていなかった（F-60）。
 /// </summary>
-public sealed class CombatEarner(AutoDutyIpc autoDuty, AnomalyLog anomalyLog) : IEarner
+public sealed class CombatEarner(AutoDutyIpc autoDuty, AnomalyLog anomalyLog, TomestoneService tomestones) : IEarner
 {
     /// <summary>
     /// AutoDuty が止まってからも「動作中の扱い」を続ける時間。
@@ -39,6 +40,10 @@ public sealed class CombatEarner(AutoDutyIpc autoDuty, AnomalyLog anomalyLog) : 
 
     private readonly AutoDutyIpc autoDuty = autoDuty;
     private readonly AnomalyLog anomalyLog = anomalyLog;
+    private readonly TomestoneService tomestones = tomestones;
+
+    /// <summary>いま各スロットに入っているトームストーンの ItemId。空なら未取得。</summary>
+    private readonly HashSet<uint> tomestoneItemIds = [];
 
     private DateTime lastRunningUtc = DateTime.MinValue;
 
@@ -54,6 +59,8 @@ public sealed class CombatEarner(AutoDutyIpc autoDuty, AnomalyLog anomalyLog) : 
     public string Id => "Combat";
 
     public string DisplayName => "AutoDuty";
+
+    public string KindName => "戦闘";
 
     public bool IsAvailable => this.autoDuty.IsLoaded;
 
@@ -107,6 +114,42 @@ public sealed class CombatEarner(AutoDutyIpc autoDuty, AnomalyLog anomalyLog) : 
     /// 交換の歯止めを緩める根拠にはしない。
     /// </summary>
     public bool SuppliesCurrencyFor(ExchangePreset preset) => false;
+
+    /// <summary>
+    /// トームストーンは周回で増える。
+    ///
+    /// **スロット番号で判定する。**パッチで中身が入れ替わるため、
+    /// ItemId を埋め込むと次のパッチで外れる。
+    /// いま各スロットに入っている ItemId をシートから引いて照合する。
+    /// </summary>
+    public bool CanEarn(uint currencyItemId)
+    {
+        if (currencyItemId == 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            // **一度引いたら控える。**画面は毎フレーム描かれる。
+            // 空のあいだは引き直す。読み込みの途中だと空で返るため、
+            // そこで控えてしまうと「トームストーンが 1 つも無い」が固定される。
+            if (this.tomestoneItemIds.Count == 0)
+            {
+                foreach (var slot in this.tomestones.ListSlots())
+                {
+                    this.tomestoneItemIds.Add(slot.ItemId);
+                }
+            }
+
+            return this.tomestoneItemIds.Contains(currencyItemId);
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Warn("Combat", $"ItemId {currencyItemId} がトームストーンか判断できませんでした: {ex.Message}");
+            return false;
+        }
+    }
 
     /// <summary>直前に記録した再開先。UI から手動で再開するときにも使う。</summary>
     public uint ResumeTerritoryId => this.Interrupt?.ResumeTerritoryId ?? this.observedDutyTerritoryId;

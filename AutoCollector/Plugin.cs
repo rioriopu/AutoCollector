@@ -438,7 +438,7 @@ public sealed class Plugin : IDalamudPlugin
         //
         // 登録の順は画面に出る順。AutoDuty を先に出す（従来と同じ並び）。
         this.Earners = new EarnerRegistry();
-        this.Combat = new CombatEarner(this.AutoDuty, this.AnomalyLog);
+        this.Combat = new CombatEarner(this.AutoDuty, this.AnomalyLog, this.TomestoneService);
         this.Crafter = new CrafterEarner(this.Artisan, this.AnomalyLog, this.CraftPlanService);
         this.Earners.Register(this.Combat);
         this.Earners.Register(this.Crafter);

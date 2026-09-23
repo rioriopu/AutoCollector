@@ -78,8 +78,16 @@ public interface IEarner
     /// <summary>記録に出す不変の名前。設定にも記録にも残るので変えない。</summary>
     string Id { get; }
 
-    /// <summary>画面に出す名前。</summary>
+    /// <summary>画面に出す名前。連携先のプラグイン名。</summary>
     string DisplayName { get; }
+
+    /// <summary>
+    /// 稼ぎ方の名前。「戦闘」「クラフター」「ギャザラー」など。
+    ///
+    /// <see cref="DisplayName"/> とは別。あちらは連携先の名前（AutoDuty / Artisan）で、
+    /// こちらは遊び方の呼び名。プリセットの見出しに使う。
+    /// </summary>
+    string KindName { get; }
 
     /// <summary>連携先が導入されているか。false のものは中断も復帰も呼ばれない。</summary>
     bool IsAvailable { get; }
@@ -114,6 +122,18 @@ public interface IEarner
     /// 別々の値を持つと、片方だけ直して食い違う。
     /// </summary>
     bool SuppliesCurrencyFor(ExchangePreset preset);
+
+    /// <summary>
+    /// この通貨を、この稼ぎ方で増やせるか。
+    ///
+    /// **ゲームデータで決まる。**通貨の名前も種別もコードへ埋め込まない。
+    /// プリセットを稼ぎ方ごとに分けて出すときの振り分けにも使う。
+    ///
+    /// <see cref="SuppliesCurrencyFor"/> との違い:
+    /// あちらは「このプリセットの設定で、いま自力で増やすか」。
+    /// こちらは「そもそもこの通貨はこの稼ぎ方で増えるものか」。
+    /// </summary>
+    bool CanEarn(uint currencyItemId);
 
     /// <summary>
     /// これから交換で中断する、という合図。
