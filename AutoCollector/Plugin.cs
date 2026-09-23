@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using AutoCollector.Automation;
 using AutoCollector.Diagnostics;
+using EstellUtils.UI;
 using AutoCollector.Ipc;
 using AutoCollector.Game;
 using AutoCollector.Ui;
@@ -503,18 +504,23 @@ public sealed class Plugin : IDalamudPlugin
 
         Svc.Framework.Update += this.OnFrameworkUpdate;
 
-        this.mainWindow = new MainWindow(this);
+        // 画面は EstellUtils（独自 UI ライブラリ）の上に載せる。
+        // 描画の接続もここで行われる。
+        EUi.Initialize(Svc.PluginInterface, log: Svc.Log, keyState: Svc.KeyState);
 
-        // 設定と主画面の両方に繋ぐ。
+        this.mainWindow = new MainWindow(this);
+        EUi.Windows.Add(this.mainWindow);
+
+        // **設定と主画面の両方に繋ぐ。**
         //
         // このプラグインの画面は 1 つしかなく、設定も操作もそこで行う。
-        // 既定（設定だけ）にしていたため、プラグイン一覧から「開く」で
-        // 辿り着けず、Dalamud の検査でも主画面が無いと指摘されていた。
-        EzConfigGui.Init(
-            this.mainWindow.Draw,
-            null,
-            "Auto Collector",
-            EzConfigGui.WindowType.Both);
+        // 設定だけに繋いでいたため、プラグイン一覧から「開く」で辿り着けず、
+        // Dalamud の検査でも主画面が無いと指摘されていた。
+        //
+        // 以前は ECommons の EzConfigGui が両方へ繋いでいた。
+        // 自前のウィンドウに替えたので、ここで自分で繋ぐ。**外し忘れないこと。**
+        Svc.PluginInterface.UiBuilder.OpenMainUi += this.ToggleMainWindow;
+        Svc.PluginInterface.UiBuilder.OpenConfigUi += this.ToggleMainWindow;
 
         EzCmd.Add(MainCommand, this.OnCommand, "Auto Collector を開く。/autocollector stop で緊急停止");
         this.TryRegisterShortCommand();
@@ -569,7 +575,13 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        if (EzConfigGui.Window is { } window)
+        this.ToggleMainWindow();
+    }
+
+    /// <summary>画面を開け閉めする。コマンドとプラグイン一覧の両方から呼ばれる。</summary>
+    private void ToggleMainWindow()
+    {
+        if (this.mainWindow is { } window)
         {
             window.IsOpen = !window.IsOpen;
         }
@@ -869,6 +881,19 @@ public sealed class Plugin : IDalamudPlugin
         // ハンドラの解除を最優先で行う。ここが漏れると
         // AutomaticReloading 時に古いインスタンスが動き続ける。
         Svc.Framework.Update -= this.OnFrameworkUpdate;
+
+        // 画面の接続も同じ理由で先に外す。
+        // 外し忘れると、読み込み直したあとに古い画面が描かれ続ける。
+        try
+        {
+            Svc.PluginInterface.UiBuilder.OpenMainUi -= this.ToggleMainWindow;
+            Svc.PluginInterface.UiBuilder.OpenConfigUi -= this.ToggleMainWindow;
+            EUi.Shutdown();
+        }
+        catch (Exception ex)
+        {
+            Svc.Log.Error($"[Auto Collector] 画面の解放に失敗しました: {ex}");
+        }
 
         // 抑制を立てたまま終了すると AutoRetainer が止まったままになる。最優先で解除する。
         try
