@@ -133,26 +133,3 @@ public static class SafetyGuard
         return true;
     }
 }
-
-/// <summary>
-/// 交換の前に何が動いていたかの記録。交換後に元へ戻すために使う。
-/// ユーザー自身が止めていたものを勝手に開始しないよう、開始前の状態だけを根拠にする。
-/// </summary>
-public sealed class ReturnContext
-{
-    /// <summary>交換を始める前に AutoDuty が動いていたか。</summary>
-    public bool WasAutoDutyRunning { get; init; }
-
-    /// <summary>
-    /// 再開時に AutoDuty へ渡すエリア。
-    ///
-    /// AutoDuty を止めるのは必ず Duty の外なので、停止した瞬間の現在地は街になる。
-    /// AutoDuty.Run はコンテンツのエリアを要求するため、街を渡しても再開できない。
-    /// そこで、交換を待っている間に観測した「Duty 中のエリア」を使う。
-    /// </summary>
-    public uint AutoDutyTerritoryId { get; init; }
-
-    /// <summary>AutoDuty が周回中だったか。</summary>
-    public bool WasLooping { get; init; }
-}
-
