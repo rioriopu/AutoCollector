@@ -26,6 +26,8 @@ public sealed class CrafterEarner(ArtisanIpc artisan, AnomalyLog anomalyLog, Cra
 
     public string DisplayName => "Artisan";
 
+    public string KindName => "クラフター";
+
     public bool IsAvailable => this.artisan.IsLoaded;
 
     /// <summary>
@@ -70,7 +72,7 @@ public sealed class CrafterEarner(ArtisanIpc artisan, AnomalyLog anomalyLog, Cra
 
         try
         {
-            return this.craftPlans.ListCraftable(currencyItemId).Count > 0;
+            return this.craftPlans.HasCraftableFor(currencyItemId);
         }
         catch (Exception ex)
         {

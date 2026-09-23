@@ -226,8 +226,60 @@ public sealed class PresetTab(Plugin plugin)
 
         ExchangePreset? toRemove = null;
 
-        foreach (var preset in Plugin.C.Presets.ToList())
+        // **稼ぎ方ごとに分けて出す。**
+        //
+        // トームストーンのプリセットとスクリップのプリセットが混ざっていると、
+        // どれが戦闘の設定でどれが製作の設定か、名前を読むまで分からない。
+        //
+        // 種別はプリセットに持たせない。**通貨を選んだ時点で決まっている。**
+        // 申告させると、申告と通貨が食い違う状態を作れてしまう。
+        // 振り分けは稼ぎ手に聞く（登録簿が答える）ので、
+        // ギャザラーの稼ぎ手を足せば、その通貨は自動でそちらへ並ぶ。
+        var byKind = new Dictionary<string, List<ExchangePreset>>();
+
+        foreach (var preset in Plugin.C.Presets)
         {
+            var itemId = this.plugin.CurrencyCatalog.TryResolve(preset, out var resolved) ? resolved : 0u;
+            var kind = this.plugin.Earners.KindNameFor(itemId);
+
+            if (!byKind.TryGetValue(kind, out var bucket))
+            {
+                byKind[kind] = bucket = [];
+            }
+
+            bucket.Add(preset);
+        }
+
+        // 見出しの並びは稼ぎ手を登録した順。中身が無い見出しは出さない。
+        var ordered = new List<ExchangePreset>();
+        var headings = new Dictionary<Guid, string>();
+
+        foreach (var kind in this.plugin.Earners.ListKindNames())
+        {
+            if (!byKind.TryGetValue(kind, out var bucket) || bucket.Count == 0)
+            {
+                continue;
+            }
+
+            // **見出しは、分ける意味があるときだけ出す。**
+            // 全部が同じ稼ぎ方なら、見出しは画面を 1 行食うだけになる。
+            if (byKind.Count > 1)
+            {
+                headings[bucket[0].Id] = $"{kind}（{bucket.Count}）";
+            }
+
+            ordered.AddRange(bucket);
+        }
+
+        foreach (var preset in ordered)
+        {
+            if (headings.TryGetValue(preset.Id, out var heading))
+            {
+                ImGui.Spacing();
+                ImGui.TextColored(ImGuiColors.DalamudViolet, heading);
+                ImGui.Separator();
+            }
+
             using var id = ImRaii.PushId(preset.Id.ToString());
 
             var enabled = preset.Enabled;
@@ -354,9 +406,21 @@ public sealed class PresetTab(Plugin plugin)
             {
                 if (combo)
                 {
+                    // **稼ぎ方ごとに見出しを入れる。**
+                    // トームストーンとスクリップが混ざって並ぶと、
+                    // その通貨で何ができるのかが名前からしか読めない。
+                    var lastKind = string.Empty;
+
                     for (var i = 0; i < choices.Count; i++)
                     {
                         using var id = ImRaii.PushId($"cur{i}");
+
+                        var kind = this.plugin.Earners.KindNameFor(choices[i].ItemId);
+                        if (kind != lastKind)
+                        {
+                            lastKind = kind;
+                            ImGui.TextColored(ImGuiColors.DalamudViolet, kind);
+                        }
 
                         if (ImGui.Selectable("##row", i == index))
                         {
