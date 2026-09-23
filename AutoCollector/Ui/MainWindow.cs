@@ -51,6 +51,16 @@ public sealed partial class MainWindow : EuWindow
 
     public override void Draw()
     {
+        // **生の ImGui は必ず RawImGui のスコープで囲む。**
+        //
+        // EstellUtils は独自のカーソルで位置を決めるため、
+        // 囲まずに ImGui を呼ぶと画面の外へ描かれ、窓が空に見える。
+        // 実際そうなった（窓枠だけ出て中身が何も無い）。
+        //
+        // 中身をひとつずつ EstellUtils へ移していくあいだ、
+        // まだ移していない部分はこのスコープの中に置く。
+        using var raw = EUi.RawImGui();
+
         using var tabs = ImRaii.TabBar("##autocollector_tabs");
         if (!tabs)
         {
