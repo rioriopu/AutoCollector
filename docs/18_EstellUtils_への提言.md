@@ -1,5 +1,19 @@
 # EstellUtils への提言
 
+> **2026-09-23 追記: `2a7ac93` でほぼ全件が反映されました。**
+>
+> 対応を確認したもの（Auto Collector 側で回避策を外して動作確認へ回した）:
+> A-1 `RawImGui` / B-1 `Windows.Add` / B-2 `AutoScroll` / C-1 `PushId` と Popup /
+> C-2 列幅 / C-3 `TableColumn.Align` / C-4 `Derive` と `Metrics` /
+> D-1 `OpenMainUi`・`OpenConfigUi` / D-2 `RichLabel` /
+> E-1〜E-4 文書 / F-1〜F-4 タブ / G-1・G-2 窓
+>
+> A-2（表の固定見出し）は `EUi.ScrollbarInset()` と `TableHeader` の拡張で
+> **ずれずに組めるようになった。** 専用スコープは無いが、回避策で足りる。
+>
+> 以下は提言した時点の原文。
+
+
 送り主: Auto Collector（FFXIV / Dalamud プラグイン、UI 約 6,300 行を移行中）
 対象の版: `5c33e11`（2026-09-23「タブの折り返しとプログラムからの選択に対応、移行手引きの誤りを修正」）
 
