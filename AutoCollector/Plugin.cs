@@ -509,7 +509,6 @@ public sealed class Plugin : IDalamudPlugin
         EUi.Initialize(Svc.PluginInterface, log: Svc.Log, keyState: Svc.KeyState);
 
         this.mainWindow = new MainWindow(this);
-        EUi.Windows.Add(this.mainWindow);
 
         // **設定と主画面の両方に繋ぐ。**
         //
@@ -517,10 +516,8 @@ public sealed class Plugin : IDalamudPlugin
         // 設定だけに繋いでいたため、プラグイン一覧から「開く」で辿り着けず、
         // Dalamud の検査でも主画面が無いと指摘されていた。
         //
-        // 以前は ECommons の EzConfigGui が両方へ繋いでいた。
-        // 自前のウィンドウに替えたので、ここで自分で繋ぐ。**外し忘れないこと。**
-        Svc.PluginInterface.UiBuilder.OpenMainUi += this.ToggleMainWindow;
-        Svc.PluginInterface.UiBuilder.OpenConfigUi += this.ToggleMainWindow;
+        // 解除は EUi.Shutdown() が面倒を見る。
+        EUi.Windows.Add(this.mainWindow, mainUi: true, configUi: true);
 
         EzCmd.Add(MainCommand, this.OnCommand, "Auto Collector を開く。/autocollector stop で緊急停止");
         this.TryRegisterShortCommand();
@@ -884,10 +881,9 @@ public sealed class Plugin : IDalamudPlugin
 
         // 画面の接続も同じ理由で先に外す。
         // 外し忘れると、読み込み直したあとに古い画面が描かれ続ける。
+        // プラグイン一覧のボタンへの接続も EUi.Shutdown() が外す。
         try
         {
-            Svc.PluginInterface.UiBuilder.OpenMainUi -= this.ToggleMainWindow;
-            Svc.PluginInterface.UiBuilder.OpenConfigUi -= this.ToggleMainWindow;
             EUi.Shutdown();
         }
         catch (Exception ex)
