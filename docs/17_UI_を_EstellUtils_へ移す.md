@@ -47,6 +47,49 @@ public override void Draw()
 **手引きの 2 節と「生 ImGui との混在」節が食い違っている。**
 2 節のほうを直してもらうと、次に移す人が同じ穴に落ちない。
 
+### 続き: 囲むだけでは足りない
+
+`RawImGui` は**カーソルの位置は合わせるが、幅と高さは合わせない。**
+ImGui 側が見ている「描いてよい幅」は窓いっぱいのままになる。
+
+そのため、こうなった。
+
+| 症状 | 原因 |
+|---|---|
+| 右端で文字と表が切れる | ImGui が EstellUtils の余白を知らない |
+| 送りのつまみが 2 本重なる | `EuWindow.AutoScroll` と ImGui 側の送りが二重になる |
+| 長い説明が読めない | 生 ImGui の文字は既定で折り返さない |
+
+移行中は、次の 3 つを最上段でやる。
+
+```csharp
+public override void Draw()
+{
+    // ① EstellUtils が空けてくれた領域の大きさを取る
+    var area = EUi.AvailableRect;
+
+    using var raw = EUi.RawImGui();
+
+    // ② その大きさの子領域に閉じ込める（幅・高さ・送りが正しくなる）
+    using var child = ImRaii.Child("##raw", new Vector2(area.Width, area.Height), false);
+    if (!child) return;
+
+    // ③ 折り返す位置を決める。0 は「右端で折り返す」
+    ImGui.PushTextWrapPos(0f);
+    try { this.DrawTabs(); }
+    finally { ImGui.PopTextWrapPos(); }
+}
+```
+
+さらに**窓側の送りを止める。**止めないと二重になる。
+
+```csharp
+this.AutoScroll = false;   // 中身を移し終えたら true に戻す
+```
+
+**この 3 点セットを手引きに書いておくと、移行がぐっと楽になる。**
+`RawImGui` が幅と折り返しまで面倒を見てくれるなら、それが一番よい。
+
 ## EzConfigGui をやめた
 
 ECommons の `EzConfigGui` が握っていた 3 つを自分で持つようにした。

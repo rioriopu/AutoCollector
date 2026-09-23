@@ -35,6 +35,14 @@ public sealed partial class MainWindow : EuWindow
         // 画面の大きさ。交換候補の一覧と状況の表が入る幅を既定にする。
         this.Size = new Vector2(760f, 560f);
         this.MinSize = new Vector2(520f, 360f);
+
+        // **送りは 1 つだけにする。**
+        //
+        // EuWindow の自動スクロールと、中の生 ImGui が持つ送りが二重になり、
+        // つまみが 2 本並んで重なっていた。
+        // 中身を生 ImGui で描いているあいだは、そちら側の送りに任せる。
+        // 中身を EstellUtils へ移し終えたら、ここを true に戻す。
+        this.AutoScroll = false;
     }
 
     private bool onlyWithLocation = true;
@@ -86,6 +94,29 @@ public sealed partial class MainWindow : EuWindow
             return;
         }
 
+        // **折り返す位置を決めておく。**
+        //
+        // 生 ImGui の文字は既定で折り返さない。
+        // 以前の窓は横に送れたので端まで読めたが、
+        // 子領域に閉じ込めたことで、はみ出したぶんが読めなくなった。
+        //
+        // 0 は「描いてよい幅の右端で折り返す」という意味。
+        // 表の中では桁の幅で折り返るので、桁ごとの説明もそのまま読める。
+        ImGui.PushTextWrapPos(0f);
+
+        try
+        {
+            this.DrawTabs();
+        }
+        finally
+        {
+            ImGui.PopTextWrapPos();
+        }
+    }
+
+    /// <summary>タブと、その中身を描く。まだ生 ImGui のまま。</summary>
+    private void DrawTabs()
+    {
         using var tabs = ImRaii.TabBar("##autocollector_tabs");
         if (!tabs)
         {
