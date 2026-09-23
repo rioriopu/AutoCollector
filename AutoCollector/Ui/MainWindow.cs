@@ -59,7 +59,32 @@ public sealed partial class MainWindow : EuWindow
         //
         // 中身をひとつずつ EstellUtils へ移していくあいだ、
         // まだ移していない部分はこのスコープの中に置く。
+        //
+        // **さらに、その大きさの子領域に閉じ込める。**
+        //
+        // RawImGui はカーソルの位置は合わせるが、ImGui 側が見ている
+        // 「描いてよい幅」は窓いっぱいのままになる。
+        // そのため文字の折り返しも表の幅も EstellUtils の余白を知らず、
+        // 右端からはみ出して切れた。
+        //
+        // 子領域を開くと、その中では ImGui の幅も高さも正しくなり、
+        // 縦に溢れたぶんはこの子領域が送る。
+        var area = EUi.AvailableRect;
+
         using var raw = EUi.RawImGui();
+
+        // **大きさが取れなかったら ImGui の残り領域に任せる。**
+        // 0 や負の値で子領域を開くと、窓が真っ白になって
+        // 何も出ていないように見える。そこへ落ちない方に倒す。
+        var size = area.Width > 1f && area.Height > 1f
+            ? new Vector2(area.Width, area.Height)
+            : ImGui.GetContentRegionAvail();
+
+        using var child = ImRaii.Child("##autocollector_raw", size, false);
+        if (!child)
+        {
+            return;
+        }
 
         using var tabs = ImRaii.TabBar("##autocollector_tabs");
         if (!tabs)
