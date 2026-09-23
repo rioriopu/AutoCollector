@@ -4,7 +4,10 @@ using System.Linq;
 using AutoCollector.Automation;
 using AutoCollector.Diagnostics;
 using AutoCollector.Game;
+using System.Numerics;
 using Dalamud.Bindings.ImGui;
+using EstellUtils.UI;
+using EstellUtils.UI.Windowing;
 using Dalamud.Interface.Colors;
 using Dalamud.Interface.Utility.Raii;
 using ECommons.Configuration;
@@ -16,12 +19,23 @@ namespace AutoCollector.Ui;
 /// メイン画面。MVP 段階では「読み取り専用の状況表示」と「セルフチェック結果」が中心。
 /// 交換の実行系は S5 以降で追加する。
 /// </summary>
-public sealed partial class MainWindow(Plugin plugin)
+public sealed partial class MainWindow : EuWindow
 {
     /// <summary>記録をコピーした結果。押しても無反応に見えないよう画面へ返す。</summary>
     private string anomalyCopyNote = string.Empty;
 
-    private readonly Plugin plugin = plugin;
+    private readonly Plugin plugin;
+
+    public MainWindow(Plugin plugin)
+        : base("Auto Collector")
+    {
+        this.plugin = plugin;
+        this.presetTab = new PresetTab(plugin);
+
+        // 画面の大きさ。交換候補の一覧と状況の表が入る幅を既定にする。
+        this.Size = new Vector2(760f, 560f);
+        this.MinSize = new Vector2(520f, 360f);
+    }
 
     private bool onlyWithLocation = true;
     private string rewardFilter = string.Empty;
@@ -33,9 +47,9 @@ public sealed partial class MainWindow(Plugin plugin)
     private ShopHeader cachedHeader = new(0, 0, 0, string.Empty, 0);
     private string cachedShopFailure = string.Empty;
     private List<(string Label, AtkValueProbe Probe)> cachedDiagnostics = [];
-    private readonly PresetTab presetTab = new(plugin);
+    private readonly PresetTab presetTab;
 
-    public void Draw()
+    public override void Draw()
     {
         using var tabs = ImRaii.TabBar("##autocollector_tabs");
         if (!tabs)
