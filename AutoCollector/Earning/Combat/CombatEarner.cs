@@ -99,8 +99,14 @@ public sealed class CombatEarner(AutoDutyIpc autoDuty, AnomalyLog anomalyLog) : 
     public string DescribeRunning()
         => this.IsRunningOnGrace ? "AutoDuty（直前まで動作）" : "AutoDuty";
 
-    /// <summary>戦闘は周回そのものが通貨を生む。導入されていれば自力で増やせる。</summary>
-    public bool SuppliesCurrency => this.autoDuty.IsLoaded;
+    /// <summary>
+    /// 戦闘に「自分で稼ぐ」設定は無い。
+    ///
+    /// 周回そのものは通貨を生むが、それは利用者が別に回しているもので、
+    /// プリセットが自分で起こすものではない。
+    /// 交換の歯止めを緩める根拠にはしない。
+    /// </summary>
+    public bool SuppliesCurrencyFor(ExchangePreset preset) => false;
 
     /// <summary>直前に記録した再開先。UI から手動で再開するときにも使う。</summary>
     public uint ResumeTerritoryId => this.Interrupt?.ResumeTerritoryId ?? this.observedDutyTerritoryId;

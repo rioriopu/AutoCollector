@@ -33,12 +33,13 @@ public sealed class CrafterEarner(ArtisanIpc artisan, AnomalyLog anomalyLog) : I
     public string DescribeRunning() => "Artisan";
 
     /// <summary>
-    /// 製作で稼ぐかどうかはプリセットごとの設定で決まる。
+    /// 「製作で稼ぐ」が入っているプリセットは、自力でスクリップを増やせる。
     ///
-    /// **ここでは判断できない。** 段 5 で、プリセットの設定を見て答えられるようにする。
-    /// それまでは共通側が <c>preset.CraftToEarn</c> を直接見ている。
+    /// 素材の取り出し → 製作 → 納品 → 交換 を、目標に届くまで繰り返す。
+    /// **素材が尽きるまで回すのが正規の遊び方**なので、
+    /// 終了条件が無いことだけを理由に交換を弾いてはいけない。
     /// </summary>
-    public bool SuppliesCurrency => false;
+    public bool SuppliesCurrencyFor(ExchangePreset preset) => preset.CraftToEarn;
 
     public void MarkInterrupting() => this.lastWaitLogUtc = DateTime.MinValue;
 

@@ -85,10 +85,17 @@ public sealed class EarnerRegistry
     }
 
     /// <summary>
-    /// 自力で通貨を増やせる稼ぎ手がいるか。
+    /// このプリセットで、自力で通貨を増やせる稼ぎ手がいるか。
     /// 交換の歯止めで「終わりを決めずに回してよいか」の判断に使う。
+    ///
+    /// **ここだけは導入されていない稼ぎ手も見る。**
+    /// 「このプリセットは自分で稼ぐ設定か」を聞いているのであって、
+    /// いま動かせるかを聞いているのではない。
+    /// 連携先が入っていないことを理由に設定の意味を変えると、
+    /// 相手プラグインを入れ直すまで交換が止まる。
     /// </summary>
-    public bool AnySuppliesCurrency() => this.Available.Any(x => x.SuppliesCurrency);
+    public bool AnySuppliesCurrencyFor(ExchangePreset preset)
+        => this.earners.Any(x => x.SuppliesCurrencyFor(preset));
 
     /// <summary>
     /// いま全員が中断してよい切れ目にいるか。
