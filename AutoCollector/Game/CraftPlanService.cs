@@ -179,16 +179,6 @@ public sealed class CraftPlanService(
             .OrderBy(x => x.NotebookOrder)
             .ToList();
 
-    /// <summary>
-    /// この通貨を生む収集品が 1 つでもあるか。
-    ///
-    /// **一覧を作らない。**画面は毎フレーム描かれるので、
-    /// そのたびに絞り込んで並べ替えた一覧を作ると、描画だけで重くなる。
-    /// 有無だけを聞かれているなら、有無だけ答える。
-    /// </summary>
-    public bool HasCraftableFor(uint currencyItemId)
-        => currencyItemId != 0 && this.Build().Any(x => x.CurrencyItemId == currencyItemId);
-
     /// <summary>クラフターのジョブ一覧。</summary>
     public IReadOnlyList<CraftJob> ListJobs()
     {

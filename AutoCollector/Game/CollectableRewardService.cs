@@ -74,6 +74,15 @@ public sealed class CollectableRewardService(AnomalyLog anomalyLog, SpecialCurre
     /// <summary>解決できた収集品の数。</summary>
     public int KnownCount => this.Build().Count;
 
+    /// <summary>
+    /// 解決できた収集品をすべて返す。
+    ///
+    /// **出どころは問わない。**このシートは納品を受ける側の表なので、
+    /// 製作の収集品も採集の収集品も同じように入っている。
+    /// どちらの稼ぎ方かを知りたい側が、レシピや採集地の有無で振り分ける。
+    /// </summary>
+    public IReadOnlyDictionary<uint, CollectableReward> ListAll() => this.Build();
+
     private Dictionary<uint, CollectableReward> Build()
     {
         if (this.index is not null)

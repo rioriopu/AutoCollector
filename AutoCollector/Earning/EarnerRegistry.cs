@@ -344,7 +344,12 @@ public sealed class EarnerRegistry
     public string KindNameFor(uint currencyItemId)
         => this.FindFor(currencyItemId)?.KindName ?? "その他";
 
-    /// <summary>稼ぎ方の名前を、登録した順に並べたもの。最後に「その他」を足す。</summary>
+    /// <summary>
+    /// 稼ぎ方の名前を、登録した順に並べたもの。**最後は必ず「その他」。**
+    ///
+    /// 振り分けられなかったものを途中に挟むと、
+    /// 稼ぎ手を足したときに並びが入れ替わって見える。
+    /// </summary>
     public IReadOnlyList<string> ListKindNames()
     {
         var names = this.earners.Select(x => x.KindName).ToList();
