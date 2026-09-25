@@ -98,6 +98,12 @@ public sealed class FateRunner(
     /// </summary>
     private const float MobReachMeters = 15f;
 
+    /// <summary>近接職が敵に近づく距離。Lua スクリプトの既定に合わせた。</summary>
+    private const float MeleeReachMeters = 2.5f;
+
+    /// <summary>遠隔職が敵に近づく距離。届く範囲の内側にしてある。</summary>
+    private const float RangedReachMeters = 20f;
+
     /// <summary>
     /// 敵が 1 匹も見えないとき、中心からこれ以上離れていたら寄る。
     ///
@@ -117,6 +123,9 @@ public sealed class FateRunner(
 
     /// <summary>テレポートが終わるのを待つ上限。</summary>
     private static readonly TimeSpan TeleportTimeout = TimeSpan.FromSeconds(60);
+
+    /// <summary>レベルシンクを押し直すまでの間隔。反映を待つ。</summary>
+    private static readonly TimeSpan SyncRetryInterval = TimeSpan.FromSeconds(2);
 
     /// <summary>降りるのを待つ上限。空からの降下は数秒かかる。</summary>
     private static readonly TimeSpan LandingTimeout = TimeSpan.FromSeconds(30);
@@ -166,6 +175,12 @@ public sealed class FateRunner(
 
     /// <summary>敵へ近づいている最中か。戦闘に入ったら下ろす。</summary>
     private bool approaching;
+
+    /// <summary>BMR の AI を入れたか。入れたぶんは必ず戻す。</summary>
+    private bool aiEnabled;
+
+    /// <summary>レベルシンクを押した時刻。連打しないための間隔に使う。</summary>
+    private DateTime syncPressedUtc = DateTime.MinValue;
 
     /// <summary>交換から戻ったときに向かう座標。設定で座標まで戻す場合だけ入る。</summary>
     private Vector3? resumePosition;
@@ -973,6 +988,13 @@ public sealed class FateRunner(
             this.prefetched = this.PickNext(cfg, exclude: current.Id);
         }
 
+        // **レベルシンクを自分でも押す。**
+        //
+        // BMR に任せてあるが、効かないことがあった。押していない間は
+        // 参加した扱いにならず、敵も倒せない。
+        // 長く使われてきた Lua スクリプトも /lsync を自分で送っている。
+        this.TickLevelSync();
+
         // **敵が遠ければ歩いて近づく。**
         //
         // BMR は見えている敵と戦うだけで、遠くの敵を探しには行かない。
@@ -985,6 +1007,38 @@ public sealed class FateRunner(
             $"{current.Name} {current.Progress}% " +
             $"シンク={(this.scanner.IsPlayerSyncedToFate() ? "済" : "未")} " +
             $"プリセット={(this.presetApplied ? this.appliedPresetName : "未適用")}");
+    }
+
+    /// <summary>
+    /// レベルシンクが入っていなければ押す。
+    ///
+    /// <b>入っていれば何もしない。</b>押し直すと解除されてしまう。
+    /// </summary>
+    private void TickLevelSync()
+    {
+        if (this.scanner.IsPlayerSyncedToFate())
+        {
+            this.syncPressedUtc = DateTime.MinValue;
+            return;
+        }
+
+        // 連打しない。押してから反映まで少し間がある。
+        if (DateTime.UtcNow - this.syncPressedUtc < SyncRetryInterval)
+        {
+            return;
+        }
+
+        this.syncPressedUtc = DateTime.UtcNow;
+
+        try
+        {
+            Svc.Commands.ProcessCommand("/lsync");
+            this.trace.Decision("レベルシンクを押した", "まだ入っていなかった");
+        }
+        catch (Exception ex)
+        {
+            this.trace.Trouble("レベルシンクを押せない", ex.Message);
+        }
     }
 
     /// <summary>
@@ -1277,6 +1331,83 @@ public sealed class FateRunner(
         this.presetApplied = true;
         this.appliedPresetName = name;
         this.ApplyFateStrategies(cfg, name);
+        this.EnableAi();
+    }
+
+    /// <summary>
+    /// BMR の AI を入れる。
+    ///
+    /// <b>プリセットだけでは敵を追いかけない。</b>
+    /// プリセットは「何を撃つか」を決めるもので、「敵の方へ動く」のは
+    /// AI の仕事。別々の仕組みなので、両方を入れる必要がある。
+    ///
+    /// 長く使われてきた Lua スクリプト（pot0to / baanderson40 系）も
+    /// 同じように、プリセットの設定と /bmrai の両方を送っている。
+    /// </summary>
+    private void EnableAi()
+    {
+        if (this.aiEnabled)
+        {
+            return;
+        }
+
+        // 近接は的の懐まで、遠隔は届く距離まで。
+        // 遠隔を近づけすぎると、避ける余地が無くなる。
+        var melee = IsMeleeJob();
+        var distance = melee ? MeleeReachMeters : RangedReachMeters;
+
+        this.bossMod.TrySetAiEnabled(true);
+        this.bossMod.TrySetFollowTarget(true);
+        this.bossMod.TrySetFollowCombat(true);
+        this.bossMod.TrySetMaxDistanceToTarget(distance);
+
+        // 近接は戦闘が始まる前から詰めないと、いつまでも届かない。
+        this.bossMod.TrySetFollowOutOfCombat(melee);
+
+        this.aiEnabled = true;
+        this.trace.Decision("AI を入れた", $"{(melee ? "近接" : "遠隔")} 追う距離 {distance:0.#}m");
+    }
+
+    /// <summary>
+    /// BMR の AI を戻す。
+    ///
+    /// <b>入れたぶんは必ず戻す。</b>戻さないと、周回を止めたあとも
+    /// 利用者の操作に割り込んで動き続ける。
+    /// </summary>
+    private void DisableAi()
+    {
+        if (!this.aiEnabled)
+        {
+            return;
+        }
+
+        this.bossMod.TrySetFollowTarget(false);
+        this.bossMod.TrySetFollowCombat(false);
+        this.bossMod.TrySetFollowOutOfCombat(false);
+        this.bossMod.TrySetAiEnabled(false);
+
+        this.aiEnabled = false;
+        this.trace.Decision("AI を戻した", "周回を離れる");
+    }
+
+    /// <summary>近接で戦うジョブか。タンクもここに含める。</summary>
+    private static bool IsMeleeJob()
+    {
+        try
+        {
+            var job = Player.Object?.ClassJob.RowId ?? 0;
+
+            // 剣術士 ナイト 斧術士 戦士 暗黒 ガンブレ
+            // 格闘士 モンク 槍術士 竜騎士 双剣士 忍者 侍 リーパー ヴァイパー
+            return job is 1 or 19 or 3 or 21 or 32 or 37
+                       or 2 or 20 or 4 or 22 or 29 or 30 or 34 or 39 or 41;
+        }
+        catch
+        {
+            // 判断がつかないときは遠隔として扱う。
+            // 近接と誤ると、遠くから撃てるジョブが敵に張り付いて被弾する。
+            return false;
+        }
     }
 
     /// <summary>
@@ -1355,6 +1486,7 @@ public sealed class FateRunner(
 
         this.presetApplied = false;
         this.appliedPresetName = string.Empty;
+        this.DisableAi();
     }
 
     /// <summary>ホームポイントへ戻る（戦闘不能からの復帰）。</summary>

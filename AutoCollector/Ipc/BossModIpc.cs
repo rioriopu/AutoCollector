@@ -1,4 +1,6 @@
+using System;
 using AutoCollector.Diagnostics;
+using ECommons.DalamudServices;
 
 namespace AutoCollector.Ipc;
 
@@ -112,4 +114,65 @@ public sealed class BossModIpc(AnomalyLog anomalyLog) : IpcGateBase("BossModRebo
     /// </summary>
     public bool TryPauseMovement(bool pause)
         => this.TryAction("AI.PauseMovement", () => this.Func<bool, object>(Prefix + "AI.PauseMovement").InvokeAction(pause));
+
+    // ---- AI の有効化（IPC が無いのでコマンドで送る） ----
+
+    /// <summary>
+    /// AI そのものを有効・無効にする。
+    ///
+    /// <b>プリセットだけでは敵を追いかけない。</b>
+    /// プリセットは「何を撃つか」を決めるもので、
+    /// 「敵の方へ動く」のは AI の仕事。別々の仕組みになっている。
+    ///
+    /// IPC には AI の ON/OFF が無いため、コマンドで送る。
+    /// 長く使われてきた Lua スクリプト（pot0to / baanderson40 系）も
+    /// 同じやり方をしている。
+    /// </summary>
+    public bool TrySetAiEnabled(bool enabled)
+        => this.TryProcessCommand($"/bmrai {(enabled ? "on" : "off")}");
+
+    /// <summary>ターゲットを追いかけるか。これが無いと敵に近づかない。</summary>
+    public bool TrySetFollowTarget(bool on)
+        => this.TryProcessCommand($"/bmrai followtarget {(on ? "on" : "off")}");
+
+    /// <summary>戦闘中も追いかけるか。</summary>
+    public bool TrySetFollowCombat(bool on)
+        => this.TryProcessCommand($"/bmrai followcombat {(on ? "on" : "off")}");
+
+    /// <summary>
+    /// 戦闘外でも追いかけるか。
+    ///
+    /// 近接職はこれを入れないと、戦闘が始まるまで動かない。
+    /// </summary>
+    public bool TrySetFollowOutOfCombat(bool on)
+        => this.TryProcessCommand($"/bmrai followoutofcombat {(on ? "on" : "off")}");
+
+    /// <summary>ターゲットへ近づく距離。近接なら短く、遠隔なら長く。</summary>
+    public bool TrySetMaxDistanceToTarget(float meters)
+        => this.TryProcessCommand($"/bmrai maxdistancetarget {meters:0.##}");
+
+    /// <summary>コマンドを送る。登録されていなければ記録に残して false。</summary>
+    private bool TryProcessCommand(string command)
+    {
+        if (!this.IsLoaded)
+        {
+            return false;
+        }
+
+        try
+        {
+            if (Svc.Commands.ProcessCommand(command))
+            {
+                return true;
+            }
+
+            this.AnomalyLog.Warn("Ipc", $"[BossModReborn] コマンド {command} が登録されていません");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            this.AnomalyLog.Warn("Ipc", $"[BossModReborn] コマンド {command} に失敗しました: {ex.Message}");
+            return false;
+        }
+    }
 }
