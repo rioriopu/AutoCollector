@@ -124,6 +124,24 @@ public sealed class VnavmeshIpc(AnomalyLog anomalyLog) : IpcGateBase("vnavmesh",
             "Path.MoveTo",
             () => this.Func<List<Vector3>, bool, object>("vnavmesh.Path.MoveTo").InvokeAction(waypoints, fly));
 
+    /// <summary>
+    /// ナビメッシュを読み込み直す（キャッシュから）。
+    ///
+    /// 経路探索も全部取り消される（Nav.PathfindCancelAll と同じ実体）。
+    /// 詰まって抜け出せないときの最後の手段に使う。
+    /// </summary>
+    public bool TryReloadNavmesh(out bool accepted)
+        => this.TryInvoke("Nav.Reload", () => this.Func<bool>("vnavmesh.Nav.Reload").InvokeFunc(), out accepted);
+
+    /// <summary>
+    /// ナビメッシュを作り直す（キャッシュを使わない）。
+    ///
+    /// <b>重い。</b>マップによっては数十秒かかる。
+    /// キャッシュが壊れている疑いがあるときだけ使う。
+    /// </summary>
+    public bool TryRebuildNavmesh(out bool accepted)
+        => this.TryInvoke("Nav.Rebuild", () => this.Func<bool>("vnavmesh.Nav.Rebuild").InvokeFunc(), out accepted);
+
     /// <summary>移動を停止する。</summary>
     public bool TryStop()
         => this.TryAction("Path.Stop", () => this.Func<object>("vnavmesh.Path.Stop").InvokeAction());

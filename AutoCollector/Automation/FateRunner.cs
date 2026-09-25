@@ -206,6 +206,9 @@ public sealed class FateRunner(
     /// <summary>この移動で迂回を試した回数。</summary>
     private int blockDetours;
 
+    /// <summary>この移動でメッシュを読み込み直したか。二度はやらない。</summary>
+    private bool reloadedForBlock;
+
     /// <summary>頼んである迂回の経路探索。出来るまで待つ。</summary>
     private System.Threading.Tasks.Task<System.Collections.Generic.List<Vector3>>? detourTask;
 
@@ -795,6 +798,7 @@ public sealed class FateRunner(
         this.blockCheckedUtc = DateTime.MinValue;
         this.blockDetours = 0;
         this.detourTask = null;
+        this.reloadedForBlock = false;
 
         // 向かう先が、さっき離れた FATE とは別なら、覚えていた印を消す。
         // 同じ番号の FATE が後から湧いたときに、入れなくなるのを防ぐ。
@@ -1120,10 +1124,34 @@ public sealed class FateRunner(
             return;
         }
 
-        // 何度も迂回して駄目なら、この FATE は諦める。
+        // 何度も迂回して駄目なら、メッシュを読み込み直して仕切り直す。
+        //
+        // <b>迂回だけでは抜けられないことがある。</b>
+        // 地形の内側や、狭い隙間に入り込んでいると、
+        // いまの場所を避ける経路を引いても、そもそも出口が無い。
+        //
+        // 読み込み直すと経路探索も全部取り消されるので、
+        // 積んであった経路が一度きれいに消える。そのうえで
+        // 少し離れた場所へ飛び直させて、詰まりから出す。
         if (this.blockDetours >= MaxDetours)
         {
-            this.trace.Trouble("迂回しても進めない", $"{fate.Name} を諦めます");
+            if (!this.reloadedForBlock)
+            {
+                this.reloadedForBlock = true;
+                this.trace.Trouble("メッシュを読み込み直す", $"{fate.Name} へ {this.blockDetours} 回迂回しても進めません");
+
+                this.navigation.Stop();
+                this.moveIssued = false;
+                this.vnavmesh.TryReloadNavmesh(out _);
+
+                // 読み込みに少し時間がかかる。待ってから測り直す。
+                this.blockCheckedUtc = now + TimeSpan.FromSeconds(5);
+                this.blockCheckPosition = here;
+                this.blockDetours = 0;
+                return;
+            }
+
+            this.trace.Trouble("読み込み直しても進めない", $"{fate.Name} を諦めます");
             this.navigation.Stop();
             this.MarkStuck(fate.Id);
             this.target = null;
@@ -1141,9 +1169,23 @@ public sealed class FateRunner(
             $"{fate.Name} {BlockCheckInterval.TotalSeconds:F0}秒で {advanced:F1}m しか進めず " +
             $"（{this.blockDetours} 回目・半径 {radius:F0}m）");
 
+        // **避ける球は、進もうとしている先に置く。**
+        //
+        // いる場所を中心にすると、そこから出る経路まで避けてしまい、
+        // 「どこへも行けない」経路しか引けないことがある。
+        // ぶつかっているのは進行方向の先なので、そちらに置く。
+        var forward = Vector3.Normalize(new Vector3(
+            destination.X - here.X,
+            0f,
+            destination.Z - here.Z));
+
+        var avoidAt = float.IsNaN(forward.X)
+            ? here
+            : here + (forward * radius);
+
         // **経路探索は非同期。**その場では結果が出ない。
         // 頼んでおいて、出来たら積む。出来るまでは今の経路のまま進む。
-        if (this.vnavmesh.TryPathfindAvoid(here, destination, true, here, radius, out var task) &&
+        if (this.vnavmesh.TryPathfindAvoid(here, destination, true, avoidAt, radius, out var task) &&
             task is not null)
         {
             this.detourTask = task;
