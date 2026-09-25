@@ -98,11 +98,8 @@ public sealed class FateRunner(
     /// </summary>
     private const float MobReachMeters = 15f;
 
-    /// <summary>近接職が敵に近づく距離。Lua スクリプトの既定に合わせた。</summary>
-    private const float MeleeReachMeters = 2.5f;
-
-    /// <summary>遠隔職が敵に近づく距離。届く範囲の内側にしてある。</summary>
-    private const float RangedReachMeters = 20f;
+    /// <summary>戦闘中にプリセットが有効なままかを確かめる間隔。</summary>
+    private static readonly TimeSpan PresetCheckInterval = TimeSpan.FromSeconds(1);
 
     /// <summary>
     /// 敵が 1 匹も見えないとき、中心からこれ以上離れていたら寄る。
@@ -173,8 +170,11 @@ public sealed class FateRunner(
     /// <summary>敵へ近づいている最中か。戦闘に入ったら下ろす。</summary>
     private bool approaching;
 
-    /// <summary>BMR の AI を入れたか。入れたぶんは必ず戻す。</summary>
-    private bool aiEnabled;
+    /// <summary>vnavmesh で歩かせるためにプリセットの移動を止めているか。止めたぶんは必ず戻す。</summary>
+    private bool movementParked;
+
+    /// <summary>プリセットが有効かを最後に確かめた時刻。</summary>
+    private DateTime presetCheckedUtc = DateTime.MinValue;
 
     /// <summary>交換から戻ったときに向かう座標。設定で座標まで戻す場合だけ入る。</summary>
     private Vector3? resumePosition;
@@ -975,6 +975,8 @@ public sealed class FateRunner(
             this.SetStep(FateStep.Fighting, $"{current.Name} と戦っています");
         }
 
+        this.EnsurePresetActive(cfg);
+
         // 達成度が閾値を超えたら、次に向かう FATE を先に決めておく。
         // 100% を見てから探し始めると、その間その場に立ち尽くすことになる。
         if (this.prefetched is null && current.Progress >= cfg.FatePrefetchPct)
@@ -1014,8 +1016,7 @@ public sealed class FateRunner(
         {
             if (this.approaching)
             {
-                this.approaching = false;
-                this.navigation.Stop();
+                this.StopApproach();
                 this.trace.Decision("近づくのをやめた", "戦闘に入った");
             }
 
@@ -1044,8 +1045,7 @@ public sealed class FateRunner(
         {
             if (this.approaching)
             {
-                this.approaching = false;
-                this.navigation.Stop();
+                this.StopApproach();
             }
 
             return;
@@ -1070,6 +1070,8 @@ public sealed class FateRunner(
 
         if (!this.navigation.BeginMove(destination, MobReachMeters, false, out var failure))
         {
+            // 歩かせられないので、止めていたプリセットの移動を戻す。
+            this.ResumePresetMovement();
             this.trace.Trouble("近づけない", failure);
 
             // **歩いて行けないなら飛ぶ。**
@@ -1085,8 +1087,18 @@ public sealed class FateRunner(
             return;
         }
 
+        // 歩いている間はプリセットの移動を止める。止めないと vnavmesh と取り合う。
+        this.ParkPresetMovement();
         this.approaching = true;
         this.trace.Decision("敵へ近づく", why);
+    }
+
+    /// <summary>近づく移動をやめ、プリセットの移動を戻す。</summary>
+    private void StopApproach()
+    {
+        this.approaching = false;
+        this.navigation.Stop();
+        this.ResumePresetMovement();
     }
 
     private void LeaveFate(Config cfg, FateInfo finished)
@@ -1244,6 +1256,8 @@ public sealed class FateRunner(
     // （BossMod.SourceGen の RuntimeFullName）。
     private const string ModuleFateUtils = "BossMod.Autorotation.MiscAI.FateUtils";
     private const string ModuleAutoTarget = "BossMod.Autorotation.MiscAI.AutoTarget";
+    private const string ModuleNormalMovement = "BossMod.Autorotation.MiscAI.NormalMovement";
+    private const string TrackDestination = "Destination";
 
     // トラック名と選択肢名は enum の名前そのもの
     // （RotationModule.Define が expectedIndex.ToString() を InternalName にする）。
@@ -1265,6 +1279,27 @@ public sealed class FateRunner(
     /// 設定が空なら、こちらで用意したプリセット（<see cref="FateCombatPreset"/>）を使う。
     /// 利用者が名前を知らなくても、FATE の敵だけを狙い、
     /// 絡まれたら反撃する設定で動き出せる。
+    ///
+    /// <b>BMR の AI（/bmrai）は入れない。プリセットだけで戦わせる。</b>
+    ///
+    /// プリセットの中で、狙う（AutoTarget）・撃つ（ジョブのモジュール）・
+    /// 寄る（ジョブのモジュールが間合いを GoalZones に出し、NormalMovement が動く）・
+    /// シンクする（FateUtils）がすべて揃う。AutoFATEGrind も AI を使わずこの形で動く。
+    ///
+    /// AI を入れると、この仕組みが 3 か所で壊れる（BMR 7.5.6.19 で確認）。
+    /// <list type="number">
+    /// <item><c>/bmrai on</c> は最初に SwitchToIdle を通り、有効なプリセットを null にする
+    /// （AI/AIManager.cs SwitchToIdle）。直前に入れたプリセットが消える。</item>
+    /// <item>AI は毎回「ターゲットがあれば AI 用プリセット、無ければ null」で有効プリセットを
+    /// 上書きする（AI/AIBehaviour.cs）。AI 用プリセットは利用者の BMR 設定
+    /// （AIAutorotPresetName）で、既定は空。空だと技を撃つモジュールも
+    /// シンクする FateUtils も動かない。</item>
+    /// <item>AI が動いている間、NormalMovement は何もしない
+    /// （Autorotation/MiscAI/NormalMovement.cs 冒頭）。</item>
+    /// </list>
+    /// 「プリセットだけでは敵を追わない」と見えたのは、当時レベルシンクが入っていなかったため。
+    /// シンクしていないと BMR は FATE の敵を攻撃対象から外す
+    /// （Framework/Utils.cs IsPlayerSyncedToFate・BossModule/AIHintsBuilder.cs FillEnemies）。
     /// </summary>
     private void ApplyCombat(Config cfg)
     {
@@ -1277,6 +1312,13 @@ public sealed class FateRunner(
             ? FateCombatPreset.Name
             : cfg.FateCombatPreset;
 
+        // **プリセットを入れる前に AI を切る。**
+        //
+        // 以前の版が入れた AI や、利用者が自分で入れていた AI が残っていると、
+        // 上の 3 つの理由でプリセットが働かない。/bmrai off もプリセットを null にするので、
+        // 必ず SetActive より先に送る。
+        this.bossMod.TrySetAiEnabled(false);
+
         if (!this.bossMod.TrySetActivePreset(name, out var accepted) || !accepted)
         {
             this.anomalyLog.Warn("Fate", $"BossMod Reborn のプリセット「{name}」を有効にできませんでした");
@@ -1285,8 +1327,8 @@ public sealed class FateRunner(
 
         this.presetApplied = true;
         this.appliedPresetName = name;
+        this.presetCheckedUtc = DateTime.UtcNow;
         this.ApplyFateStrategies(cfg, name);
-        this.EnableAi();
 
         // 本当に有効になったかを確かめる。SetActive が true を返しても、
         // 別の機能があとから解除していることがある。
@@ -1297,84 +1339,80 @@ public sealed class FateRunner(
     }
 
     /// <summary>
-    /// BMR の AI を入れる。
+    /// 戦っている間、プリセットが有効なままかを見張る。外れていたら入れ直す。
     ///
-    /// <b>プリセットだけでは敵を追いかけない。</b>
-    /// プリセットは「何を撃つか」を決めるもので、「敵の方へ動く」のは
-    /// AI の仕事。別々の仕組みなので、両方を入れる必要がある。
-    ///
-    /// 長く使われてきた Lua スクリプト（pot0to / baanderson40 系）も
-    /// 同じように、プリセットの設定と /bmrai の両方を送っている。
+    /// <b>1 度入れたきりにしない。</b>
+    /// 利用者や別のプラグインが BMR の AI を入れる・プリセットを切り替えると、
+    /// こちらのプリセットは黙って外れ、技も移動もシンクも止まる。
+    /// AutoFATEGrind も戦闘中は毎回プリセットを確かめ直している。
     /// </summary>
-    private void EnableAi()
+    private void EnsurePresetActive(Config cfg)
     {
-        if (this.aiEnabled)
+        if (DateTime.UtcNow - this.presetCheckedUtc < PresetCheckInterval)
         {
             return;
         }
 
-        // 近接は的の懐まで、遠隔は届く距離まで。
-        // 遠隔を近づけすぎると、避ける余地が無くなる。
-        var melee = IsMeleeJob();
-        var distance = melee ? MeleeReachMeters : RangedReachMeters;
+        this.presetCheckedUtc = DateTime.UtcNow;
 
-        this.bossMod.TrySetAiEnabled(true);
-        this.bossMod.TrySetFollowTarget(true);
-        this.bossMod.TrySetFollowCombat(true);
-        this.bossMod.TrySetMaxDistanceToTarget(distance);
+        // 最初に入れられなかった（BMR の起動待ちなど）なら、ここで入れ直す。
+        if (!this.presetApplied)
+        {
+            this.ApplyCombat(cfg);
+            return;
+        }
 
-        // **騎乗中は AI に動かせない。**
-        //
-        // 既定では騎乗していても AI が動かそうとする。こちらは vnavmesh で
-        // 飛ばしているので、両方が動かそうとして取り合いになり飛べなくなる。
-        this.bossMod.TrySetIdleWhileMounted(true);
+        if (!this.bossMod.TryGetActivePreset(out var active)
+            || string.Equals(active, this.appliedPresetName, StringComparison.Ordinal))
+        {
+            return;
+        }
 
-        // 近接は戦闘が始まる前から詰めないと、いつまでも届かない。
-        this.bossMod.TrySetFollowOutOfCombat(melee);
+        this.trace.Trouble("プリセットが外れていた", $"期待={this.appliedPresetName} 実際={active ?? "なし"}。入れ直します");
 
-        this.aiEnabled = true;
-        this.trace.Decision("AI を入れた", $"{(melee ? "近接" : "遠隔")} 追う距離 {distance:0.#}m");
+        // 外した犯人が AI なら、切らないと次の瞬間にまた外される。
+        this.bossMod.TrySetAiEnabled(false);
+        this.bossMod.TrySetActivePreset(this.appliedPresetName, out _);
     }
 
     /// <summary>
-    /// BMR の AI を戻す。
+    /// vnavmesh で歩かせる間、プリセットの移動（NormalMovement）を止める。
     ///
-    /// <b>入れたぶんは必ず戻す。</b>戻さないと、周回を止めたあとも
-    /// 利用者の操作に割り込んで動き続ける。
+    /// <b>両方が同時に動かすと取り合いになる。</b>
+    /// プリセットは戦闘を続けたまま、移動だけを vnavmesh に明け渡す。
+    /// AutoFATEGrind の ParkBossModMovement と同じ作法。
     /// </summary>
-    private void DisableAi()
+    private void ParkPresetMovement()
     {
-        if (!this.aiEnabled)
+        if (!this.presetApplied || this.movementParked)
         {
             return;
         }
 
-        this.bossMod.TrySetFollowTarget(false);
-        this.bossMod.TrySetFollowCombat(false);
-        this.bossMod.TrySetFollowOutOfCombat(false);
-        this.bossMod.TrySetAiEnabled(false);
-
-        this.aiEnabled = false;
-        this.trace.Decision("AI を戻した", "周回を離れる");
+        if (this.bossMod.TryAddTransientStrategy(this.appliedPresetName, ModuleNormalMovement, TrackDestination, OptionNone, out var ok) && ok)
+        {
+            this.movementParked = true;
+        }
     }
 
-    /// <summary>近接で戦うジョブか。タンクもここに含める。</summary>
-    private static bool IsMeleeJob()
+    /// <summary>止めていたプリセットの移動を戻す。</summary>
+    private void ResumePresetMovement()
     {
-        try
+        if (!this.movementParked)
         {
-            var job = Player.Object?.ClassJob.RowId ?? 0;
-
-            // 剣術士 ナイト 斧術士 戦士 暗黒 ガンブレ
-            // 格闘士 モンク 槍術士 竜騎士 双剣士 忍者 侍 リーパー ヴァイパー
-            return job is 1 or 19 or 3 or 21 or 32 or 37
-                       or 2 or 20 or 4 or 22 or 29 or 30 or 34 or 39 or 41;
+            return;
         }
-        catch
+
+        this.movementParked = false;
+
+        if (!this.presetApplied)
         {
-            // 判断がつかないときは遠隔として扱う。
-            // 近接と誤ると、遠くから撃てるジョブが敵に張り付いて被弾する。
-            return false;
+            return;
+        }
+
+        if (!this.bossMod.TryClearTransientStrategy(this.appliedPresetName, ModuleNormalMovement, TrackDestination, out var ok) || !ok)
+        {
+            this.anomalyLog.Warn("Fate", "BossMod Reborn の移動を戻せませんでした（NormalMovement.Destination）");
         }
     }
 
@@ -1447,6 +1485,7 @@ public sealed class FateRunner(
 
         this.bossMod.TryClearActivePreset(out _);
 
+        // 一時方針はまとめて外す。移動を止めていた分（NormalMovement）もここで戻る。
         if (!string.IsNullOrEmpty(this.appliedPresetName))
         {
             this.bossMod.TryClearTransientPresetStrategies(this.appliedPresetName, out _);
@@ -1454,7 +1493,8 @@ public sealed class FateRunner(
 
         this.presetApplied = false;
         this.appliedPresetName = string.Empty;
-        this.DisableAi();
+        this.movementParked = false;
+        this.approaching = false;
     }
 
     /// <summary>ホームポイントへ戻る（戦闘不能からの復帰）。</summary>

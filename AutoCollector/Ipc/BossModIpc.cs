@@ -120,13 +120,13 @@ public sealed class BossModIpc(AnomalyLog anomalyLog) : IpcGateBase("BossModRebo
     /// <summary>
     /// AI そのものを有効・無効にする。
     ///
-    /// <b>プリセットだけでは敵を追いかけない。</b>
-    /// プリセットは「何を撃つか」を決めるもので、
-    /// 「敵の方へ動く」のは AI の仕事。別々の仕組みになっている。
+    /// <b>FATE 周回では AI を入れない（off を送るだけ）。</b>
+    /// AI は有効なプリセットを自分の「AI 用プリセット」で上書きし、
+    /// 動いている間はプリセットの移動（NormalMovement）を止める。
+    /// on/off どちらも最初に有効なプリセットを null にするので、
+    /// 送るならプリセットを入れる前に送ること（FateRunner.ApplyCombat を参照）。
     ///
     /// IPC には AI の ON/OFF が無いため、コマンドで送る。
-    /// 長く使われてきた Lua スクリプト（pot0to / baanderson40 系）も
-    /// 同じやり方をしている。
     /// </summary>
     public bool TrySetAiEnabled(bool enabled)
         => this.TryProcessCommand($"/bmrai {(enabled ? "on" : "off")}");
