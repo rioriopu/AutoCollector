@@ -1127,10 +1127,20 @@ public sealed class FateRunner(
             // 乗っていて、そのエリアで飛べるなら、飛ぶつもりで引く。
             var flying = MountService.IsMounted && MountService.CanFlyHere;
 
-            // **降りられる場所を先に決める。**
-            // FATE の中心は湖や谷の上にあることがある。そのまま目指すと
-            // 水面の上で降りられず、空中で止まったままになる。
-            var ground = this.ResolveLandablePoint(live);
+            // **敵が見えているなら、敵を目指す。**
+            //
+            // FATE の中心は、ただの円の中心であって敵が居る場所とは限らない。
+            // 中心の上空まで飛んでから真下へ降りると、降りるあいだ
+            // 空に浮いたままになり、不自然に見える。
+            //
+            // 敵が見えていれば、そこは必ず立てる場所で、しかも降りた先が
+            // そのまま戦う場所になる。FATE の敵は FateId で見分けられる。
+            var spotted = this.scanner.FindNearestMob(live.Id, Player.Available ? Player.Position : live.Position);
+            var aimedAtMob = spotted is not null;
+
+            var ground = spotted is { } mob
+                ? mob.Position
+                : this.ResolveLandablePoint(live);
 
             // 目的地を持ち上げる。これが離陸の条件（次の点が自分より高い）
             // を満たすことにもなり、経路が地面を擦るのも防ぐ。
@@ -1171,23 +1181,31 @@ public sealed class FateRunner(
                 $"{MountService.DescribeFlightStatus()} " +
                 $"目的地の高さ={destination.Y:F0}（本来{live.Position.Y:F0}） " +
                 $"自分の高さ={(Player.Available ? Player.Position.Y : 0):F0} " +
-                $"飛べる高さ={(MountService.KnownCeiling is { } c ? $"{c:F0}" : "未確認")}");
+                $"飛べる高さ={(MountService.KnownCeiling is { } c ? $"{c:F0}" : "未確認")} " +
+                $"狙い={(aimedAtMob ? "敵" : "中心")}");
 
             this.moveIssued = true;
             this.flyingWhenIssued = flying;
             this.moveStartedUtc = DateTime.UtcNow;
         }
 
-        // **中心の近くまで来てから降りる。**
+        // **敵の近くまで来たら降りる。**
         //
-        // 円に入った端で降りると、そこが低い場所だと高所の敵へ
-        // 近づけなくなる。高低差のあるマップで棒立ちになった
-        // （2026-09-25 実測）。中心付近なら、たいてい敵の居る高さに降りられる。
+        // 敵が見えていれば、そこを目安にする。降りた先がそのまま戦う場所になり、
+        // 降りてから走る距離も無くなる。
+        //
+        // 見えていなければ中心を目安にする。円に入った端で降りると、
+        // そこが低い場所だと高所の敵へ近づけなくなるため
+        // （2026-09-25 実測。高低差のあるマップで棒立ちになった）。
         if (this.flyingWhenIssued && Player.Available)
         {
+            var landAt = this.scanner.FindNearestMob(live.Id, Player.Position) is { } near
+                ? near.Position
+                : live.Position;
+
             var flat = Vector2.Distance(
                 new Vector2(Player.Position.X, Player.Position.Z),
-                new Vector2(live.Position.X, live.Position.Z));
+                new Vector2(landAt.X, landAt.Z));
 
             if (flat <= LandNearCentreMeters)
             {
