@@ -165,8 +165,13 @@ public sealed class FateRunner(
     private readonly AetheryteService aetherytes = aetherytes;
     private readonly VnavmeshIpc vnavmesh = vnavmesh;
 
-    /// <summary>FATE ごとに 1 度だけ求めた、降りられる座標。</summary>
-    private (ushort Id, Vector3 Point)? landable;
+    /// <summary>
+    /// FATE ごとに 1 度だけ求めた、降りられる座標。
+    ///
+    /// <b>エリアも一緒に覚える。</b>FATE の番号はマップをまたぐと使い回されるため、
+    /// 番号だけで覚えると、テレポした先で別マップの座標を使ってしまう。
+    /// </summary>
+    private (uint TerritoryId, ushort Id, Vector3 Point)? landable;
 
     /// <summary>このセッションで詰まった FATE。もう狙わない。</summary>
     private readonly HashSet<ushort> blacklist = [];
@@ -1248,41 +1253,62 @@ public sealed class FateRunner(
     /// </summary>
     private Vector3 ResolveLandablePoint(FateInfo fate)
     {
-        if (this.landable is { } cached && cached.Id == fate.Id)
+        var here = Svc.ClientState.TerritoryType;
+
+        if (this.landable is { } cached && cached.Id == fate.Id && cached.TerritoryId == here)
         {
             return cached.Point;
         }
 
-        var point = fate.Position;
+        // **メッシュが出来ていないうちは聞かない。**
+        //
+        // エリアを移った直後は読み込みが終わっておらず、vnavmesh 側は
+        // Query が null のまま何を聞いても null を返す
+        // （IPCProvider.cs の navmeshManager.Query?.～）。
+        // 誤った座標が返るわけではないが、補正できないまま
+        // 「中心でよい」と覚えてしまうと、読み込みが終わっても直らない。
+        // 覚えずに、次のフレームで聞き直す。
+        if (!this.vnavmesh.TryIsReady(out var ready) || !ready)
+        {
+            this.trace.State("メッシュ待ち", $"{fate.Name} の降りられる場所を、まだ求められません");
+            return fate.Position;
+        }
 
         // 横は FATE の半径ぶん、縦は広めに探す。
         // 中心が湖の上なら、岸はそれなりに離れている。
         // 縦を広く取るのは、谷底や高台でも拾えるようにするため。
         var halfExtentXZ = Math.Max(20f, fate.Radius);
 
-        if (this.vnavmesh.TryNearestPoint(fate.Position, halfExtentXZ, 100f, out var nearest) &&
-            nearest is { } found)
-        {
-            var moved = Vector3.Distance(found, fate.Position);
-            point = found;
+        // **辿り着ける点を優先する。**
+        // ただのメッシュ上の最近傍だと、湖の向こうの小島のように
+        // 「そこには行けない」点が返りうる。
+        var resolved =
+            (this.vnavmesh.TryNearestPointReachable(fate.Position, halfExtentXZ, 100f, out var reachable) && reachable is not null
+                ? reachable
+                : null)
+            ?? (this.vnavmesh.TryNearestPoint(fate.Position, halfExtentXZ, 100f, out var nearest) ? nearest : null);
 
-            // 大きく動いたときだけ残す。数メートルの補正はふつうのこと。
-            if (moved > 3f)
-            {
-                this.trace.Decision(
-                    "降りられる場所へ補正",
-                    $"{fate.Name} 中心({fate.Position.X:F0},{fate.Position.Y:F0},{fate.Position.Z:F0}) → " +
-                    $"({found.X:F0},{found.Y:F0},{found.Z:F0}) {moved:F0}m ずらした");
-            }
-        }
-        else
+        if (resolved is not { } found)
         {
-            // 聞けなかったら中心のまま向かう。行けないと決まったわけではない。
+            // 聞けなかった。中心のまま向かう。行けないと決まったわけではない。
+            // ここも覚えない。次に聞けば答えが返るかもしれない。
             this.trace.Trouble("降りられる場所が分からない", $"{fate.Name} は中心をそのまま目指します");
+            return fate.Position;
         }
 
-        this.landable = (fate.Id, point);
-        return point;
+        var moved = Vector3.Distance(found, fate.Position);
+
+        // 大きく動いたときだけ残す。数メートルの補正はふつうのこと。
+        if (moved > 3f)
+        {
+            this.trace.Decision(
+                "降りられる場所へ補正",
+                $"{fate.Name} 中心({fate.Position.X:F0},{fate.Position.Y:F0},{fate.Position.Z:F0}) → " +
+                $"({found.X:F0},{found.Y:F0},{found.Z:F0}) {moved:F0}m ずらした");
+        }
+
+        this.landable = (here, fate.Id, found);
+        return found;
     }
 
     /// <summary>近づく移動をやめ、プリセットの移動を戻す。</summary>

@@ -56,6 +56,21 @@ public sealed class VnavmeshIpc(AnomalyLog anomalyLog) : IpcGateBase("vnavmesh",
             out nearest);
 
     /// <summary>
+    /// 指定座標に最も近い、<b>歩いて辿り着ける</b>ナビメッシュ上の点を返す。
+    ///
+    /// <see cref="TryNearestPoint"/> は allowUnreachable=true 相当で、
+    /// メッシュに載ってさえいれば湖の向こうの小島のような
+    /// 「そこまで行けない点」も返す（NavmeshQuery.cs の
+    /// FindNearestPointOnMesh は既定が allowUnreachable=true）。
+    /// 降りる場所を決めるときは、辿り着けることまで確かめたいのでこちらを使う。
+    /// </summary>
+    public bool TryNearestPointReachable(Vector3 position, float halfExtentXZ, float halfExtentY, out Vector3? nearest)
+        => this.TryInvoke(
+            "Query.Mesh.NearestPointReachable",
+            () => this.Func<Vector3, float, float, Vector3?>("vnavmesh.Query.Mesh.NearestPointReachable").InvokeFunc(position, halfExtentXZ, halfExtentY),
+            out nearest);
+
+    /// <summary>
     /// 指定座標の真下にある床の座標を返す。
     ///
     /// 配置ファイル由来の NPC 座標はナビメッシュ上に乗っていないことがあり、
