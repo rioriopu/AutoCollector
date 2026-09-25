@@ -443,7 +443,7 @@ public sealed class Plugin : IDalamudPlugin
 
         // 通貨の一覧は、交換に使えるものだけに絞る。先に交換の一覧が要る。
         this.CurrencyCatalog = new CurrencyCatalog(
-            this.TomestoneService, this.SpecialCurrencyMap, this.InclusionShopCatalog);
+            this.TomestoneService, this.SpecialCurrencyMap, this.InclusionShopCatalog, this.AnomalyLog);
         this.CollectableDelivery = new CollectableDeliveryRunner(
             this.AnomalyLog,
             this.CollectablesShopService,

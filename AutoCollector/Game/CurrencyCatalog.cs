@@ -25,11 +25,21 @@ public sealed record CurrencyChoice(uint TomestonesRowId, uint ItemId, string Na
 public sealed class CurrencyCatalog(
     TomestoneService tomestones,
     SpecialCurrencyMap specials,
-    InclusionShopCatalog inclusionShops)
+    InclusionShopCatalog inclusionShops,
+    Diagnostics.AnomalyLog anomalyLog)
 {
     private readonly TomestoneService tomestones = tomestones;
     private readonly SpecialCurrencyMap specials = specials;
     private readonly InclusionShopCatalog inclusionShops = inclusionShops;
+    private readonly Diagnostics.AnomalyLog anomalyLog = anomalyLog;
+
+    /// <summary>
+    /// 一覧の中身を記録したときの顔ぶれ。変わったときだけ書く。
+    ///
+    /// 画面は毎フレーム描かれるので、無条件に書くと記録が埋まる。
+    /// 「何件になったか」が変わった瞬間だけ残す。
+    /// </summary>
+    private string lastLogged = string.Empty;
 
     /// <summary>プリセットが監視する通貨の ItemId を求める。</summary>
     public bool TryResolve(ExchangePreset preset, out uint itemId)
@@ -76,6 +86,22 @@ public sealed class CurrencyCatalog(
             }
 
             list.Add(new CurrencyChoice(0, itemId, name, "スクリップ"));
+        }
+
+        // **何が並んだかを必ず残す。**
+        // 「1 件しか選べない」という報告を、推測ではなく記録で追えるようにする。
+        // 中身が変わったときだけ書くので、出続けて邪魔になることはない。
+        var summary =
+            $"通貨の一覧: トームストーン {list.Count(x => x.TomestonesRowId != 0 || x.Group == "アラガントームストーン")} 件 / " +
+            $"スクリップ {list.Count(x => x.Group == "スクリップ")} 件 " +
+            $"（交換に使える通貨 {usable.Count} 件 / 特殊通貨の表 {this.specials.Entries.Count} 件 " +
+            $"クライアント由来={this.specials.ResolvedFromClient}）" +
+            $" [{string.Join(", ", list.Select(x => x.Name))}]";
+
+        if (summary != this.lastLogged)
+        {
+            this.lastLogged = summary;
+            this.anomalyLog.Info("Currency", summary);
         }
 
         return list;
