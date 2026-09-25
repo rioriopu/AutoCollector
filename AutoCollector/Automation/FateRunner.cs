@@ -152,6 +152,9 @@ public sealed class FateRunner(
     /// <summary>抜け出す動きに与える時間。この間は測り直さない。</summary>
     private static readonly TimeSpan EscapeSettleTime = TimeSpan.FromSeconds(4);
 
+    /// <summary>手動の脱出を「もう一度押した」とみなす間隔。</summary>
+    private static readonly TimeSpan EscapeNowRetryWindow = TimeSpan.FromSeconds(30);
+
     /// <summary>見張りが「動いた」と認める距離。</summary>
     private const float WatchdogProgressMeters = 3f;
 
@@ -224,6 +227,10 @@ public sealed class FateRunner(
 
     /// <summary>この移動で、詰まりから抜け出そうとした回数。</summary>
     private int escapeAttempts;
+
+    /// <summary>手動の脱出を最後に押した時刻と場所。二度目は帰還に切り替える。</summary>
+    private DateTime lastEscapeNowUtc = DateTime.MinValue;
+    private Vector3 lastEscapeNowFrom;
 
     /// <summary>動けていない状態がいつから続いているか。段階をまたいで見張る。</summary>
     private DateTime watchdogSince = DateTime.MinValue;
@@ -494,19 +501,35 @@ public sealed class FateRunner(
             }
         }
 
-        if (found is { } spot)
+        // **2 回目は帰還する。**
+        //
+        // 1 回押して動かなかったのなら、動かして出せる場所ではない。
+        // 同じことを繰り返しても結果は同じなので、座標ごと外へ出す。
+        var repeated = DateTime.UtcNow - this.lastEscapeNowUtc < EscapeNowRetryWindow
+                    && Vector3.Distance(here, this.lastEscapeNowFrom) < 5f;
+
+        this.lastEscapeNowUtc = DateTime.UtcNow;
+        this.lastEscapeNowFrom = here;
+
+        if (found is { } spot && !repeated)
         {
             this.anomalyLog.Info(
                 "Fate",
                 $"({here.X:F0},{here.Y:F0},{here.Z:F0}) から " +
-                $"({spot.X:F0},{spot.Y:F0},{spot.Z:F0}) へ脱出します");
+                $"({spot.X:F0},{spot.Y:F0},{spot.Z:F0}) へ脱出します。" +
+                "動かなければ、もう一度押すと帰還します");
 
             this.vnavmesh.TryMoveAlong([spot], true);
             return;
         }
 
-        // 立てる場所すら見つからない。帰還で外へ出す。
-        this.anomalyLog.Warn("Fate", "立てる場所が見つからないため、帰還して脱出します");
+        // 動かして出せない。帰還で外へ出す。
+        this.anomalyLog.Warn(
+            "Fate",
+            repeated
+                ? "動かして出られないため、帰還して脱出します"
+                : "立てる場所が見つからないため、帰還して脱出します");
+
         ReturnHome();
     }
 
