@@ -143,6 +143,20 @@ public sealed class FateRunner(
     /// <summary>詰まったときに避ける球の半径。迂回するたびに広げる。</summary>
     private const float DetourRadiusMeters = 15f;
 
+    /// <summary>
+    /// 狭い通路で経路をなぞらせるときの許容値。
+    ///
+    /// vnavmesh の既定は 0.25。これだけ経路から外れてよいため、
+    /// 曲がり角を端折って壁に寄る。詰まったときはここまで詰める。
+    /// </summary>
+    private const float TightPathTolerance = 0.05f;
+
+    /// <summary>vnavmesh の既定の許容値。詰めたあとはここへ戻す。</summary>
+    private const float DefaultPathTolerance = 0.25f;
+
+    /// <summary>辿り着けなかった FATE を見送る長さ。過ぎたらもう一度試す。</summary>
+    private static readonly TimeSpan BlacklistDuration = TimeSpan.FromMinutes(5);
+
     /// <summary>1 つの移動で迂回を試す上限。これを超えたら力づくで離れる。</summary>
     private const int MaxDetours = 2;
 
@@ -228,6 +242,9 @@ public sealed class FateRunner(
     /// <summary>この移動で、詰まりから抜け出そうとした回数。</summary>
     private int escapeAttempts;
 
+    /// <summary>この移動で、経路追従の許容値を詰めたか。戻すときに使う。</summary>
+    private bool tightenedPath;
+
     /// <summary>手動の脱出を最後に押した時刻と場所。二度目は帰還に切り替える。</summary>
     private DateTime lastEscapeNowUtc = DateTime.MinValue;
     private Vector3 lastEscapeNowFrom;
@@ -241,6 +258,9 @@ public sealed class FateRunner(
 
     /// <summary>このセッションで詰まった FATE。もう狙わない。</summary>
     private readonly HashSet<ushort> blacklist = [];
+
+    /// <summary>見送りを解く時刻。入り組んだ地形でも、置いてから再挑戦する。</summary>
+    private readonly Dictionary<ushort, DateTime> blacklistUntil = [];
 
     /// <summary>FATE ごとの詰まり回数。</summary>
     private readonly Dictionary<ushort, int> stuckCounts = [];
@@ -371,6 +391,7 @@ public sealed class FateRunner(
         }
 
         this.blacklist.Clear();
+        this.blacklistUntil.Clear();
         this.stuckCounts.Clear();
         this.target = null;
         this.prefetched = null;
@@ -460,6 +481,23 @@ public sealed class FateRunner(
         // 狙っている FATE があればそれを、無ければ番号なしで脱出へ。
         this.EscapeStuckSpot(this.target, now, here);
         return true;
+    }
+
+    /// <summary>
+    /// 詰めていた経路追従の許容値を、vnavmesh の既定へ戻す。
+    ///
+    /// <b>詰めたままにしない。</b>この設定は vnavmesh 全体のもので、
+    /// 他のプラグインの移動にも効いてしまう。
+    /// </summary>
+    private void RestorePathTolerance()
+    {
+        if (!this.tightenedPath)
+        {
+            return;
+        }
+
+        this.tightenedPath = false;
+        this.vnavmesh.TrySetPathTolerance(DefaultPathTolerance);
     }
 
     /// <summary>
@@ -562,6 +600,7 @@ public sealed class FateRunner(
         this.blockDetours = 0;
         this.moveIssued = false;
         this.watchdogSince = DateTime.MinValue;
+        this.RestorePathTolerance();
 
         if (this.Step is FateStep.Idle or FateStep.Done)
         {
@@ -691,6 +730,9 @@ public sealed class FateRunner(
         // 飛んでいるあいだ、届いた高さを覚える。
         // そのマップで飛べる高さの上限を知る手段が他に無い。
         MountService.ObserveCeiling();
+
+        // 見送りの期限が切れた FATE を戻す。
+        this.ExpireBlacklist();
 
         // 1. 自動操作が成立しない状況では何もしない。
         //    戦闘・詠唱・動作中は FATE 周回では正常なので弾かれない。
@@ -1004,6 +1046,7 @@ public sealed class FateRunner(
         this.detourTask = null;
         this.escapeAttempts = 0;
         this.watchdogSince = DateTime.MinValue;
+        this.RestorePathTolerance();
 
         // **離れた FATE の印は、ここで消さない。**
         //
@@ -1150,9 +1193,20 @@ public sealed class FateRunner(
                 ? MountService.LiftForFlight(ground)
                 : ground;
 
-            // 飛ぶときは中心付近を目指す。端で止まると、そこが低い場所だと
-            // 高所の敵へ近づけなくなる。
-            var moveRange = flying ? LandNearCentreMeters : range;
+            // **経路は最後まで辿らせる。**
+            //
+            // ここで渡す range は、vnavmesh では DestinationTolerance になる
+            // （AsyncMoveRequest.MoveTo → FollowPath）。これが 0 より大きいと、
+            // 目的地からその距離まで近づいた時点で<b>残りの経路点を全部捨てる</b>
+            // （FollowPath.cs:73）。
+            //
+            // 以前は飛行時に 15m を渡していた。そのため入り組んだ地形では、
+            // せっかく引けた「通路を抜ける経路」の最後の部分が捨てられ、
+            // 手前で止まって空に浮いたままになっていた。
+            //
+            // 狭い通路でも、経路を最後まで辿れば抜けられる。
+            // 着いたかどうかはこちらで測っているので、ここでは切り上げない。
+            var moveRange = flying ? 0f : range;
 
             if (!this.navigation.BeginMove(destination, moveRange, flying, out var failure))
             {
@@ -1362,6 +1416,23 @@ public sealed class FateRunner(
         }
 
         this.blockDetours++;
+
+        // **まず経路をなぞらせてみる。**
+        //
+        // vnavmesh は経路から Tolerance（既定 0.25）まで外れてよい作りで、
+        // 曲がり角を端折って進む。狭い通路ではそれが壁への接触になる。
+        // 引っかかったら、まず許容値を詰めて経路をなぞらせる。
+        // 通路そのものは通れるので、なぞれば抜けられることが多い。
+        if (this.blockDetours == 1 && !this.tightenedPath)
+        {
+            this.tightenedPath = true;
+            this.vnavmesh.TrySetPathTolerance(TightPathTolerance);
+            this.trace.Decision("経路をなぞらせる", $"許容値を {TightPathTolerance:0.00} に詰めました");
+
+            this.blockCheckedUtc = now;
+            this.blockCheckPosition = here;
+            return;
+        }
 
         // いる場所を中心に、その周りを避けて引き直す。
         // 半径は詰まりを抜け出せる程度に取る。大きすぎると経路が見つからない。
@@ -2072,6 +2143,39 @@ public sealed class FateRunner(
             FateScanner.DefaultSortOrder);
     }
 
+    /// <summary>見送りの期限が切れた FATE を、また狙えるようにする。</summary>
+    private void ExpireBlacklist()
+    {
+        if (this.blacklistUntil.Count == 0)
+        {
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+        List<ushort>? done = null;
+
+        foreach (var (id, until) in this.blacklistUntil)
+        {
+            if (now >= until)
+            {
+                (done ??= []).Add(id);
+            }
+        }
+
+        if (done is null)
+        {
+            return;
+        }
+
+        foreach (var id in done)
+        {
+            this.blacklistUntil.Remove(id);
+            this.blacklist.Remove(id);
+            this.stuckCounts.Remove(id);
+            this.anomalyLog.Info("Fate", $"FATE {id} の見送りを解きました。もう一度狙います");
+        }
+    }
+
     private void MarkStuck(ushort fateId)
     {
         // **諦めるなら、いま走っている経路も止める。**
@@ -2090,8 +2194,21 @@ public sealed class FateRunner(
 
         if (count >= MaxStuckPerFate)
         {
+            // **見送るのは一時的にする。**
+            //
+            // 入り組んだ地形の FATE でも、通路さえ辿れば行ける。
+            // 辿り着けなかったのは、こちらの経路の追い方が悪かっただけの
+            // ことが多い。周回のあいだずっと除け続けると、
+            // そのマップで稼げる FATE が減っていく。
+            //
+            // 少し置いてから、もう一度試す。
             this.blacklist.Add(fateId);
-            this.anomalyLog.Warn("Fate", $"FATE {fateId} は {count} 回続けて辿り着けなかったため、今回の周回では狙いません");
+            this.blacklistUntil[fateId] = DateTime.UtcNow + BlacklistDuration;
+
+            this.anomalyLog.Warn(
+                "Fate",
+                $"FATE {fateId} は {count} 回続けて辿り着けなかったため、" +
+                $"{BlacklistDuration.TotalMinutes:F0} 分ほど見送ります");
         }
     }
 
@@ -2129,6 +2246,7 @@ public sealed class FateRunner(
 
         // マップを移るので、そのマップ固有の記録は捨てる。
         this.blacklist.Clear();
+        this.blacklistUntil.Clear();
         this.stuckCounts.Clear();
         this.target = null;
         this.prefetched = null;

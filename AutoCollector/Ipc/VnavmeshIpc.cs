@@ -142,6 +142,19 @@ public sealed class VnavmeshIpc(AnomalyLog anomalyLog) : IpcGateBase("vnavmesh",
     public bool TryRebuildNavmesh(out bool accepted)
         => this.TryInvoke("Nav.Rebuild", () => this.Func<bool>("vnavmesh.Nav.Rebuild").InvokeFunc(), out accepted);
 
+    /// <summary>
+    /// 経路からどれだけ外れてよいかを決める。
+    ///
+    /// vnavmesh の既定は 0.25。大きいほど経路を端折って進むため、
+    /// 狭い通路では壁に寄って引っかかる。小さくすると経路をなぞる。
+    /// </summary>
+    public bool TrySetPathTolerance(float meters)
+        => this.TryAction("Path.SetTolerance", () => this.Func<float, object>("vnavmesh.Path.SetTolerance").InvokeAction(meters));
+
+    /// <summary>いまの経路追従の許容値。</summary>
+    public bool TryGetPathTolerance(out float meters)
+        => this.TryInvoke("Path.GetTolerance", () => this.Func<float>("vnavmesh.Path.GetTolerance").InvokeFunc(), out meters);
+
     /// <summary>移動を停止する。</summary>
     public bool TryStop()
         => this.TryAction("Path.Stop", () => this.Func<object>("vnavmesh.Path.Stop").InvokeAction());
