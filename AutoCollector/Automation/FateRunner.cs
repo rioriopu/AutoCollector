@@ -33,6 +33,16 @@ public enum FateStep
     /// <summary>達成度 100% を見た。次の FATE へ向かい始めている。</summary>
     Leaving,
 
+    /// <summary>
+    /// FATE に着いた。マウントから降りている。
+    ///
+    /// <b>この間は vnavmesh に一切触らない。</b>
+    /// 空中からの降下はゲーム側が行うもので、その動きが
+    /// プレイヤーの操作として vnavmesh に読まれる。経路を積んでも
+    /// その場で捨てられ、積んでは捨てるを繰り返して暴れる。
+    /// </summary>
+    Landing,
+
     /// <summary>戦闘不能。設定に従って待つか戻る。</summary>
     Dead,
 
@@ -83,6 +93,9 @@ public sealed class FateRunner(
     /// <summary>テレポートが終わるのを待つ上限。</summary>
     private static readonly TimeSpan TeleportTimeout = TimeSpan.FromSeconds(60);
 
+    /// <summary>降りるのを待つ上限。空からの降下は数秒かかる。</summary>
+    private static readonly TimeSpan LandingTimeout = TimeSpan.FromSeconds(30);
+
     /// <summary>納品 FATE の報酬が着地するまでの猶予。1 分 + 余裕。</summary>
     private static readonly TimeSpan CollectRewardWindow = TimeSpan.FromSeconds(90);
 
@@ -115,6 +128,9 @@ public sealed class FateRunner(
     private DateTime teleportStartedUtc = DateTime.MinValue;
     private DateTime waitingSinceUtc = DateTime.MinValue;
     private DateTime deadSinceUtc = DateTime.MinValue;
+
+    /// <summary>降り始めた時刻。降りられないまま続くのを打ち切るのに使う。</summary>
+    private DateTime landingSinceUtc = DateTime.MinValue;
     private uint travelTargetTerritory;
     private int zoneIndex;
     /// <summary>いまの目的地へ経路を引いたか。乗ってから引くので旗で覚える。</summary>
@@ -226,6 +242,10 @@ public sealed class FateRunner(
 
         this.navigation.Stop();
 
+        // 降下の途中で止められることがある。そのままだと降下が続き、
+        // 次に誰かが経路を積んだときに捨てさせてしまう。
+        this.mount.ClearDismounting();
+
         this.StoppedReason = reason;
         this.target = null;
         this.prefetched = null;
@@ -244,7 +264,11 @@ public sealed class FateRunner(
     public bool IsUsable => this.bossMod.IsLoaded && this.navigation.IsAvailable;
 
     /// <summary>いま FATE の中で戦っているか。中断してよい切れ目かの判断に使う。</summary>
-    public bool IsInFate => this.Step is FateStep.Fighting or FateStep.Leaving;
+    /// <remarks>
+    /// 着地の途中も含める。空中で中断されると、降りきらないまま
+    /// 放り出されて空に取り残される。
+    /// </remarks>
+    public bool IsInFate => this.Step is FateStep.Fighting or FateStep.Leaving or FateStep.Landing;
 
     /// <summary>
     /// 納品 FATE の報酬を待っているか。
@@ -416,6 +440,15 @@ public sealed class FateRunner(
                     return;
                 }
             }
+        }
+
+        // **降りている最中はここで完結させる。**
+        // この下には vnavmesh を触る処理がある。降下中に触ると、
+        // ゲームの降下がプレイヤーの操作として読まれ、経路が捨てられる。
+        if (this.Step == FateStep.Landing)
+        {
+            this.TickLanding(cfg);
+            return;
         }
 
         // 5. いま参加している FATE があるか。
@@ -712,27 +745,71 @@ public sealed class FateRunner(
         }
     }
 
+    /// <summary>
+    /// FATE に着いた。降りる段階へ移る。
+    ///
+    /// <b>ここで経路を止め、以後 vnavmesh に触らない。</b>
+    /// 降下はゲーム側の動きで、それがプレイヤーの操作として
+    /// vnavmesh に読まれる。触り続けると経路を積んでは捨てるを
+    /// 繰り返し、着地したあとも暴れて降りられない。
+    /// </summary>
     private void EnterFate(Config cfg, FateInfo fate)
     {
         this.navigation.Stop();
         this.moveIssued = false;
-
-        // 乗ったままでは戦えない。降りるまでは戦闘を始めない。
-        // 空の上にいる場合、降りると落下するぶんの時間もここで吸収される。
-        //
-        // 段階は MovingToFate のままにする。TickMoving は着いていれば
-        // 乗る判断をしないので、降りて乗ってを繰り返すことはない。
         this.target = fate;
 
-        if (this.mount.TickDismount())
+        // 乗っていなければ降りる必要がない。そのまま戦う。
+        if (!MountService.IsMounted)
         {
-            this.StatusDetail = $"{fate.Name} に着きました（降りています）";
+            this.ApplyCombat(cfg);
+            this.SetStep(FateStep.Fighting, $"{fate.Name} と戦っています");
             return;
         }
 
-        this.ApplyCombat(cfg);
-        this.target = fate;
-        this.SetStep(FateStep.Fighting, $"{fate.Name} と戦っています");
+        this.landingSinceUtc = DateTime.UtcNow;
+        this.SetStep(FateStep.Landing, $"{fate.Name} に着きました（降りています）");
+    }
+
+    /// <summary>
+    /// 降りきるのを待つ。
+    ///
+    /// <b>vnavmesh を呼ばない。</b>降下中に経路を積むと、ゲームの降下が
+    /// プレイヤーの操作として読まれ、積んだ経路がその場で捨てられる。
+    /// これを繰り返すのが「暴れる」正体だった（2026-09-25 実測）。
+    /// </summary>
+    private void TickLanding(Config cfg)
+    {
+        if (this.target is not { } fate)
+        {
+            this.SetStep(FateStep.Waiting, "FATE を探しています");
+            this.waitingSinceUtc = DateTime.UtcNow;
+            return;
+        }
+
+        // 降りられた。戦いに入る。
+        if (!MountService.IsMounted)
+        {
+            this.mount.ClearDismounting();
+            this.ApplyCombat(cfg);
+            this.SetStep(FateStep.Fighting, $"{fate.Name} と戦っています");
+            return;
+        }
+
+        // 降りられないまま時間が過ぎた。
+        if (DateTime.UtcNow - this.landingSinceUtc > LandingTimeout)
+        {
+            this.trace.Trouble("着地できない", $"{LandingTimeout.TotalSeconds:F0}秒たっても降りられませんでした");
+            this.mount.ClearDismounting();
+            this.MarkStuck(fate.Id);
+            this.target = null;
+            this.SetStep(FateStep.Waiting, "FATE を探しています");
+            this.waitingSinceUtc = DateTime.UtcNow;
+            return;
+        }
+
+        this.mount.TickDismount();
+        this.trace.State("着地", $"{fate.Name} {FateTrace.DescribeDistance(fate.Position)}");
     }
 
     private void TickInFate(Config cfg, FateInfo current)

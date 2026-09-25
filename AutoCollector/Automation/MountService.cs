@@ -262,8 +262,42 @@ public sealed unsafe class MountService(AnomalyLog anomalyLog, FateTrace trace)
     ///
     /// 目的地が変わって、また飛んで向かうときに呼ぶ。
     /// これを呼ばないと二度と離陸しない。
+    ///
+    /// <b>降下が続いていれば止める。</b>
+    /// ゲーム側の降下は、こちらが操作をやめても続く。そしてその動きが
+    /// プレイヤーの操作として vnavmesh に読まれ、次に積んだ経路を
+    /// その場で捨てさせる。空中でジャンプを撃つと降下が終わる。
     /// </summary>
-    public void ClearDismounting() => this.dismounting = false;
+    public void ClearDismounting()
+    {
+        this.dismounting = false;
+        this.CancelDescent();
+    }
+
+    /// <summary>
+    /// 進行中の降下を止める。
+    ///
+    /// 空中でジャンプを撃つと、ゲーム自身の降下が終わる。
+    /// これをやらないと降下が続き、vnavmesh がそれを操作と見て
+    /// 経路を捨て続ける。AutoFATEGrind の Landing.cs にある実測。
+    /// </summary>
+    public void CancelDescent()
+    {
+        if (!IsFlying)
+        {
+            return;
+        }
+
+        try
+        {
+            ActionManager.Instance()->UseAction(ActionType.GeneralAction, JumpAction);
+            this.trace.Decision("降下を止める", "経路を捨てさせないため");
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Warn("Mount", $"降下を止められませんでした: {ex.Message}");
+        }
+    }
 
     private bool TryMount()
     {
