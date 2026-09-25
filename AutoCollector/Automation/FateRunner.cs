@@ -66,6 +66,7 @@ public sealed class FateRunner(
     NavigationService navigation,
     BossModIpc bossMod,
     BuddyService buddy,
+    MountService mount,
     LifestreamIpc lifestream,
     AetheryteService aetherytes)
 {
@@ -89,6 +90,7 @@ public sealed class FateRunner(
     private readonly NavigationService navigation = navigation;
     private readonly BossModIpc bossMod = bossMod;
     private readonly BuddyService buddy = buddy;
+    private readonly MountService mount = mount;
     private readonly LifestreamIpc lifestream = lifestream;
     private readonly AetheryteService aetherytes = aetherytes;
 
@@ -113,6 +115,9 @@ public sealed class FateRunner(
     private DateTime deadSinceUtc = DateTime.MinValue;
     private uint travelTargetTerritory;
     private int zoneIndex;
+    /// <summary>いまの目的地へ経路を引いたか。乗ってから引くので旗で覚える。</summary>
+    private bool moveIssued;
+
     /// <summary>交換から戻ったときに向かう座標。設定で座標まで戻す場合だけ入る。</summary>
     private Vector3? resumePosition;
 
@@ -550,21 +555,18 @@ public sealed class FateRunner(
         this.AdvanceZone(cfg);
     }
 
+    /// <summary>
+    /// FATE へ向かい始める。
+    ///
+    /// <b>移動そのものは次のフレーム以降に始める。</b>
+    /// 先にマウントへ乗る必要があり、乗るには数フレームかかる。
+    /// ここで経路を引いてしまうと、乗る前に走り出してしまう。
+    /// </summary>
     private void BeginMoveTo(FateInfo fate)
     {
         this.target = fate;
         this.moveStartedUtc = DateTime.UtcNow;
-
-        var range = Math.Max(1f, fate.Radius - FateArrivalSlack);
-
-        if (!this.navigation.BeginMove(fate.Position, range, out var failure))
-        {
-            this.anomalyLog.Warn("Fate", $"{fate.Name} へ移動できませんでした: {failure}");
-            this.MarkStuck(fate.Id);
-            this.target = null;
-            return;
-        }
-
+        this.moveIssued = false;
         this.SetStep(FateStep.MovingToFate, $"{fate.Name} へ向かっています");
     }
 
@@ -584,6 +586,40 @@ public sealed class FateRunner(
         }
 
         var range = Math.Max(1f, live.Radius - FateArrivalSlack);
+
+        // **着いていたら、乗る判断より先に降りる。**
+        //
+        // 先に乗る判断をすると、着いた直後に降りて、また乗って、を繰り返す。
+        // 距離で見るので、円の中に入っていれば乗らない。
+        var arrived = Player.Available
+                   && Vector3.Distance(Player.Position, live.Position) <= range + FateArrivalSlack;
+
+        if (!arrived)
+        {
+            // 先にマウントへ乗る。遠い FATE へ歩いて向かうと、着く前に終わる。
+            // 飛べるエリアなら飛び上がるところまで面倒を見る。
+            if (this.mount.TickPrepare(live.Position))
+            {
+                this.StatusDetail = $"{live.Name} へ向かう準備をしています";
+                return;
+            }
+        }
+
+        // 乗ったので経路を引く。飛べる状態なら飛ぶ経路になる。
+        if (!this.moveIssued)
+        {
+            if (!this.navigation.BeginMove(live.Position, range, MountService.IsFlying, out var failure))
+            {
+                this.anomalyLog.Warn("Fate", $"{live.Name} へ移動できませんでした: {failure}");
+                this.MarkStuck(live.Id);
+                this.target = null;
+                return;
+            }
+
+            this.moveIssued = true;
+            this.moveStartedUtc = DateTime.UtcNow;
+        }
+
         var status = this.navigation.Tick(live.Position, range);
 
         switch (status)
@@ -620,6 +656,21 @@ public sealed class FateRunner(
     private void EnterFate(Config cfg, FateInfo fate)
     {
         this.navigation.Stop();
+        this.moveIssued = false;
+
+        // 乗ったままでは戦えない。降りるまでは戦闘を始めない。
+        // 空の上にいる場合、降りると落下するぶんの時間もここで吸収される。
+        //
+        // 段階は MovingToFate のままにする。TickMoving は着いていれば
+        // 乗る判断をしないので、降りて乗ってを繰り返すことはない。
+        this.target = fate;
+
+        if (this.mount.TickDismount())
+        {
+            this.StatusDetail = $"{fate.Name} に着きました（降りています）";
+            return;
+        }
+
         this.ApplyCombat(cfg);
         this.target = fate;
         this.SetStep(FateStep.Fighting, $"{fate.Name} と戦っています");

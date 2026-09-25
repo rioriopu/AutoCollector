@@ -135,6 +135,8 @@ public sealed class Plugin : IDalamudPlugin
 
     internal BuddyService BuddyService { get; private set; } = null!;
 
+    internal MountService MountService { get; private set; } = null!;
+
     /// <summary>収集品の出どころ（製作か採集か）を数える。</summary>
     internal CollectableSourceService CollectableSource { get; private set; } = null!;
 
@@ -477,12 +479,14 @@ public sealed class Plugin : IDalamudPlugin
         this.FateZoneCatalog = new FateZoneCatalog(this.AnomalyLog);
         this.FateTokens = new FateTokenService(this.AnomalyLog);
         this.BuddyService = new BuddyService(this.AnomalyLog);
+        this.MountService = new MountService(this.AnomalyLog);
         this.FateRunner = new FateRunner(
             this.AnomalyLog,
             this.FateScanner,
             new NavigationService(this.AnomalyLog, this.Vnavmesh),
             this.BossMod,
             this.BuddyService,
+            this.MountService,
             this.Lifestream,
             this.AetheryteService);
         this.Fate = new FateEarner(this.FateRunner, this.FateTokens, this.AnomalyLog);

@@ -133,6 +133,20 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
 
     /// <summary>移動を開始する。1 回だけ発行し、以降は状態を監視するだけにする。</summary>
     public bool BeginMove(Vector3 destination, float range, out string failureReason)
+        => this.BeginMove(destination, range, false, out failureReason);
+
+    /// <summary>
+    /// 移動を開始する。飛ぶかどうかを指定できる。
+    ///
+    /// <b>飛ぶのは呼び出し側が決める。</b>
+    /// 交換や呼び鈴のように街なかの短い移動では飛ばない。
+    /// FATE のように数百メートル離れた目的地へ向かうときだけ飛ぶ。
+    ///
+    /// fly を true にしても、乗っていなければ vnavmesh は走って向かう。
+    /// マウントに乗せるのは <see cref="MountService"/> の役目で、
+    /// ここは「飛べる状態なら飛ぶ経路を引く」ことだけを頼む。
+    /// </summary>
+    public bool BeginMove(Vector3 destination, float range, bool fly, out string failureReason)
     {
         this.moveIssued = false;
         this.stableFrames = 0;
@@ -160,7 +174,7 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
             return false;
         }
 
-        if (!this.vnavmesh.TryMoveCloseTo(destination, false, range, out var accepted))
+        if (!this.vnavmesh.TryMoveCloseTo(destination, fly, range, out var accepted))
         {
             failureReason = "vnavmesh へ移動を依頼できませんでした";
             return false;
