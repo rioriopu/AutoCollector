@@ -317,8 +317,15 @@ public sealed class Config
     /// <summary>いまのマップに狙える FATE が無いとき、次のマップへ移るか。</summary>
     public bool FateSwapZoneWhenEmpty { get; set; } = true;
 
-    /// <summary>マップを移るまでに待つ秒数。すぐ湧くことがあるので少しだけ待つ。</summary>
-    public int FateZoneSwapWaitSeconds { get; set; } = 10;
+    /// <summary>
+    /// マップを移るまでに待つ秒数。
+    ///
+    /// <b>既定は 0＝待たない。</b>
+    /// FATE が無いと分かった時点で次のマップへ移るのが、いちばん多く回れる。
+    /// 湧くのを待つより、湧いているマップへ移るほうが速い。
+    /// その場に留まりたい場合だけ秒数を入れる。
+    /// </summary>
+    public int FateZoneSwapWaitSeconds { get; set; }
 
     /// <summary>残り時間がこれ未満の FATE は狙わない（秒）。着く前に終わるため。</summary>
     public int FateMinTimeRemainingSec { get; set; } = 120;

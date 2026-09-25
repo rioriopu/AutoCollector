@@ -218,9 +218,16 @@ public sealed class FateTab(Plugin plugin)
             ImGui.SetNextItemWidth(120);
             if (ImGui.InputInt("移るまでに待つ秒数", ref wait))
             {
-                cfg.FateZoneSwapWaitSeconds = Math.Clamp(wait, 5, 600);
+                // **下限は 0。**待たずに次のマップへ移れるようにする。
+                // 以前は 5 秒を下回れなかったため、FATE が無いマップで
+                // 必ず 5 秒以上立ち止まっていた。
+                cfg.FateZoneSwapWaitSeconds = Math.Clamp(wait, 0, 600);
                 EzConfig.Save();
             }
+
+            ImGui.TextColored(
+                ImGuiColors.DalamudGrey,
+                "  0 にすると、FATE が無いと分かった時点ですぐ次のマップへ移ります");
 
             ImGui.Unindent();
         }
