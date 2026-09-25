@@ -379,6 +379,61 @@ public sealed class FateRunner(
         return true;
     }
 
+    /// <summary>
+    /// いまの場所から脱出する。画面のボタンから呼ぶ。
+    ///
+    /// <b>周回していなくても使える。</b>
+    /// 止めた状態で入り組んだ場所に取り残されることがあるため、
+    /// 手元にも逃げ道を置いておく。
+    /// </summary>
+    public void EscapeNow()
+    {
+        this.navigation.Stop();
+        this.vnavmesh.TryStop();
+        this.moveIssued = false;
+
+        if (!Player.Available)
+        {
+            return;
+        }
+
+        var here = Player.Position;
+
+        // 立てる場所を探す。まず真下、次に周り。
+        Vector3? found = null;
+
+        if (this.vnavmesh.TryIsReady(out var ready) && ready)
+        {
+            if (this.vnavmesh.TryPointOnFloor(here, out var floor) && floor is not null)
+            {
+                found = floor;
+            }
+            else if (this.vnavmesh.TryNearestPointReachable(here, 60f, 200f, out var near) && near is not null)
+            {
+                found = near;
+            }
+            else if (this.vnavmesh.TryNearestPoint(here, 150f, 300f, out var any) && any is not null)
+            {
+                found = any;
+            }
+        }
+
+        if (found is { } spot)
+        {
+            this.anomalyLog.Info(
+                "Fate",
+                $"({here.X:F0},{here.Y:F0},{here.Z:F0}) から " +
+                $"({spot.X:F0},{spot.Y:F0},{spot.Z:F0}) へ脱出します");
+
+            this.vnavmesh.TryMoveAlong([spot], true);
+            return;
+        }
+
+        // 立てる場所すら見つからない。帰還で外へ出す。
+        this.anomalyLog.Warn("Fate", "立てる場所が見つからないため、帰還して脱出します");
+        ReturnHome();
+    }
+
     /// <summary>周回を止める。戦闘とプリセットを必ず元に戻す。</summary>
     public void Stop(string reason)
     {
@@ -1226,12 +1281,38 @@ public sealed class FateRunner(
     {
         this.escapeAttempts++;
 
+        // **最後は帰還する。**
+        //
+        // 動かして抜けられないなら、座標ごと外へ出すしかない。
+        // 帰還（ExecuteCommand 200/8）は経路も地形も高度も関係なく、
+        // どこに居ても必ずホームポイントへ運んでくれる。
+        // 入り組んだ地形に入り込んでしまったときの、確実な逃げ道。
+        //
+        // 手で助けてもらうことはしない。連れてきたのはこちらなので、
+        // こちらで出す。
         if (this.escapeAttempts > MaxEscapeAttempts)
         {
-            this.trace.Trouble("抜け出せない", $"{fate.Name} を諦めます（{this.escapeAttempts - 1} 回試行）");
+            this.trace.Trouble(
+                "動いて抜け出せない",
+                $"{MaxEscapeAttempts} 回試しても動けないため、帰還して脱出します");
+
             this.navigation.Stop();
+            this.vnavmesh.TryStop();
+            this.moveIssued = false;
             this.MarkStuck(fate.Id);
             this.target = null;
+
+            // 帰還は詠唱がある。終わるまで周回を進めない。
+            this.SetStep(FateStep.Traveling, "詰まったため帰還しています");
+            this.travelTargetTerritory = 0;
+            this.teleportIssued = true;
+            this.teleportStartedUtc = now;
+            this.escapeAttempts = 0;
+
+            ReturnHome();
+            this.anomalyLog.Warn(
+                "Fate",
+                "地形から抜け出せなかったため帰還しました。周回は続けます");
             return;
         }
 
@@ -1239,29 +1320,55 @@ public sealed class FateRunner(
         this.navigation.Stop();
         this.moveIssued = false;
 
-        // **上は当てにしない。**
+        // **逃げ先はメッシュに聞く。**
         //
-        // 飛行には高度の上限があり、そこに張り付いていると
-        // 上へ向かわせても 1m も上がらない（ゲームが
-        // 「高度上限付近です」と出す。2026-09-25 実測。Y=58 で頭打ち）。
+        // やみくもに動かすと、また壁の中へ突っ込むことがある。
+        // ナビメッシュに載っている点は、そこに立てることが保証されている。
+        // まず真下の床、次に周りの立てる場所を探し、見つかればそこへ。
         //
-        // 下と横へ逃がす。降りる先は目的地の高さを手がかりにする。
-        // 目的地が下にあるなら、下がれば地形を抜けられることが多い。
-        var angle = this.escapeAttempts * 2.39996f; // 黄金角。毎回ちがう向きになる
+        // 上は当てにしない。飛行には高度の上限があり、そこに張り付いていると
+        // 上へ向かわせても 1m も上がらない（2026-09-25 実測。Y=58 で頭打ち。
+        // ゲームが「高度上限付近です」と出していた）。
+        Vector3? found = null;
+
+        if (this.vnavmesh.TryIsReady(out var ready) && ready)
+        {
+            // 真下の床。入り組んだ地形でも、下は空いていることが多い。
+            if (this.vnavmesh.TryPointOnFloor(here, out var floor) && floor is not null)
+            {
+                found = floor;
+            }
+            else
+            {
+                // 探す範囲を、試行のたびに広げる。
+                var reach = 30f * this.escapeAttempts;
+
+                if (this.vnavmesh.TryNearestPointReachable(here, reach, 200f, out var near) && near is not null)
+                {
+                    found = near;
+                }
+                else if (this.vnavmesh.TryNearestPoint(here, reach * 2f, 200f, out var any) && any is not null)
+                {
+                    found = any;
+                }
+            }
+        }
+
+        // メッシュから答えが出なければ、下と横へ振る。
+        // 向きは黄金角でずらし、毎回ちがう方向へ出る。
+        var angle = this.escapeAttempts * 2.39996f;
         var spread = 15f * this.escapeAttempts;
 
-        // 1 回目は真下、以降は斜め下へ。回を追うごとに深く、広くする。
-        var drop = 15f * this.escapeAttempts;
-
-        var away = new Vector3(
+        var away = found ?? new Vector3(
             here.X + (MathF.Cos(angle) * spread),
-            here.Y - drop,
+            here.Y - (15f * this.escapeAttempts),
             here.Z + (MathF.Sin(angle) * spread));
 
         this.trace.Trouble(
             "詰まった場所から離れる",
             $"{fate.Name} ({here.X:F0},{here.Y:F0},{here.Z:F0}) → " +
-            $"({away.X:F0},{away.Y:F0},{away.Z:F0}) {this.escapeAttempts} 回目");
+            $"({away.X:F0},{away.Y:F0},{away.Z:F0}) {this.escapeAttempts} 回目 " +
+            $"{(found is null ? "（当て推量）" : "（メッシュ上の点）")}");
 
         // 経路探索を通さずに、その点へ直接向かわせる。
         this.vnavmesh.TryMoveAlong([away], true);

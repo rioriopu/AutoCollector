@@ -536,6 +536,27 @@ public sealed class FateTab(Plugin plugin)
                 "  FATE を探さない状態です。確認が済んだら外してください");
         }
 
+        ImGui.Spacing();
+
+        // **詰まったときの逃げ道を、手元にも置く。**
+        // 周回が止まっている間は自動の脱出が働かないため、
+        // 入り組んだ場所に取り残されたときに自力で戻れるようにする。
+        if (ImGui.Button("いまの場所から脱出する"))
+        {
+            this.plugin.FateRunner.EscapeNow();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(
+                "地形に挟まって動けなくなったときに押してください。\n"
+                + "\n"
+                + "まず移動を止め、立てる場所を探して飛びます。\n"
+                + "それでも動けなければ、帰還してホームポイントへ戻ります。\n"
+                + "\n"
+                + "周回中でなくても使えます。");
+        }
+
         ImGui.Unindent();
     }
 
