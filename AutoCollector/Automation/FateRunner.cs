@@ -123,8 +123,15 @@ public sealed class FateRunner(
     /// <summary>近づく経路を引き直す間隔。経路探索は重いので続けて投げない。</summary>
     private static readonly TimeSpan ApproachRepathInterval = TimeSpan.FromSeconds(1);
 
-    /// <summary>進んでいるかを見る間隔。</summary>
-    private static readonly TimeSpan BlockCheckInterval = TimeSpan.FromSeconds(3);
+    /// <summary>
+    /// 進んでいるかを見る間隔。
+    ///
+    /// <b>短くしすぎない。</b>遠い FATE への飛行経路は、探すのに時間がかかる。
+    /// 1000m 先だと十数秒かかることがあり、その間は当然 1m も進まない。
+    /// 3 秒で見ていたため、経路が出来る前に「詰まった」と判断して
+    /// 引き直しを繰り返し、いつまでも出発できなかった（2026-09-25 実測）。
+    /// </summary>
+    private static readonly TimeSpan BlockCheckInterval = TimeSpan.FromSeconds(20);
 
     /// <summary>この間隔でこれだけ進んでいなければ、詰まっているとみなす。</summary>
     private const float BlockProgressMeters = 5f;
@@ -194,6 +201,9 @@ public sealed class FateRunner(
 
     /// <summary>この移動で迂回を試した回数。</summary>
     private int blockDetours;
+
+    /// <summary>頼んである迂回の経路探索。出来るまで待つ。</summary>
+    private System.Threading.Tasks.Task<System.Collections.Generic.List<Vector3>>? detourTask;
 
     /// <summary>このセッションで詰まった FATE。もう狙わない。</summary>
     private readonly HashSet<ushort> blacklist = [];
@@ -780,6 +790,7 @@ public sealed class FateRunner(
         // 詰まり判定をやり直す。前の移動の記録を引き継がない。
         this.blockCheckedUtc = DateTime.MinValue;
         this.blockDetours = 0;
+        this.detourTask = null;
 
         // 向かう先が、さっき離れた FATE とは別なら、覚えていた印を消す。
         // 同じ番号の FATE が後から湧いたときに、入れなくなるのを防ぐ。
@@ -1032,8 +1043,52 @@ public sealed class FateRunner(
             return;
         }
 
+        // 頼んでおいた迂回の経路が出来ていたら、それを積む。
+        if (this.detourTask is { IsCompleted: true } done)
+        {
+            this.detourTask = null;
+
+            if (done.IsCompletedSuccessfully && done.Result is { Count: > 0 } points)
+            {
+                this.vnavmesh.TryMoveAlong(points, true);
+                this.trace.Decision("迂回の経路を積んだ", $"経路点 {points.Count} 個");
+
+                // 積み直したので、進み具合の基準も取り直す。
+                this.blockCheckedUtc = DateTime.UtcNow;
+                this.blockCheckPosition = Player.Position;
+                return;
+            }
+
+            this.trace.Trouble("迂回の経路が引けなかった", $"{fate.Name} へ普通に引き直します");
+            this.navigation.Stop();
+            this.moveIssued = false;
+            return;
+        }
+
+        // 頼んだ経路を待っている間は、二重に頼まない。
+        if (this.detourTask is not null)
+        {
+            return;
+        }
+
         var now = DateTime.UtcNow;
         var here = Player.Position;
+
+        // **経路を探している最中は、詰まったと判断しない。**
+        //
+        // 遠い FATE への飛行経路は探すのに時間がかかる。
+        // 1000m 先だと十数秒かかることがあり、その間は 1m も進まない。
+        // これを詰まりと見て引き直すと、探し直しの繰り返しになり、
+        // いつまでも出発できない（2026-09-25 実測。2 分間その場に留まった）。
+        if ((this.vnavmesh.TryNavPathfindInProgress(out var finding) && finding) ||
+            (this.vnavmesh.TrySimpleMovePathfindInProgress(out var simple) && simple))
+        {
+            // 基準を取り直す。探し終えてから測り始める。
+            this.blockCheckedUtc = now;
+            this.blockCheckPosition = here;
+            this.trace.State("経路を探している", $"{fate.Name} まで {FateTrace.DescribeDistance(destination)}");
+            return;
+        }
 
         // 初めて見るときは基準を置くだけ。
         if (this.blockCheckedUtc == DateTime.MinValue)
@@ -1080,16 +1135,18 @@ public sealed class FateRunner(
             $"{fate.Name} {BlockCheckInterval.TotalSeconds:F0}秒で {advanced:F1}m しか進めず " +
             $"（{this.blockDetours} 回目・半径 {radius:F0}m）");
 
-        if (this.vnavmesh.TryPathfindAvoid(here, destination, true, here, radius, out var waypoints) &&
-            waypoints is { Count: > 0 })
+        // **経路探索は非同期。**その場では結果が出ない。
+        // 頼んでおいて、出来たら積む。出来るまでは今の経路のまま進む。
+        if (this.vnavmesh.TryPathfindAvoid(here, destination, true, here, radius, out var task) &&
+            task is not null)
         {
-            this.vnavmesh.TryMoveAlong(waypoints, true);
-            this.trace.Decision("迂回の経路を積んだ", $"経路点 {waypoints.Count} 個");
+            this.detourTask = task;
+            this.trace.Decision("迂回の経路を頼んだ", $"半径 {radius:F0}m");
             return;
         }
 
-        // 避けた経路が見つからない。いったん止めて引き直させる。
-        this.trace.Trouble("迂回の経路が引けない", $"{fate.Name} へ普通に引き直します");
+        // 頼めなかった。いったん止めて普通に引き直させる。
+        this.trace.Trouble("迂回の経路が頼めない", $"{fate.Name} へ普通に引き直します");
         this.navigation.Stop();
         this.moveIssued = false;
     }

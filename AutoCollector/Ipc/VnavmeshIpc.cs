@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Numerics;
+using System.Threading.Tasks;
 using AutoCollector.Diagnostics;
 
 namespace AutoCollector.Ipc;
@@ -98,16 +99,22 @@ public sealed class VnavmeshIpc(AnomalyLog anomalyLog) : IpcGateBase("vnavmesh",
     /// 飛行時は voxel の空間（PathfindVolume）で探すため、
     /// 地形の内側を通る経路にはならない。
     /// </summary>
+    /// <remarks>
+    /// <b>戻り値は Task。</b>vnavmesh 側は QueryPathBasic をそのまま返しており
+    /// （IPCProvider.cs:23）、その型は <c>Task&lt;List&lt;Vector3&gt;&gt;</c>。
+    /// List として受け取ろうとすると、Task を JSON 化しようとして
+    /// 「Self referencing loop detected」で失敗する（2026-09-25 実測）。
+    /// </remarks>
     public bool TryPathfindAvoid(
         Vector3 from,
         Vector3 to,
         bool fly,
         Vector3 avoidCenter,
         float avoidRadius,
-        out List<Vector3>? waypoints)
+        out Task<List<Vector3>>? waypoints)
         => this.TryInvoke(
             "Nav.PathfindAvoid",
-            () => this.Func<Vector3, Vector3, bool, Vector3, float, List<Vector3>>("vnavmesh.Nav.PathfindAvoid")
+            () => this.Func<Vector3, Vector3, bool, Vector3, float, Task<List<Vector3>>>("vnavmesh.Nav.PathfindAvoid")
                       .InvokeFunc(from, to, fly, avoidCenter, avoidRadius),
             out waypoints);
 
