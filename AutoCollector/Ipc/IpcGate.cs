@@ -82,6 +82,15 @@ public abstract class IpcGateBase(string internalName, AnomalyLog anomalyLog)
         => Svc.PluginInterface.GetIpcSubscriber<T1, T2, T3, T4, TRet>(name);
 
     /// <summary>
+    /// 引数 5 つの IPC を購読する。
+    ///
+    /// vnavmesh の Nav.PathfindAvoid が
+    /// (from, to, fly, avoidCenter, avoidRadius) の 5 引数を取るため追加した。
+    /// </summary>
+    protected ICallGateSubscriber<T1, T2, T3, T4, T5, TRet> Func<T1, T2, T3, T4, T5, TRet>(string name)
+        => Svc.PluginInterface.GetIpcSubscriber<T1, T2, T3, T4, T5, TRet>(name);
+
+    /// <summary>
     /// 値を取得する。失敗したら false を返す。呼び出し側は false を「進めない」として扱うこと。
     /// </summary>
     protected bool TryInvoke<TRet>(string name, Func<TRet> call, out TRet value)

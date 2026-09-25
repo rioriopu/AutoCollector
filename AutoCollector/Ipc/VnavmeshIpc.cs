@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Numerics;
 using AutoCollector.Diagnostics;
 
@@ -81,6 +82,40 @@ public sealed class VnavmeshIpc(AnomalyLog anomalyLog) : IpcGateBase("vnavmesh",
             "Query.Mesh.PointOnFloor",
             () => this.Func<Vector3, bool, float, Vector3?>("vnavmesh.Query.Mesh.PointOnFloor").InvokeFunc(position, false, 5f),
             out onFloor);
+
+    /// <summary>
+    /// いま組まれている経路点の数。0 なら経路を持っていない。
+    ///
+    /// 「まだ動いているつもりなのに進まない」を見分けるのに使う。
+    /// </summary>
+    public bool TryNumWaypoints(out int count)
+        => this.TryInvoke("Path.NumWaypoints", () => this.Func<int>("vnavmesh.Path.NumWaypoints").InvokeFunc(), out count);
+
+    /// <summary>
+    /// 指定の球を避けて経路を引き、その経路点を返す。
+    ///
+    /// 障害物に張り付いて進めなくなったとき、そこを避けて引き直すのに使う。
+    /// 飛行時は voxel の空間（PathfindVolume）で探すため、
+    /// 地形の内側を通る経路にはならない。
+    /// </summary>
+    public bool TryPathfindAvoid(
+        Vector3 from,
+        Vector3 to,
+        bool fly,
+        Vector3 avoidCenter,
+        float avoidRadius,
+        out List<Vector3>? waypoints)
+        => this.TryInvoke(
+            "Nav.PathfindAvoid",
+            () => this.Func<Vector3, Vector3, bool, Vector3, float, List<Vector3>>("vnavmesh.Nav.PathfindAvoid")
+                      .InvokeFunc(from, to, fly, avoidCenter, avoidRadius),
+            out waypoints);
+
+    /// <summary>組み上げた経路点をそのまま辿らせる。</summary>
+    public bool TryMoveAlong(List<Vector3> waypoints, bool fly)
+        => this.TryAction(
+            "Path.MoveTo",
+            () => this.Func<List<Vector3>, bool, object>("vnavmesh.Path.MoveTo").InvokeAction(waypoints, fly));
 
     /// <summary>移動を停止する。</summary>
     public bool TryStop()
