@@ -224,6 +224,9 @@ public sealed class FateRunner(
 
     private DateTime moveStartedUtc = DateTime.MinValue;
     private DateTime teleportStartedUtc = DateTime.MinValue;
+
+    /// <summary>この行き先へテレポを撃ったか。毎フレーム撃ち直さないための旗。</summary>
+    private bool teleportIssued;
     private DateTime waitingSinceUtc = DateTime.MinValue;
     private DateTime deadSinceUtc = DateTime.MinValue;
 
@@ -331,6 +334,8 @@ public sealed class FateRunner(
         this.leftFateId = null;
         this.landable = null;
         this.landingRefuge = null;
+        this.travelTargetTerritory = 0;
+        this.teleportIssued = false;
         this.Completed = 0;
         this.StoppedReason = null;
         this.presetApplied = false;
@@ -523,16 +528,31 @@ public sealed class FateRunner(
         }
 
         // 4. 周回するマップにいるか。
-        if (!cfg.FateZones.Contains(Svc.ClientState.TerritoryType))
+        //
+        // **「一覧に載っているマップにいるか」だけで判断しない。**
+        //
+        // 一覧のマップはどれも載っているので、FATE が尽きて次のマップへ
+        // 移ろうと決めた直後も「いま載っているマップにいる」が成立する。
+        // そのため移動の段階が次のフレームで取り消され、
+        // テレポが一度も実行されなかった（2026-09-25 実測。
+        // Traveling に入って 18 ミリ秒で Waiting に戻っていた）。
+        //
+        // 行き先を決めているあいだは、そちらへ着くまで移動を続ける。
+        var inZone = cfg.FateZones.Contains(Svc.ClientState.TerritoryType);
+        var heading = this.travelTargetTerritory != 0
+                   && this.travelTargetTerritory != Svc.ClientState.TerritoryType;
+
+        if (!inZone || heading)
         {
             this.TickTraveling(cfg);
             return;
         }
 
-        // マップに着いたので、移動状態は畳む。
+        // 行き先に着いた。移動状態は畳む。
         if (this.Step == FateStep.Traveling)
         {
             this.teleportStartedUtc = DateTime.MinValue;
+            this.travelTargetTerritory = 0;
             this.SetStep(FateStep.Waiting, "FATE を探しています");
             this.waitingSinceUtc = DateTime.UtcNow;
         }
@@ -653,20 +673,34 @@ public sealed class FateRunner(
             return;
         }
 
+        // 行き先が決まっていなければ、ここで決める。
+        // （周回外のマップに居るときは、この経路で戻ってくる）
         if (this.Step != FateStep.Traveling || this.travelTargetTerritory != destination)
         {
             this.travelTargetTerritory = destination;
             this.teleportStartedUtc = DateTime.UtcNow;
+            this.teleportIssued = false;
             this.SetStep(FateStep.Traveling, $"{NpcLocationService.GetTerritoryName(destination)} へ移動しています");
+        }
+
+        // **テレポは 1 度だけ撃つ。**
+        // 毎フレーム撃つと、詠唱が始まるたびに撃ち直して一生飛べない。
+        if (!this.teleportIssued)
+        {
+            this.teleportIssued = true;
 
             if (!this.TryTeleportTo(destination))
             {
                 this.anomalyLog.Warn("Fate", $"{NpcLocationService.GetTerritoryName(destination)} へテレポートできませんでした");
                 this.AdvanceZone(cfg);
+                return;
             }
 
+            this.trace.Decision("テレポを撃った", NpcLocationService.GetTerritoryName(destination));
             return;
         }
+
+        this.StatusDetail = $"{NpcLocationService.GetTerritoryName(destination)} へ移動しています";
 
         if (DateTime.UtcNow - this.teleportStartedUtc > TeleportTimeout)
         {
@@ -1604,8 +1638,29 @@ public sealed class FateRunner(
             return;
         }
 
-        this.zoneIndex = (this.zoneIndex + 1) % cfg.FateZones.Count;
-        var next = cfg.FateZones[this.zoneIndex];
+        // **いまいるマップは飛ばす。**
+        // 一覧の並び順によっては、次の番号が「いまいるマップ」になる。
+        // そこへテレポしても何も変わらず、FATE が無いまま待ち続ける。
+        var here = Svc.ClientState.TerritoryType;
+        uint next = 0;
+
+        for (var i = 0; i < cfg.FateZones.Count; i++)
+        {
+            this.zoneIndex = (this.zoneIndex + 1) % cfg.FateZones.Count;
+
+            if (cfg.FateZones[this.zoneIndex] != here)
+            {
+                next = cfg.FateZones[this.zoneIndex];
+                break;
+            }
+        }
+
+        if (next == 0)
+        {
+            // 一覧がいまいるマップだけだった。移りようがない。
+            this.waitingSinceUtc = DateTime.UtcNow;
+            return;
+        }
 
         // マップを移るので、そのマップ固有の記録は捨てる。
         this.blacklist.Clear();
@@ -1613,7 +1668,13 @@ public sealed class FateRunner(
         this.target = null;
         this.prefetched = null;
 
-        this.travelTargetTerritory = 0;
+        // **行き先を控える。**
+        // これが入っていると、いま一覧のマップにいても移動を続ける。
+        // TickTraveling は「段階が Traveling で、控えた行き先と一致する」
+        // ときだけテレポを撃つので、ここでは段階も一緒に立てる。
+        this.travelTargetTerritory = next;
+        this.teleportStartedUtc = DateTime.UtcNow;
+        this.teleportIssued = false;
         this.SetStep(FateStep.Traveling, $"{NpcLocationService.GetTerritoryName(next)} へ移動しています");
         this.anomalyLog.Info("Fate", $"次のマップ {NpcLocationService.GetTerritoryName(next)} へ移ります");
     }
