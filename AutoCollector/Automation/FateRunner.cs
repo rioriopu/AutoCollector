@@ -154,6 +154,9 @@ public sealed class FateRunner(
     /// <summary>vnavmesh の既定の許容値。詰めたあとはここへ戻す。</summary>
     private const float DefaultPathTolerance = 0.25f;
 
+    /// <summary>降りられる場所を探すとき、中心から何周ぶん見るか。</summary>
+    private const int LandableSearchRings = 4;
+
     /// <summary>辿り着けなかった FATE を見送る長さ。過ぎたらもう一度試す。</summary>
     private static readonly TimeSpan BlacklistDuration = TimeSpan.FromMinutes(5);
 
@@ -1417,17 +1420,34 @@ public sealed class FateRunner(
 
         this.blockDetours++;
 
-        // **まず経路をなぞらせてみる。**
+        // **まず経路をなぞらせ、引き直させる。**
         //
         // vnavmesh は経路から Tolerance（既定 0.25）まで外れてよい作りで、
         // 曲がり角を端折って進む。狭い通路ではそれが壁への接触になる。
         // 引っかかったら、まず許容値を詰めて経路をなぞらせる。
         // 通路そのものは通れるので、なぞれば抜けられることが多い。
-        if (this.blockDetours == 1 && !this.tightenedPath)
+        //
+        // あわせて経路を捨てる。次のフレームで、いまの場所から引き直される。
+        // 壁に寄った状態から引き直すと、別の抜け道が見つかることが多い。
+        // ICE も詰まったときは「経路を止めて引き直させる」だけで抜けている
+        // （逆コンパイルして確認。CheckIfIsStuck の RetargetIfStuck）。
+        if (this.blockDetours == 1)
         {
-            this.tightenedPath = true;
-            this.vnavmesh.TrySetPathTolerance(TightPathTolerance);
-            this.trace.Decision("経路をなぞらせる", $"許容値を {TightPathTolerance:0.00} に詰めました");
+            if (!this.tightenedPath)
+            {
+                this.tightenedPath = true;
+                this.vnavmesh.TrySetPathTolerance(TightPathTolerance);
+            }
+
+            this.trace.Decision(
+                "経路をなぞらせて引き直す",
+                $"許容値 {TightPathTolerance:0.00}／{advanced:F1}m しか進めず");
+
+            this.navigation.Stop();
+            this.moveIssued = false;
+
+            // 跳ねてみる。段差に引っかかっているだけなら、これで外れる。
+            TryJump();
 
             this.blockCheckedUtc = now;
             this.blockCheckPosition = here;
@@ -1998,6 +2018,55 @@ public sealed class FateRunner(
     ///
     /// 1 つの FATE につき 1 度だけ聞いて覚える。毎フレーム聞くと重い。
     /// </summary>
+    /// <summary>
+    /// ある地点のまわりから、降りられる場所を探す。
+    ///
+    /// <b>1 点だけ聞かない。</b>
+    /// 中心が湖や崖の上だと、そこを起点に聞いても答えが出ない。
+    /// 中心から外へ向かって渦を描くように候補を並べ、近い順に試す。
+    /// 近いものから返すので、なるべく中心の近くに降りられる。
+    ///
+    /// ICE（Cosmic Exploration の自動化）も同じ形で、
+    /// 格子状に並べた点を近い順に試している
+    /// （逆コンパイルして確認。FishingUtil.TryFindStand）。
+    /// </summary>
+    private Vector3? FindLandableAround(Vector3 centre, float radius)
+    {
+        // 刻み幅。細かすぎると問い合わせが増えるだけなので、半径から決める。
+        var step = MathF.Max(radius / 4f, 5f);
+
+        for (var ring = 0; ring <= LandableSearchRings; ring++)
+        {
+            for (var dx = -ring; dx <= ring; dx++)
+            {
+                for (var dz = -ring; dz <= ring; dz++)
+                {
+                    // その輪の縁だけを見る。内側はもう見ている。
+                    if (ring != 0 && Math.Max(Math.Abs(dx), Math.Abs(dz)) != ring)
+                    {
+                        continue;
+                    }
+
+                    var probe = new Vector3(
+                        centre.X + (dx * step),
+                        centre.Y,
+                        centre.Z + (dz * step));
+
+                    // 辿り着ける点を優先する。ただのメッシュ上の最近傍だと、
+                    // 湖の向こうの小島のように「そこには行けない」点が返りうる。
+                    if (this.vnavmesh.TryNearestPointReachable(probe, step * 2f, 100f, out var reachable) &&
+                        reachable is { } ok)
+                    {
+                        return ok;
+                    }
+                }
+            }
+        }
+
+        // 辿り着ける点が 1 つも無い。せめてメッシュ上の点を返す。
+        return this.vnavmesh.TryNearestPoint(centre, radius, 100f, out var any) ? any : null;
+    }
+
     private Vector3 ResolveLandablePoint(FateInfo fate)
     {
         var here = Svc.ClientState.TerritoryType;
@@ -2021,19 +2090,16 @@ public sealed class FateRunner(
             return fate.Position;
         }
 
-        // 横は FATE の半径ぶん、縦は広めに探す。
-        // 中心が湖の上なら、岸はそれなりに離れている。
-        // 縦を広く取るのは、谷底や高台でも拾えるようにするため。
-        var halfExtentXZ = Math.Max(20f, fate.Radius);
-
-        // **辿り着ける点を優先する。**
-        // ただのメッシュ上の最近傍だと、湖の向こうの小島のように
-        // 「そこには行けない」点が返りうる。
-        var resolved =
-            (this.vnavmesh.TryNearestPointReachable(fate.Position, halfExtentXZ, 100f, out var reachable) && reachable is not null
-                ? reachable
-                : null)
-            ?? (this.vnavmesh.TryNearestPoint(fate.Position, halfExtentXZ, 100f, out var nearest) ? nearest : null);
+        // **中心の 1 点だけを聞かない。**
+        //
+        // 中心が湖や崖の上だと、そこを起点に聞いても答えが出ないか、
+        // 出ても遠くの行けない場所になる。
+        // 中心から渦を描くように候補を並べ、近い順に聞いていく。
+        //
+        // ICE（Cosmic Exploration の自動化）も同じやり方をしている。
+        // 中心の周りを格子状に並べ、辿り着ける点が見つかるまで試す
+        // （逆コンパイルして確認。FishingUtil.TryFindStand）。
+        var resolved = this.FindLandableAround(fate.Position, Math.Max(20f, fate.Radius));
 
         if (resolved is not { } found)
         {
@@ -2548,6 +2614,40 @@ public sealed class FateRunner(
         this.appliedPresetName = string.Empty;
         this.movementParked = false;
         this.approaching = false;
+    }
+
+    /// <summary>
+    /// 跳ぶ。段差や small な引っかかりは、これだけで外れる。
+    ///
+    /// 飛んでいる最中は跳べないので何もしない。
+    /// ICE も詰まったときの手当てとして同じことをしている
+    /// （逆コンパイルして確認。CheckIfIsStuck の JumpIfStuck）。
+    /// </summary>
+    private static unsafe void TryJump()
+    {
+        try
+        {
+            if (MountService.IsFlying || Svc.Condition[ConditionFlag.Jumping] || Svc.Condition[ConditionFlag.Jumping61])
+            {
+                return;
+            }
+
+            var am = FFXIVClientStructs.FFXIV.Client.Game.ActionManager.Instance();
+            if (am is null)
+            {
+                return;
+            }
+
+            // GeneralAction 2 が「ジャンプ」。
+            if (am->GetActionStatus(FFXIVClientStructs.FFXIV.Client.Game.ActionType.GeneralAction, 2) == 0)
+            {
+                am->UseAction(FFXIVClientStructs.FFXIV.Client.Game.ActionType.GeneralAction, 2);
+            }
+        }
+        catch
+        {
+            // 跳べなくても進行は止めない。
+        }
     }
 
     /// <summary>ホームポイントへ戻る（戦闘不能からの復帰）。</summary>
