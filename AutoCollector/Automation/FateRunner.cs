@@ -287,9 +287,17 @@ public sealed class FateRunner(
             this.zoneIndex = index;
         }
 
-        this.resumePosition = Plugin.C.FateReturnToExactSpot && position != Vector3.Zero
-            ? position
-            : null;
+        // 座標まで戻すかは設定次第。エリアへは必ず戻るので、
+        // 入れていなくても、いちばん近い FATE から回り直せる。
+        this.resumePosition = null;
+
+        if (Plugin.C.FateReturnToExactSpot
+            && position != Vector3.Zero
+            && Svc.ClientState.TerritoryType == territoryId
+            && this.navigation.BeginMove(position, 10f, out _))
+        {
+            this.resumePosition = position;
+        }
 
         return true;
     }
@@ -366,6 +374,38 @@ public sealed class FateRunner(
             this.teleportStartedUtc = DateTime.MinValue;
             this.SetStep(FateStep.Waiting, "FATE を探しています");
             this.waitingSinceUtc = DateTime.UtcNow;
+        }
+
+        // 交換から戻ったときの座標へ寄る。
+        //
+        // **FATE があればそちらを優先する。**
+        // 戻る途中で FATE が湧いていたら、わざわざ元の場所まで行く意味がない。
+        // ここで足を止めるのは、狙える FATE が無いあいだだけ。
+        if (this.resumePosition is { } spot)
+        {
+            if (this.PickNext(cfg) is not null || !Player.Available)
+            {
+                this.resumePosition = null;
+            }
+            else if (Vector3.Distance(Player.Position, spot) < 15f)
+            {
+                this.resumePosition = null;
+                this.navigation.Stop();
+            }
+            else
+            {
+                this.StatusDetail = "交換前にいた場所へ戻っています";
+                var status = this.navigation.Tick(spot, 10f);
+                if (status is MoveStatus.Arrived or MoveStatus.ShortOfTarget or MoveStatus.Stuck or MoveStatus.Failed)
+                {
+                    this.resumePosition = null;
+                    this.navigation.Stop();
+                }
+                else if (status == MoveStatus.Moving)
+                {
+                    return;
+                }
+            }
         }
 
         // 5. いま参加している FATE があるか。

@@ -31,6 +31,7 @@ public sealed partial class MainWindow : EuWindow
     {
         this.plugin = plugin;
         this.presetTab = new PresetTab(plugin);
+        this.fateTab = new FateTab(plugin);
 
         // 画面の大きさ。交換候補の一覧と状況の表が入る幅を既定にする。
         this.Size = new Vector2(760f, 560f);
@@ -58,6 +59,9 @@ public sealed partial class MainWindow : EuWindow
     private string cachedShopFailure = string.Empty;
     private List<(string Label, AtkValueProbe Probe)> cachedDiagnostics = [];
     private readonly PresetTab presetTab;
+
+    /// <summary>FATE 周回の設定。稼ぎ方の 1 つなのでタブを分ける。</summary>
+    private readonly FateTab fateTab;
 
     public override void Draw()
     {
@@ -108,6 +112,7 @@ public sealed partial class MainWindow : EuWindow
 
         this.DrawStatusTab();
         this.presetTab.Draw(ref this.jumpToPresetTab);
+        this.fateTab.Draw();
 
         // 開発・調査用のタブはデバッグモードのときだけ出す。
         if (Plugin.C.DebugMode)

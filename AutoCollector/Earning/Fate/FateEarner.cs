@@ -73,21 +73,20 @@ public sealed class FateEarner(
         => this.runner.IsRunning ? $"FATE 周回（{this.runner.StatusDetail}）" : "FATE 周回";
 
     /// <summary>
-    /// このプリセットで、自力で通貨を増やせるか。
+    /// このプリセットで、自力で通貨を増やし続けるか。
     ///
-    /// <b>周回を動かしているときだけ true。</b>
-    /// 止まっている周回は通貨を生まない。止まったまま「増える見込み」と扱うと、
-    /// 交換の歯止めが「そのうち貯まる」と判断して終わらない交換を許してしまう。
+    /// <b>「いま動いているか」ではない。</b>
+    /// 交換の歯止めが <c>allowOpenEnded</c>（終わりを決めずに交換してよいか）の
+    /// 判断に使う値で、聞かれているのは「回し続ければ増えるか」。
+    /// 中断中や交換の最中は当然止まっているので、動作で判断すると
+    /// 交換のたびに答えが変わってしまう。
+    ///
+    /// FATE 周回は回せばバイカラージェム等が増え続ける。
+    /// クラフターの <c>CraftToEarn</c> と同じ位置づけで、
+    /// 周回を使う設定になっていれば true。
     /// </summary>
     public bool SuppliesCurrencyFor(ExchangePreset preset)
-    {
-        if (!this.runner.IsRunning)
-        {
-            return false;
-        }
-
-        return this.CanEarn(preset.CurrencyItemId);
-    }
+        => Plugin.C.FateEnabled && this.IsAvailable && this.CanEarn(preset.CurrencyItemId);
 
     /// <summary>
     /// この通貨は FATE で増えるか。
@@ -171,15 +170,17 @@ public sealed class FateEarner(
             return EarnerStepResult.Untouched("FATE 周回は動いていません");
         }
 
+        // **1 フレームで終わる。**
+        //
+        // 周回はこのプラグインの中にあるので、外部プラグインのように
+        // 「止める要求を送ったが届かない」ことがない。
+        // 送ってから止まるのを待つ必要がないため、InProgress を挟まない。
         if (this.runner.IsRunning)
         {
-            // 止めるのは 1 回で済む。周回はプラグインの中にあるので、
-            // 外部プラグインのように「送ったが届かない」ことがない。
             this.runner.Suspend("交換のため中断");
-            return EarnerStepResult.InProgress("FATE 周回を止めています");
+            this.anomalyLog.Info("Fate", "FATE 周回を止めました");
         }
 
-        this.anomalyLog.Info("Fate", "FATE 周回を止めました");
         return EarnerStepResult.Handled("FATE 周回を止めました");
     }
 
