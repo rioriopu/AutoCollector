@@ -90,6 +90,21 @@ public sealed class FateRunner(
     /// <summary>同じ FATE で詰まってよい回数。超えたら二度と狙わない。</summary>
     private const int MaxStuckPerFate = 2;
 
+    /// <summary>
+    /// 敵がこれより遠ければ歩いて近づく。
+    ///
+    /// BMR は見えている敵と戦うだけで、遠くの敵を探しには行かない。
+    /// 遠距離職でも届く範囲より少し内側にしてある。
+    /// </summary>
+    private const float MobReachMeters = 15f;
+
+    /// <summary>
+    /// 敵が 1 匹も見えないとき、中心からこれ以上離れていたら寄る。
+    ///
+    /// 円の端では敵が湧いても見えないことがある。
+    /// </summary>
+    private const float CentreSeekMeters = 20f;
+
     /// <summary>テレポートが終わるのを待つ上限。</summary>
     private static readonly TimeSpan TeleportTimeout = TimeSpan.FromSeconds(60);
 
@@ -138,6 +153,9 @@ public sealed class FateRunner(
 
     /// <summary>経路を引いたとき飛んでいたか。地面に触れて解けたのを見分ける。</summary>
     private bool flyingWhenIssued;
+
+    /// <summary>敵へ近づいている最中か。戦闘に入ったら下ろす。</summary>
+    private bool approaching;
 
     /// <summary>交換から戻ったときに向かう座標。設定で座標まで戻す場合だけ入る。</summary>
     private Vector3? resumePosition;
@@ -886,12 +904,100 @@ public sealed class FateRunner(
             this.prefetched = this.PickNext(cfg, exclude: current.Id);
         }
 
+        // **敵が遠ければ歩いて近づく。**
+        //
+        // BMR は見えている敵と戦うだけで、遠くの敵を探しには行かない。
+        // 円の端に降りると、敵が遠くて棒立ちになる（2026-09-25 実測）。
+        this.TickApproachMob(current);
+
         this.StatusDetail = $"{current.Name}（{current.Progress}%）";
         this.trace.State(
             "戦闘中",
             $"{current.Name} {current.Progress}% " +
             $"シンク={(this.scanner.IsPlayerSyncedToFate() ? "済" : "未")} " +
             $"プリセット={(this.presetApplied ? this.appliedPresetName : "未適用")}");
+    }
+
+    /// <summary>
+    /// 敵が遠ければ近づく。
+    ///
+    /// <b>近ければ何もしない。</b>BMR が戦っている最中に経路を積むと、
+    /// 回避の動きと取り合いになる。
+    /// </summary>
+    private void TickApproachMob(FateInfo fate)
+    {
+        if (!Player.Available)
+        {
+            return;
+        }
+
+        // 戦闘に入っていれば BMR に任せる。近づく必要はない。
+        if (Svc.Condition[ConditionFlag.InCombat])
+        {
+            if (this.approaching)
+            {
+                this.approaching = false;
+                this.navigation.Stop();
+                this.trace.Decision("近づくのをやめた", "戦闘に入った");
+            }
+
+            return;
+        }
+
+        var nearest = this.scanner.FindNearestMob(fate.Id, Player.Position);
+
+        if (nearest is not { } mob)
+        {
+            // 敵が 1 匹も見えない。FATE の中心へ寄って湧くのを待つ。
+            var toCentre = Vector2.Distance(
+                new Vector2(Player.Position.X, Player.Position.Z),
+                new Vector2(fate.Position.X, fate.Position.Z));
+
+            if (toCentre > CentreSeekMeters)
+            {
+                this.BeginApproach(fate.Position, "敵が見えないので中心へ寄る");
+            }
+
+            return;
+        }
+
+        // 十分近い。BMR が拾うはずなので任せる。
+        if (mob.Distance <= MobReachMeters)
+        {
+            if (this.approaching)
+            {
+                this.approaching = false;
+                this.navigation.Stop();
+            }
+
+            return;
+        }
+
+        this.BeginApproach(mob.Position, $"最寄りの敵まで {mob.Distance:F0}m");
+    }
+
+    /// <summary>近づく移動を始める。すでに向かっていれば何もしない。</summary>
+    private void BeginApproach(Vector3 destination, string why)
+    {
+        if (this.approaching)
+        {
+            // 経路が切れていたら引き直す。
+            if (this.navigation.Tick(destination, MobReachMeters) is MoveStatus.Moving)
+            {
+                return;
+            }
+
+            this.approaching = false;
+        }
+
+        if (!this.navigation.BeginMove(destination, MobReachMeters, false, out var failure))
+        {
+            this.trace.Trouble("近づけない", failure);
+            return;
+        }
+
+        this.approaching = true;
+        this.trace.Decision("敵へ近づく", why);
     }
 
     private void LeaveFate(Config cfg, FateInfo finished)

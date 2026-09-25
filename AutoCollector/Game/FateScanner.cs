@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
 using AutoCollector.Diagnostics;
+using Dalamud.Game.ClientState.Objects.Types;
+using ECommons.DalamudServices;
 using ECommons.GameHelpers;
 using FFXIVClientStructs.FFXIV.Client.Game.Fate;
 
@@ -237,6 +239,71 @@ public sealed unsafe class FateScanner(AnomalyLog anomalyLog)
         catch
         {
             return false;
+        }
+    }
+
+    /// <summary>
+    /// この FATE の敵のうち、いちばん近いものを探す。
+    ///
+    /// <b>敵が見えていないと BMR は何もしない。</b>
+    /// 円の端に降りると、敵が遠くて棒立ちになる。
+    /// そのときに歩いて近づくため、どこに居るかを知る必要がある。
+    /// </summary>
+    /// <param name="fateId">対象の FATE。</param>
+    /// <param name="from">距離を測る基準。</param>
+    /// <returns>見つかれば座標と距離。居なければ null。</returns>
+    public (Vector3 Position, float Distance)? FindNearestMob(ushort fateId, Vector3 from)
+    {
+        try
+        {
+            Vector3 nearest = default;
+            var nearestDistance = float.MaxValue;
+            var found = false;
+
+            foreach (var obj in Svc.Objects)
+            {
+                if (obj is not IBattleNpc npc)
+                {
+                    continue;
+                }
+
+                if (!npc.IsTargetable || npc.CurrentHp == 0)
+                {
+                    continue;
+                }
+
+                var native = (FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject*)npc.Address;
+                if (native is null || native->FateId != fateId)
+                {
+                    continue;
+                }
+
+                // 討伐の対象になる敵だけを見る。
+                // NPC や設置物は同じ FateId を持つことがある。
+                if (native->BattleNpcSubKind != FFXIVClientStructs.FFXIV.Client.Game.Object.BattleNpcSubKind.Combatant)
+                {
+                    continue;
+                }
+
+                // 高さは見ない。段差の上下で距離が水増しされる。
+                var distance = Vector2.Distance(
+                    new Vector2(from.X, from.Z),
+                    new Vector2(npc.Position.X, npc.Position.Z));
+
+                if (distance < nearestDistance)
+                {
+                    nearestDistance = distance;
+                    nearest = npc.Position;
+                    found = true;
+                }
+            }
+
+            return found ? (nearest, nearestDistance) : null;
+        }
+        catch (Exception ex)
+        {
+            this.LastError = ex.Message;
+            return null;
         }
     }
 
