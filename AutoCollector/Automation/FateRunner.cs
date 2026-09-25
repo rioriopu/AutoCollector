@@ -842,6 +842,28 @@ public sealed class FateRunner(
             return;
         }
 
+        // **乗ったままでは戦えない。**
+        //
+        // FATE の円へ入った時点でここへ来るので、移動の段階を通らずに
+        // 戦闘へ入ることがある。降りる処理は移動の側に置いてあったため、
+        // 乗ったまま戦おうとして何もできなかった（2026-09-25 実測）。
+        //
+        // 降りるまでは戦闘を始めない。Landing はこの下にある
+        // 「経路を触らない」段階へ移す。
+        if (MountService.IsMounted)
+        {
+            this.target = current;
+
+            if (this.Step != FateStep.Landing)
+            {
+                this.landingSinceUtc = DateTime.UtcNow;
+                this.navigation.Stop();
+                this.SetStep(FateStep.Landing, $"{current.Name} に入りました（降りています）");
+            }
+
+            return;
+        }
+
         if (this.Step != FateStep.Fighting)
         {
             this.ApplyCombat(cfg);
