@@ -121,10 +121,22 @@ public static class FateCombatPreset
     /// 効かないまま動く。実際にそうなった（Sync を None で作っていた版が
     /// 残り、レベルシンクが入らなかった・2026-09-25）。
     /// </summary>
+    /// <summary>
+    /// このプリセットが必ず持っていなければならない設定。
+    ///
+    /// <b>既定値のトラックはここに入れない。</b>
+    /// BMR は「その enum の既定値（＝0 番）」のトラックを書き出さない。
+    /// FateUtils の Flag は <c>{ Enabled, Disabled }</c> で <b>Enabled が 0</b> なので、
+    /// Handin = Enabled は保存された JSON に現れない。
+    /// これを必須に入れていたため、毎回「入っていない」と判定して
+    /// 起動のたびにプリセットを作り直していた（2026-09-25 実測）。
+    ///
+    /// Collect = Disabled（1 番）と Sync = Enable（None が 0 番なので 1 番）は
+    /// 既定値ではないため、書き出される。
+    /// </summary>
     private static readonly (string Track, string Option)[] Required =
     [
         ("Sync", "Enable"),
-        ("Handin", "Enabled"),
         ("Collect", "Disabled"),
     ];
 

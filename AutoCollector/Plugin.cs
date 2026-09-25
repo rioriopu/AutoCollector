@@ -918,14 +918,17 @@ public sealed class Plugin : IDalamudPlugin
     {
         this.StopFileLog();
 
-        if (!C.DetailedLogActive)
-        {
-            return;
-        }
-
-        // 保存先が空なら設定フォルダへ書く。
-        // 以前は空だと何も記録しなかった。既定を空にしたため、それでは
-        // 詳細ログを入れても 1 行も残らなくなる。
+        // **記録は常に取る。設定で切らない。**
+        //
+        // 以前は DebugMode と DetailedLogEnabled の両方が要り、
+        // どちらかが切れていると 1 行も残らなかった。
+        // そのため「動かない」と言われたときに手がかりが何も無く、
+        // 症状の報告だけを頼りに推測で直す羽目になった（2026-09-25）。
+        //
+        // 書き込みは背景スレッドで、内容は日ごとのファイルに分かれる。
+        // 出し続けても動作の邪魔にはならない。
+        // 保存先が空なら設定フォルダ
+        // （%APPDATA%\XIVLauncher\pluginConfigs\AutoCollector）へ書く。
         try
         {
             this.fileLog = new FileLogWriter(ResolveLogDirectory());
@@ -933,7 +936,14 @@ public sealed class Plugin : IDalamudPlugin
 
             this.AnomalyLog.Info(
                 "Log",
-                $"詳細ログを記録します: {this.fileLog.FilePath}");
+                $"記録を残します: {this.fileLog.FilePath}");
+
+            // **誰の記録かを最初に書く。**
+            // ゲームを複数起動していると、同じフォルダに記録が並ぶ。
+            // 名前が無いと、どの画面で起きたことか分からない。
+            this.AnomalyLog.Info(
+                "Log",
+                $"キャラクター: {(ECommons.GameHelpers.Player.Available ? ECommons.GameHelpers.Player.Name : "（未ログイン）")}");
 
             this.AnomalyLog.Trace("Log", $"AutoCollector v{Svc.PluginInterface.Manifest.AssemblyVersion} / ECommons v3.2.1.17");
 

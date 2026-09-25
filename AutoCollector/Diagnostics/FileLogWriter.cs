@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -36,6 +37,9 @@ public sealed class FileLogWriter : IDisposable
     private int dropped;
     private int consecutiveFailures;
 
+    /// <summary>残しておく記録の数。これより古いものは消す。</summary>
+    private const int KeepFiles = 40;
+
     public FileLogWriter(string directory)
     {
         this.Directory = directory;
@@ -43,7 +47,51 @@ public sealed class FileLogWriter : IDisposable
             directory,
             $"AutoCollector_{DateTime.Now:yyyyMMdd_HHmmss}.log");
 
+        // **古い記録を片付ける。**
+        // 常に記録を取るようにしたため、起動のたびに 1 本増える。
+        // ゲームを 5 つ起動していると 1 日で何十本にもなり、
+        // 設定フォルダから目的のファイルを探せなくなる。
+        TrimOldLogs(directory);
+
         this.worker = Task.Run(() => this.RunAsync(this.cancellation.Token));
+    }
+
+    /// <summary>
+    /// 古い記録を消す。失敗しても本体の動作は変えない。
+    ///
+    /// 消すのは自分が作った名前の形のものだけ。
+    /// 利用者が置いた別のファイルには触らない。
+    /// </summary>
+    private static void TrimOldLogs(string directory)
+    {
+        try
+        {
+            if (!System.IO.Directory.Exists(directory))
+            {
+                return;
+            }
+
+            var files = new DirectoryInfo(directory)
+                .GetFiles("AutoCollector_*.log")
+                .OrderByDescending(x => x.LastWriteTimeUtc)
+                .Skip(KeepFiles);
+
+            foreach (var file in files)
+            {
+                try
+                {
+                    file.Delete();
+                }
+                catch
+                {
+                    // 書き込み中のものは消せない。次の起動で消えるので放っておく。
+                }
+            }
+        }
+        catch
+        {
+            // 片付けに失敗しても記録そのものは続ける。
+        }
     }
 
     public string Directory { get; }

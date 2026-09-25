@@ -152,6 +152,18 @@ public sealed class FateRunner(
     /// <summary>報酬待ちの納品 FATE。着地するまでマップを離れない。</summary>
     private (ushort Id, int Start, DateTime DeadlineUtc)? pendingReward;
 
+    /// <summary>
+    /// もう離脱を済ませた FATE。
+    ///
+    /// <b>離れたことを覚えていないと、同じ FATE で無限に離脱し続ける。</b>
+    /// FateManager.CurrentFate は、達成度 100% になっても円の中に立っている限り
+    /// その FATE を指したままになる。覚えていないと毎フレーム
+    /// 「100% の FATE に参加している」と読んで LeaveFate を呼び、
+    /// 次の FATE への経路を引いた直後に引き直す、を延々と繰り返す。
+    /// その場から一歩も動けない（2026-09-25 実測・18 ミリ秒ごとに往復していた）。
+    /// </summary>
+    private ushort? leftFateId;
+
     private DateTime moveStartedUtc = DateTime.MinValue;
     private DateTime teleportStartedUtc = DateTime.MinValue;
     private DateTime waitingSinceUtc = DateTime.MinValue;
@@ -249,6 +261,7 @@ public sealed class FateRunner(
         this.target = null;
         this.prefetched = null;
         this.pendingReward = null;
+        this.leftFateId = null;
         this.Completed = 0;
         this.StoppedReason = null;
         this.presetApplied = false;
@@ -497,7 +510,17 @@ public sealed class FateRunner(
         }
 
         // 5. いま参加している FATE があるか。
+        //
+        // **もう離れた FATE は見ない。**
+        // 円の中に立っている限り CurrentFate はその FATE を指したままなので、
+        // これが無いと 100% の FATE を毎フレーム拾い直し、
+        // 離脱と経路引きを往復して一歩も動けなくなる。
         var current = this.scanner.GetCurrent();
+        if (current is not null && current.Id == this.leftFateId)
+        {
+            current = null;
+        }
+
         if (current is not null && current.State == FateState.Running)
         {
             this.TickInFate(cfg, current);
@@ -650,6 +673,13 @@ public sealed class FateRunner(
         this.target = fate;
         this.moveStartedUtc = DateTime.UtcNow;
         this.moveIssued = false;
+
+        // 向かう先が、さっき離れた FATE とは別なら、覚えていた印を消す。
+        // 同じ番号の FATE が後から湧いたときに、入れなくなるのを防ぐ。
+        if (this.leftFateId != fate.Id)
+        {
+            this.leftFateId = null;
+        }
 
         // 別の FATE へ向かうので、降りる途中だった記録は捨てる。
         // 残すと二度と飛ばなくなる。
@@ -1120,6 +1150,9 @@ public sealed class FateRunner(
         {
             this.anomalyLog.Info("Fate", $"{finished.Name} が 100% になりました（完了 {this.Completed} 件）");
         }
+
+        // この FATE はもう離れた。円の中に立っていても、二度と拾わない。
+        this.leftFateId = finished.Id;
 
         this.target = null;
         this.SetStep(FateStep.Leaving, "次の FATE へ向かっています");
