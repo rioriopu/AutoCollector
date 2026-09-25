@@ -493,7 +493,8 @@ public sealed class Plugin : IDalamudPlugin
             this.MountService,
             this.FateTrace,
             this.Lifestream,
-            this.AetheryteService);
+            this.AetheryteService,
+            this.Vnavmesh);
         this.Fate = new FateEarner(this.FateRunner, this.FateTokens, this.AnomalyLog);
 
         this.Earners.Register(this.Combat);

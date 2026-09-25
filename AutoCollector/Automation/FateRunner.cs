@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
@@ -79,7 +79,8 @@ public sealed class FateRunner(
     MountService mount,
     FateTrace trace,
     LifestreamIpc lifestream,
-    AetheryteService aetherytes)
+    AetheryteService aetherytes,
+    VnavmeshIpc vnavmesh)
 {
     /// <summary>FATE の円へ入ったとみなす距離の余裕。</summary>
     private const float FateArrivalSlack = 5f;
@@ -142,8 +143,13 @@ public sealed class FateRunner(
     /// <summary>テレポートが終わるのを待つ上限。</summary>
     private static readonly TimeSpan TeleportTimeout = TimeSpan.FromSeconds(60);
 
-    /// <summary>降りるのを待つ上限。空からの降下は数秒かかる。</summary>
-    private static readonly TimeSpan LandingTimeout = TimeSpan.FromSeconds(30);
+    /// <summary>
+    /// 降りるのを待つ上限。空からの降下は数秒かかる。
+    ///
+    /// 長く取りすぎない。降りられない場所（水面の上など）に来てしまったときは、
+    /// 待っても降りられない。早めに諦めて別の FATE へ移るほうがよい。
+    /// </summary>
+    private static readonly TimeSpan LandingTimeout = TimeSpan.FromSeconds(12);
 
     /// <summary>納品 FATE の報酬が着地するまでの猶予。1 分 + 余裕。</summary>
     private static readonly TimeSpan CollectRewardWindow = TimeSpan.FromSeconds(90);
@@ -157,6 +163,10 @@ public sealed class FateRunner(
     private readonly FateTrace trace = trace;
     private readonly LifestreamIpc lifestream = lifestream;
     private readonly AetheryteService aetherytes = aetherytes;
+    private readonly VnavmeshIpc vnavmesh = vnavmesh;
+
+    /// <summary>FATE ごとに 1 度だけ求めた、降りられる座標。</summary>
+    private (ushort Id, Vector3 Point)? landable;
 
     /// <summary>このセッションで詰まった FATE。もう狙わない。</summary>
     private readonly HashSet<ushort> blacklist = [];
@@ -292,6 +302,7 @@ public sealed class FateRunner(
         this.prefetched = null;
         this.pendingReward = null;
         this.leftFateId = null;
+        this.landable = null;
         this.Completed = 0;
         this.StoppedReason = null;
         this.presetApplied = false;
@@ -822,11 +833,16 @@ public sealed class FateRunner(
             // 乗っていて、そのエリアで飛べるなら、飛ぶつもりで引く。
             var flying = MountService.IsMounted && MountService.CanFlyHere;
 
+            // **降りられる場所を先に決める。**
+            // FATE の中心は湖や谷の上にあることがある。そのまま目指すと
+            // 水面の上で降りられず、空中で止まったままになる。
+            var ground = this.ResolveLandablePoint(live);
+
             // 目的地を持ち上げる。これが離陸の条件（次の点が自分より高い）
             // を満たすことにもなり、経路が地面を擦るのも防ぐ。
             var destination = flying
-                ? live.Position with { Y = live.Position.Y + MountService.FlightLift }
-                : live.Position;
+                ? ground with { Y = ground.Y + MountService.FlightLift }
+                : ground;
 
             // 飛ぶときは中心付近を目指す。端で止まると、そこが低い場所だと
             // 高所の敵へ近づけなくなる。
@@ -1213,6 +1229,60 @@ public sealed class FateRunner(
         // 引き直した回数を出す。ガクガクするときはここが増え続ける。
         this.approachIssues++;
         this.trace.Decision("敵へ近づく", $"{why}（経路 {this.approachIssues} 回目）");
+    }
+
+    /// <summary>
+    /// その FATE で実際に降りられる座標を求める。
+    ///
+    /// <b>FATE の中心は、立てる場所とは限らない。</b>
+    /// 石緑湖の「石緑湖の主「オアンネス」」のように、中心が湖の上にある FATE がある。
+    /// 中心をそのまま目指すと水面の上まで飛んで、降りようとしても降りられず、
+    /// 空中で止まったままになる（2026-09-25 実測。高さ 17 で 13 秒動けなかった）。
+    ///
+    /// vnavmesh に「その座標に最も近いナビメッシュ上の点」を聞く。
+    /// ナビメッシュに載っている点は、定義上そこに立てる。
+    /// GatherBuddyReborn も採集地点をこの方法で補正している
+    /// （AutoGather.cs の NearestPoint(pos, 10, 10000)）。
+    ///
+    /// 1 つの FATE につき 1 度だけ聞いて覚える。毎フレーム聞くと重い。
+    /// </summary>
+    private Vector3 ResolveLandablePoint(FateInfo fate)
+    {
+        if (this.landable is { } cached && cached.Id == fate.Id)
+        {
+            return cached.Point;
+        }
+
+        var point = fate.Position;
+
+        // 横は FATE の半径ぶん、縦は広めに探す。
+        // 中心が湖の上なら、岸はそれなりに離れている。
+        // 縦を広く取るのは、谷底や高台でも拾えるようにするため。
+        var halfExtentXZ = Math.Max(20f, fate.Radius);
+
+        if (this.vnavmesh.TryNearestPoint(fate.Position, halfExtentXZ, 100f, out var nearest) &&
+            nearest is { } found)
+        {
+            var moved = Vector3.Distance(found, fate.Position);
+            point = found;
+
+            // 大きく動いたときだけ残す。数メートルの補正はふつうのこと。
+            if (moved > 3f)
+            {
+                this.trace.Decision(
+                    "降りられる場所へ補正",
+                    $"{fate.Name} 中心({fate.Position.X:F0},{fate.Position.Y:F0},{fate.Position.Z:F0}) → " +
+                    $"({found.X:F0},{found.Y:F0},{found.Z:F0}) {moved:F0}m ずらした");
+            }
+        }
+        else
+        {
+            // 聞けなかったら中心のまま向かう。行けないと決まったわけではない。
+            this.trace.Trouble("降りられる場所が分からない", $"{fate.Name} は中心をそのまま目指します");
+        }
+
+        this.landable = (fate.Id, point);
+        return point;
     }
 
     /// <summary>近づく移動をやめ、プリセットの移動を戻す。</summary>
