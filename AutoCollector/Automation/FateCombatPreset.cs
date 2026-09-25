@@ -1,3 +1,4 @@
+using System;
 using AutoCollector.Diagnostics;
 using AutoCollector.Ipc;
 
@@ -65,7 +66,7 @@ public static class FateCombatPreset
         "BossMod.Autorotation.MiscAI.FateUtils": [
           { "Track": "Handin",  "Option": "Enabled" },
           { "Track": "Collect", "Option": "Disabled" },
-          { "Track": "Sync",    "Option": "None" },
+          { "Track": "Sync",    "Option": "Enable" },
           { "Track": "Chocobo", "Option": "Disabled" }
         ],
         "BossMod.Autorotation.MiscAI.NormalMovement": [
@@ -76,10 +77,27 @@ public static class FateCombatPreset
     """;
 
     /// <summary>
-    /// プリセットを用意する。すでに同じ名前があれば作り直さない。
+    /// このプリセットが必ず持っていなければならない設定。
     ///
-    /// <b>上書きしない。</b>利用者が中身を調整していることがあるため、
-    /// こちらから毎回書き戻すと、その調整が消える。
+    /// <b>ここが欠けていると FATE 周回が成り立たない。</b>
+    /// 古い版で作ったプリセットが残っていると、直したはずの設定が
+    /// 効かないまま動く。実際にそうなった（Sync を None で作っていた版が
+    /// 残り、レベルシンクが入らなかった・2026-09-25）。
+    /// </summary>
+    private static readonly (string Track, string Option)[] Required =
+    [
+        ("Sync", "Enable"),
+        ("Handin", "Enabled"),
+        ("Collect", "Disabled"),
+    ];
+
+    /// <summary>
+    /// プリセットを用意する。
+    ///
+    /// <b>中身が古ければ作り直す。</b>
+    /// 利用者の調整を消さないよう、ふだんは触らない。ただし
+    /// 周回に欠かせない設定が入っていなければ、そのままでは動かないので
+    /// 作り直して記録に残す。
     /// </summary>
     /// <returns>用意できたら true。</returns>
     public static bool Ensure(BossModIpc bossMod, AnomalyLog anomalyLog)
@@ -89,19 +107,67 @@ public static class FateCombatPreset
             return false;
         }
 
-        // すでにあるなら触らない。
-        if (bossMod.TryGetPreset(Name, out var existing) && !string.IsNullOrEmpty(existing))
+        var hasExisting = bossMod.TryGetPreset(Name, out var existing) && !string.IsNullOrEmpty(existing);
+
+        if (hasExisting)
         {
+            var missing = FindMissing(existing!);
+            if (missing is null)
+            {
+                return true;
+            }
+
+            anomalyLog.Warn(
+                "Fate",
+                $"プリセット「{Name}」に {missing} が入っていないため作り直します");
+        }
+
+        if (bossMod.TryCreatePreset(Serialized, overwrite: true, out var created) && created)
+        {
+            anomalyLog.Info("Fate", $"BossMod Reborn にプリセット「{Name}」を{(hasExisting ? "作り直しました" : "作成しました")}");
             return true;
         }
 
-        if (bossMod.TryCreatePreset(Serialized, overwrite: false, out var created) && created)
+        // 作り直せなくても、すでにあるなら止めない。
+        // 足りない設定があると伝えたうえで、動くところまでは動かす。
+        if (hasExisting)
         {
-            anomalyLog.Info("Fate", $"BossMod Reborn にプリセット「{Name}」を作成しました");
+            anomalyLog.Warn("Fate", $"プリセット「{Name}」を作り直せませんでした。BossMod Reborn 側で確認してください");
             return true;
         }
 
         anomalyLog.Warn("Fate", $"BossMod Reborn にプリセット「{Name}」を作成できませんでした");
         return false;
+    }
+
+    /// <summary>
+    /// 欠けている設定を 1 つ返す。すべて揃っていれば null。
+    ///
+    /// 文字列として含まれるかだけを見る。BMR が返すのは JSON なので、
+    /// 解析せずとも「そのトラックがその値になっているか」は判る。
+    /// </summary>
+    private static string? FindMissing(string serialized)
+    {
+        foreach (var (track, option) in Required)
+        {
+            // "Track": "Sync" のすぐ後ろに "Option": "Enable" が来る形。
+            // 間の空白は BMR の書き方次第なので、両方が含まれることと、
+            // 並びが逆転していないことだけを見る。
+            var trackAt = serialized.IndexOf($"\"{track}\"", StringComparison.Ordinal);
+            if (trackAt < 0)
+            {
+                return $"{track}";
+            }
+
+            var optionAt = serialized.IndexOf($"\"{option}\"", trackAt, StringComparison.Ordinal);
+            var nextTrackAt = serialized.IndexOf("\"Track\"", trackAt + 1, StringComparison.Ordinal);
+
+            if (optionAt < 0 || (nextTrackAt >= 0 && optionAt > nextTrackAt))
+            {
+                return $"{track} = {option}";
+            }
+        }
+
+        return null;
     }
 }

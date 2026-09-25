@@ -214,6 +214,32 @@ public sealed unsafe class FateScanner(AnomalyLog anomalyLog)
         }
     }
 
+    /// <summary>
+    /// いま参加中の FATE にレベルシンクが入っているか。
+    ///
+    /// <b>シンクは自動では入らない。</b>「LEVEL SYNC」を押す必要があり、
+    /// 押さないと参加した扱いにならず、敵も狙えない。
+    /// 押すのは BossMod Reborn に任せてあるので、ここでは入ったかを見る。
+    /// </summary>
+    public bool IsPlayerSyncedToFate()
+    {
+        try
+        {
+            var manager = FateManager.Instance();
+            if (manager is null)
+            {
+                return false;
+            }
+
+            var current = manager->CurrentFate;
+            return current is not null && manager->IsSyncedToFate(current);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     /// <summary>プレイヤーが FATE の圏内にいるか。</summary>
     public bool IsPlayerInFateRadius()
     {

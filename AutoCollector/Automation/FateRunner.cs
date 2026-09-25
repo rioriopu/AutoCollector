@@ -836,6 +836,11 @@ public sealed class FateRunner(
         }
 
         this.StatusDetail = $"{current.Name}（{current.Progress}%）";
+        this.trace.State(
+            "戦闘中",
+            $"{current.Name} {current.Progress}% " +
+            $"シンク={(this.scanner.IsPlayerSyncedToFate() ? "済" : "未")} " +
+            $"プリセット={(this.presetApplied ? this.appliedPresetName : "未適用")}");
     }
 
     private void LeaveFate(Config cfg, FateInfo finished)
@@ -1005,6 +1010,9 @@ public sealed class FateRunner(
     private const string OptionDisabled = "Disabled";
     private const string OptionNone = "None";
 
+    /// <summary>レベルシンクを入れる。FateSync.Enable の名前。</summary>
+    private const string OptionSyncEnable = "Enable";
+
     /// <summary>
     /// 戦闘プリセットを有効にする。
     ///
@@ -1058,8 +1066,15 @@ public sealed class FateRunner(
         // 討伐で進めたいので必ず Disabled にする。
         TrySet(ModuleFateUtils, TrackCollect, OptionDisabled);
 
-        // レベルシンクはゲームに任せる。こちらからは触らない。
-        TrySet(ModuleFateUtils, TrackSync, OptionNone);
+        // **レベルシンクを入れさせる。**
+        //
+        // ゲームが自動でかけるものだと思っていたが、実際は
+        // 「LEVEL SYNC」を押す必要がある。押さないと FATE に
+        // 参加した扱いにならず、敵も狙わない（2026-09-25 実測）。
+        //
+        // BMR 側は IsSyncedToFate を見て、入っていなければ
+        // FateManager.LevelSync() を 0.5 秒ごとに呼ぶ。
+        TrySet(ModuleFateUtils, TrackSync, OptionSyncEnable);
 
         // バディの面倒は BuddyService が見る。二重に動かさない。
         // BMR 側は在庫があるかしか見ず、切れたときに買いに行かない。
