@@ -668,11 +668,22 @@ public sealed class FateRunner(
         // 乗ったので経路を引く。飛べる状態なら飛ぶ経路になる。
         if (!this.moveIssued)
         {
-            var flying = MountService.IsFlying;
+            // **まだ飛んでいなくても、飛ぶつもりなら fly: true で引く。**
+            //
+            // vnavmesh は「次の経路点が自分より高い」「騎乗中」
+            // 「まだ飛んでいない」「ignoreDeltaY でない」の 4 つが揃ったとき
+            // 自分でジャンプを連打して離陸する
+            // （FollowPath.cs:144）。ignoreDeltaY は fly の反転なので、
+            // 飛んでから fly: true にしたのでは離陸してくれない。
+            //
+            // 乗っていて、そのエリアで飛べるなら、飛ぶつもりで引く。
+            var flying = MountService.IsMounted && MountService.CanFlyHere;
 
-            // 飛ぶときは目的地を持ち上げる。地表どうしを結ぶと経路が
-            // 地面を擦り、起伏に触れて飛行が解ける。
-            var destination = flying ? MountService.LiftForFlight(live.Position) : live.Position;
+            // 目的地を持ち上げる。これが離陸の条件（次の点が自分より高い）
+            // を満たすことにもなり、経路が地面を擦るのも防ぐ。
+            var destination = flying
+                ? live.Position with { Y = live.Position.Y + MountService.FlightLift }
+                : live.Position;
             var moveRange = flying ? MountService.FlightLift : range;
 
             if (!this.navigation.BeginMove(destination, moveRange, flying, out var failure))

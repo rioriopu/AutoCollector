@@ -17,9 +17,19 @@ namespace AutoCollector.Automation;
 /// FATE は同じマップの中でも数百メートル離れていることがある。
 /// 徒歩で向かうと、着く前に FATE が終わってしまう。
 ///
+/// <b>離陸はしない。乗せるだけ。</b>
+/// 飛び上がるのは vnavmesh が自分で行う。FollowPath は
+/// 「次の経路点が自分より高い」「騎乗中」「まだ飛んでいない」の
+/// 3 つが揃うとジャンプを連打する（FollowPath.cs:144）。
+///
+/// こちらから撃つと二重になり、しかも離陸を待つあいだ移動を止めるため、
+/// vnavmesh が経路を進められず地上すれすれを走ることになる。
+/// 実測でそうなった（2026-09-25 中央ラノシア）。
+///
 /// <code>
-/// 目的地まで 10m 超 ＋ 乗っていない → マウントルーレット
-/// マウント中 ＋ このエリアで飛べる  → ジャンプして飛び上がる
+/// 目的地まで 20m 超 ＋ 乗っていない → マウントルーレット
+/// 乗ったら                          → あとは vnavmesh に任せる
+/// 着いたら                          → 降りる（降下は数秒かかる）
 /// </code>
 ///
 /// <b>マウントは「ルーレット」で呼ぶ。</b>
@@ -29,7 +39,7 @@ namespace AutoCollector.Automation;
 ///
 /// <b>飛べるかどうかは 2 つの意味がある。</b>
 /// PlayerState.CanFly は「このエリアで風脈を解放しているか」。
-/// 解放していないエリアでジャンプしても飛び上がらないので、そこは走る。
+/// 解放していないエリアでは飛び上がれないので、そこは走る。
 /// </summary>
 public sealed unsafe class MountService(AnomalyLog anomalyLog, FateTrace trace)
 {
@@ -45,27 +55,11 @@ public sealed unsafe class MountService(AnomalyLog anomalyLog, FateTrace trace)
     /// <summary>同じ操作を送り続けないための間隔。</summary>
     private const int ActionThrottleMs = 1000;
 
-    /// <summary>
-    /// 飛び上がったあと、上昇に使う時間。
-    ///
-    /// <b>ジャンプ 1 回では地面すれすれにしかならない。</b>
-    /// そのまま経路を追わせると、起伏に触れて飛行が解除される。
-    /// 実測（中央ラノシア）でそうなった。
-    ///
-    /// 飛行中は前進キーで斜め上に上がるのではなく、
-    /// vnavmesh が引いた 3D 経路に沿って進む。出発時に十分な高さが
-    /// 無いと、その経路自体が地面を擦る高さになる。
-    /// </summary>
-    private static readonly TimeSpan ClimbDuration = TimeSpan.FromSeconds(2.5);
-
     private readonly AnomalyLog anomalyLog = anomalyLog;
     private readonly FateTrace trace = trace;
 
     /// <summary>降りると決めたか。着くまで離陸させないための旗。</summary>
     private bool dismounting;
-
-    /// <summary>飛び上がった時刻。上昇の猶予を計るのに使う。</summary>
-    private DateTime tookOffUtc = DateTime.MinValue;
 
     /// <summary>このエリアで飛べるか（風脈を解放しているか）。</summary>
     public static bool CanFlyHere
@@ -155,34 +149,20 @@ public sealed unsafe class MountService(AnomalyLog anomalyLog, FateTrace trace)
 
         if (!IsMounted)
         {
-            this.tookOffUtc = DateTime.MinValue;
             return this.TryMount();
         }
 
-        // 乗っている。飛べないエリアなら、このまま走って向かう。
-        if (!CanFlyHere)
-        {
-            return false;
-        }
-
-        if (!IsFlying)
-        {
-            // まだ飛んでいない。飛び上がる。
-            //
-            // 2 回目以降もここへ来る。経路の途中で地面に触れて
-            // 飛行が解けたときに、もう一度飛び上がらせるため。
-            return this.TryTakeOff();
-        }
-
-        // **飛んだ直後は少しだけ待つ。**
+        // **離陸は vnavmesh に任せる。**
         //
-        // ジャンプの動作が終わる前に経路を引くと、まだ地上判定のまま
-        // 経路が作られて、地面に沿った高さになってしまう。
-        if (DateTime.UtcNow - this.tookOffUtc < ClimbDuration)
-        {
-            return true;
-        }
-
+        // FollowPath は「次の経路点が自分より高い」かつ「騎乗中」かつ
+        // 「まだ飛んでいない」なら、自分でジャンプを連打して飛び上がる
+        // （vnavmesh/Movement/FollowPath.cs:144 ExecuteJump）。
+        //
+        // こちらから撃つと二重になり、しかも離陸を待つあいだ移動を
+        // 止めるため、vnavmesh が経路を進められない。結果として
+        // 地上すれすれを走ることになった（2026-09-25 実測）。
+        //
+        // こちらの役目は「乗せること」と「目的地を上に置くこと」だけ。
         return false;
     }
 
@@ -199,8 +179,13 @@ public sealed unsafe class MountService(AnomalyLog anomalyLog, FateTrace trace)
     /// </summary>
     /// <param name="destination">本来の目的地。</param>
     /// <param name="lift">持ち上げる高さ。</param>
+    /// <remarks>
+    /// <b>飛んでいるかは見ない。</b>まだ地上にいても、これから飛ぶなら
+    /// 持ち上げた座標を渡す。vnavmesh はその高さの差を見て離陸するため、
+    /// 「飛んでから持ち上げる」のでは離陸してくれない。
+    /// </remarks>
     public static Vector3 LiftForFlight(Vector3 destination, float lift = FlightLift)
-        => IsFlying ? destination with { Y = destination.Y + lift } : destination;
+        => destination with { Y = destination.Y + lift };
 
     /// <summary>
     /// 飛行時に目的地を持ち上げる高さ。
@@ -331,29 +316,5 @@ public sealed unsafe class MountService(AnomalyLog anomalyLog, FateTrace trace)
         }
     }
 
-    private bool TryTakeOff()
-    {
-        if (!EzThrottler.Throttle("AutoCollector.TakeOff", ActionThrottleMs))
-        {
-            return true;
-        }
 
-        try
-        {
-            var am = ActionManager.Instance();
-            if (am is null)
-            {
-                return false;
-            }
-
-            am->UseAction(ActionType.GeneralAction, JumpAction);
-            this.tookOffUtc = DateTime.UtcNow;
-            return true;
-        }
-        catch (Exception ex)
-        {
-            this.anomalyLog.Warn("Mount", $"飛び上がれませんでした: {ex.Message}");
-            return false;
-        }
-    }
 }
