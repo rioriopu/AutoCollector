@@ -694,6 +694,16 @@ public sealed class FateRunner(
                 return;
             }
 
+            // 何を頼んだかを残す。飛ばないときに、条件のどれが
+            // 欠けているのかをここから辿れる。
+            this.trace.Decision(
+                "経路を引いた",
+                $"{live.Name} fly={flying} " +
+                $"騎乗={MountService.IsMounted} 飛行={MountService.IsFlying} " +
+                $"{MountService.DescribeFlightStatus()} " +
+                $"目的地の高さ={destination.Y:F0}（本来{live.Position.Y:F0}） " +
+                $"自分の高さ={(Player.Available ? Player.Position.Y : 0):F0}");
+
             this.moveIssued = true;
             this.flyingWhenIssued = flying;
             this.moveStartedUtc = DateTime.UtcNow;

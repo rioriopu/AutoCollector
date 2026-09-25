@@ -6,6 +6,7 @@ using ECommons.DalamudServices;
 using ECommons.GameHelpers;
 using ECommons.Throttlers;
 using FFXIVClientStructs.FFXIV.Client.Game;
+using FFXIVClientStructs.FFXIV.Client.Game.Control;
 using FFXIVClientStructs.FFXIV.Client.Game.UI;
 
 namespace AutoCollector.Automation;
@@ -61,7 +62,15 @@ public sealed unsafe class MountService(AnomalyLog anomalyLog, FateTrace trace)
     /// <summary>降りると決めたか。着くまで離陸させないための旗。</summary>
     private bool dismounting;
 
-    /// <summary>このエリアで飛べるか（風脈を解放しているか）。</summary>
+    /// <summary>飛べるかどうかを記録したか。乗るたび 1 度だけ出す。</summary>
+    private bool reportedFlight;
+
+    /// <summary>
+    /// このエリアで飛べるか（風脈を解放しているか）。
+    ///
+    /// <b>乗っているかは見ない。</b>「これから乗って飛ぶ」の判断に使うので、
+    /// 乗る前の時点で答えが要る。
+    /// </summary>
     public static bool CanFlyHere
     {
         get
@@ -75,6 +84,34 @@ public sealed unsafe class MountService(AnomalyLog anomalyLog, FateTrace trace)
             {
                 return false;
             }
+        }
+    }
+
+    /// <summary>
+    /// いま飛び上がれるか、そうでなければ何が足りないか。
+    ///
+    /// <b>飛べない理由をゲームが教えてくれる。</b>
+    /// PlayerState.CanFly だけでは「エリアで解放しているか」しか分からず、
+    /// クエストの未完了などは見えない。こちらは理由まで返す。
+    /// </summary>
+    public static string DescribeFlightStatus()
+    {
+        try
+        {
+            var status = Control.GetFlightAllowedStatus();
+            return status switch
+            {
+                Control.FlightAllowedStatus.CanFly => "飛べる",
+                Control.FlightAllowedStatus.NotMounted => "乗っていない",
+                Control.FlightAllowedStatus.MountedButCannotFly => "このエリアでは飛べない（風脈未解放）",
+                Control.FlightAllowedStatus.IncompleteMountFlyingConditionQuest => "飛行解放のクエストが未完了",
+                Control.FlightAllowedStatus.PlayerOrMountNull => "プレイヤーかマウントを取得できない",
+                _ => $"飛べない（{status}）",
+            };
+        }
+        catch (Exception ex)
+        {
+            return $"判定できず: {ex.Message}";
         }
     }
 
@@ -152,6 +189,16 @@ public sealed unsafe class MountService(AnomalyLog anomalyLog, FateTrace trace)
             return this.TryMount();
         }
 
+        // 乗った直後に、飛べるかどうかを 1 度だけ記録する。
+        // 飛ばないときの原因がここで分かる。
+        if (!this.reportedFlight)
+        {
+            this.reportedFlight = true;
+            this.trace.Decision(
+                "飛行の可否",
+                $"{DescribeFlightStatus()} / PlayerState.CanFly={CanFlyHere} / 飛行中={IsFlying}");
+        }
+
         // **離陸は vnavmesh に任せる。**
         //
         // FollowPath は「次の経路点が自分より高い」かつ「騎乗中」かつ
@@ -213,6 +260,7 @@ public sealed unsafe class MountService(AnomalyLog anomalyLog, FateTrace trace)
         if (!IsMounted)
         {
             this.dismounting = false;
+            this.reportedFlight = false;
             return false;
         }
 
