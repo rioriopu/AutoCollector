@@ -308,27 +308,61 @@ public sealed unsafe class MountService(AnomalyLog anomalyLog, FateTrace trace)
     /// </remarks>
     public static Vector3 LiftForFlight(Vector3 destination, float lift = FlightLift)
     {
-        var raised = destination.Y + lift;
-
         try
         {
-            // 飛べると分かっている高さ（実際に居られた高さ）を上限にする。
-            // まだ分からなければ、いま自分が居る高さを使う。
-            var ceiling = KnownCeiling ?? (Player.Available ? Player.Position.Y : (float?)null);
-
-            if (ceiling is { } limit)
+            // **もう飛んでいるなら、持ち上げない。**
+            //
+            // 持ち上げは「歩き → 飛行」へ移るためだけのもの。
+            // vnavmesh は「次の経路点が自分より高い」ときにジャンプを連打して
+            // 離陸する（FollowPath.cs の walk->fly transition）。
+            // すでに飛んでいれば、その条件は見られない（InFlight で除外される）。
+            //
+            // 飛んでいるのに持ち上げると、意味も無く高い点を目指すことになり、
+            // 高度の上限に頭を打って動けなくなる。
+            if (IsFlying)
             {
-                // 目的地より下へは下げない。地面を擦らせないため。
-                raised = MathF.Min(raised, MathF.Max(destination.Y, limit));
+                return destination;
+            }
+
+            if (Player.Available)
+            {
+                var me = Player.Position.Y;
+
+                // 目的地が自分より高いなら、持ち上げる必要が無い。
+                // すでに「次の点が自分より高い」を満たしている。
+                if (destination.Y > me)
+                {
+                    return destination;
+                }
+
+                // 自分より少しだけ高い点にする。これで離陸の条件を満たす。
+                // 高く上げる意味は無い。上限を超えれば届かなくなるだけ。
+                var takeoff = me + TakeoffMargin;
+
+                // 飛べると分かっている高さを超えない。
+                if (KnownCeiling is { } ceiling)
+                {
+                    takeoff = MathF.Min(takeoff, ceiling);
+                }
+
+                return destination with { Y = MathF.Max(destination.Y, takeoff) };
             }
         }
         catch
         {
-            // 読めなければ持ち上げたままにする。ふだんの動きは変えない。
+            // 読めないときは、従来どおり持ち上げる。
         }
 
-        return destination with { Y = raised };
+        return destination with { Y = destination.Y + lift };
     }
+
+    /// <summary>
+    /// 離陸させるために、自分より高くする分。
+    ///
+    /// vnavmesh は「次の経路点が自分より高い」ことだけを見るので、
+    /// わずかでよい。大きくすると高度の上限に当たりやすくなる。
+    /// </summary>
+    private const float TakeoffMargin = 3f;
 
     /// <summary>
     /// 飛行時に目的地を持ち上げる高さ。
