@@ -10,6 +10,15 @@ namespace AutoCollector.Automation;
 /// <b>利用者にプリセットを作らせない。</b>
 /// どれを選べばよいか分からないのが普通なので、こちらで作って設定する。
 ///
+/// <b>ジョブのローテーションも入れる。</b>
+/// AutoTarget は的を決めるだけ、NormalMovement は動くだけで、
+/// 技を撃つのはジョブごとのモジュール。これが無いと、敵を狙ったまま
+/// 何もしない。
+///
+/// 全ジョブ分を並べてあるが、BMR は自分のジョブに合わないモジュールを
+/// 自動で外す（RotationModuleManager.RebuildActiveModules が
+/// def.Classes[player.Class] で弾く）。そのため全部書いて構わない。
+///
 /// 目指す挙動:
 /// <list type="bullet">
 /// <item>FATE の中のモンスターは自分から攻撃しに行く</item>
@@ -71,7 +80,35 @@ public static class FateCombatPreset
         ],
         "BossMod.Autorotation.MiscAI.NormalMovement": [
           { "Track": "Destination", "Option": "Pathfind" }
-        ]
+        ],
+        "BossMod.Autorotation.xan.PLD": [],
+        "BossMod.Autorotation.VeynWAR": [],
+        "BossMod.Autorotation.xan.DRK": [],
+        "BossMod.Autorotation.xan.GNB": [],
+        "BossMod.Autorotation.xan.WHM": [],
+        "BossMod.Autorotation.xan.SCH": [],
+        "BossMod.Autorotation.xan.AST": [],
+        "BossMod.Autorotation.xan.SGE": [],
+        "BossMod.Autorotation.xan.MNK": [],
+        "BossMod.Autorotation.xan.DRG": [],
+        "BossMod.Autorotation.xan.NIN": [],
+        "BossMod.Autorotation.xan.SAM": [],
+        "BossMod.Autorotation.xan.RPR": [],
+        "BossMod.Autorotation.xan.VPR": [],
+        "BossMod.Autorotation.xan.BRD": [],
+        "BossMod.Autorotation.xan.MCH": [],
+        "BossMod.Autorotation.xan.DNC": [],
+        "BossMod.Autorotation.xan.BLM": [],
+        "BossMod.Autorotation.xan.SMN": [],
+        "BossMod.Autorotation.xan.RDM": [],
+        "BossMod.Autorotation.xan.PCT": [],
+        "BossMod.Autorotation.xan.BLU": [],
+        "BossMod.Autorotation.xan.BST": [],
+        "BossMod.Autorotation.xan.TankAI": [],
+        "BossMod.Autorotation.xan.HealerAI": [],
+        "BossMod.Autorotation.xan.MeleeAI": [],
+        "BossMod.Autorotation.xan.RangedAI": [],
+        "BossMod.Autorotation.xan.Caster": []
       }
     }
     """;
@@ -90,6 +127,18 @@ public static class FateCombatPreset
         ("Handin", "Enabled"),
         ("Collect", "Disabled"),
     ];
+
+    /// <summary>
+    /// 入っていなければならないモジュール。
+    ///
+    /// <b>ジョブのローテーションが無いと、狙うだけで技を撃たない。</b>
+    /// AutoTarget は的を決めるだけ、NormalMovement は動くだけ。
+    /// 技を撃つのはジョブごとのモジュール。
+    /// これが抜けていて、敵を狙ったまま何もしなかった（2026-09-25 実測）。
+    ///
+    /// 代表として侍を見る。1 つでも入っていれば、他も同時に書き込まれている。
+    /// </summary>
+    private const string RequiredModule = "BossMod.Autorotation.xan.SAM";
 
     /// <summary>
     /// プリセットを用意する。
@@ -148,6 +197,11 @@ public static class FateCombatPreset
     /// </summary>
     private static string? FindMissing(string serialized)
     {
+        if (!serialized.Contains(RequiredModule, StringComparison.Ordinal))
+        {
+            return "ジョブのローテーション";
+        }
+
         foreach (var (track, option) in Required)
         {
             // "Track": "Sync" のすぐ後ろに "Option": "Enable" が来る形。
