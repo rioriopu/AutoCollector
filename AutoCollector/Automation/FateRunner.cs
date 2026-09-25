@@ -87,6 +87,16 @@ public sealed class FateRunner(
     /// <summary>移動が進まないまま経過したら、その FATE を諦める。</summary>
     private static readonly TimeSpan MoveTimeout = TimeSpan.FromSeconds(90);
 
+    /// <summary>
+    /// 飛ぶために、乗れるのを待つ上限。
+    ///
+    /// これを過ぎても乗れないなら、地上の経路で向かう。
+    /// 乗騎が解放されていない、直前の戦闘で行動が塞がれているなど、
+    /// 待っても乗れない事情がありうる。待ち続けて一歩も進まないより、
+    /// 走ってでも着いたほうがよい。
+    /// </summary>
+    private static readonly TimeSpan MountWaitBeforeGroundPath = TimeSpan.FromSeconds(5);
+
     /// <summary>同じ FATE で詰まってよい回数。超えたら二度と狙わない。</summary>
     private const int MaxStuckPerFate = 2;
 
@@ -730,6 +740,28 @@ public sealed class FateRunner(
                 this.StatusDetail = $"{live.Name} へ向かう準備をしています";
                 return;
             }
+
+            // **乗る前に地上の経路を引かない。**
+            //
+            // 乗る動作には 1 秒ほどかかる。その間に経路を引くと地上の経路になり、
+            // 乗り終わっても地面を走り続けることになる。
+            // まだ乗っておらず、これから乗って飛べるのなら、経路は引かずに待つ。
+            //
+            // GatherBuddyReborn も既定ではこうしている
+            // （AutoGather.Movement.cs の Navigate: 乗ると決めたら
+            // MoveWhileMounting が無ければ StopNavigation して抜ける）。
+            //
+            // ただし待ち続けない。乗れない事情（乗騎が解放されていない、
+            // 直前の戦闘で行動が塞がれている等）があるなら、地上で向かう。
+            if (!this.moveIssued
+                && !MountService.IsMounted
+                && MountService.CanFlyHere
+                && DateTime.UtcNow - this.moveStartedUtc < MountWaitBeforeGroundPath)
+            {
+                this.StatusDetail = $"{live.Name} へ飛ぶ準備をしています";
+                this.trace.State("経路を待つ", "乗ってから飛ぶ経路を引く");
+                return;
+            }
         }
 
         // **飛行が解けたら経路を引き直す。**
@@ -738,6 +770,20 @@ public sealed class FateRunner(
         // 乗り直し・飛び直しのあとに経路も引き直す。
         if (this.moveIssued && this.flyingWhenIssued && !MountService.IsFlying)
         {
+            this.navigation.Stop();
+            this.moveIssued = false;
+        }
+
+        // **乗れたら経路を引き直す。**
+        //
+        // 乗るには 1 秒ほどかかる。その間に地上の経路を引いてしまうと、
+        // 乗り終わってもそのまま地面を走り続ける。引き直す口がここに
+        // 無かったため、一度地上で引かれたら二度と飛ばなかった
+        // （2026-09-25 実測。48.615 に 騎乗=False で地上の経路を引き、
+        // 49.232 に乗れたが、最後まで地上のままだった）。
+        if (this.moveIssued && !this.flyingWhenIssued && MountService.IsMounted && MountService.CanFlyHere)
+        {
+            this.trace.Decision("経路を引き直す", "乗れたので飛ぶ経路にする");
             this.navigation.Stop();
             this.moveIssued = false;
         }
