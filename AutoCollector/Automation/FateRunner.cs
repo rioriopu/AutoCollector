@@ -143,8 +143,14 @@ public sealed class FateRunner(
     /// <summary>詰まったときに避ける球の半径。迂回するたびに広げる。</summary>
     private const float DetourRadiusMeters = 15f;
 
-    /// <summary>1 つの移動で迂回を試す上限。これを超えたら諦める。</summary>
-    private const int MaxDetours = 3;
+    /// <summary>1 つの移動で迂回を試す上限。これを超えたら力づくで離れる。</summary>
+    private const int MaxDetours = 2;
+
+    /// <summary>詰まりから抜け出そうとする上限。これを超えたら諦める。</summary>
+    private const int MaxEscapeAttempts = 4;
+
+    /// <summary>抜け出す動きに与える時間。この間は測り直さない。</summary>
+    private static readonly TimeSpan EscapeSettleTime = TimeSpan.FromSeconds(4);
 
     /// <summary>
     /// 敵が 1 匹も見えないとき、中心からこれ以上離れていたら寄る。
@@ -206,8 +212,8 @@ public sealed class FateRunner(
     /// <summary>この移動で迂回を試した回数。</summary>
     private int blockDetours;
 
-    /// <summary>この移動でメッシュを読み込み直したか。二度はやらない。</summary>
-    private bool reloadedForBlock;
+    /// <summary>この移動で、詰まりから抜け出そうとした回数。</summary>
+    private int escapeAttempts;
 
     /// <summary>頼んである迂回の経路探索。出来るまで待つ。</summary>
     private System.Threading.Tasks.Task<System.Collections.Generic.List<Vector3>>? detourTask;
@@ -798,7 +804,7 @@ public sealed class FateRunner(
         this.blockCheckedUtc = DateTime.MinValue;
         this.blockDetours = 0;
         this.detourTask = null;
-        this.reloadedForBlock = false;
+        this.escapeAttempts = 0;
 
         // 向かう先が、さっき離れた FATE とは別なら、覚えていた印を消す。
         // 同じ番号の FATE が後から湧いたときに、入れなくなるのを防ぐ。
@@ -1124,37 +1130,10 @@ public sealed class FateRunner(
             return;
         }
 
-        // 何度も迂回して駄目なら、メッシュを読み込み直して仕切り直す。
-        //
-        // <b>迂回だけでは抜けられないことがある。</b>
-        // 地形の内側や、狭い隙間に入り込んでいると、
-        // いまの場所を避ける経路を引いても、そもそも出口が無い。
-        //
-        // 読み込み直すと経路探索も全部取り消されるので、
-        // 積んであった経路が一度きれいに消える。そのうえで
-        // 少し離れた場所へ飛び直させて、詰まりから出す。
+        // 迂回で駄目なら、経路を捨ててその場から力づくで離れる。
         if (this.blockDetours >= MaxDetours)
         {
-            if (!this.reloadedForBlock)
-            {
-                this.reloadedForBlock = true;
-                this.trace.Trouble("メッシュを読み込み直す", $"{fate.Name} へ {this.blockDetours} 回迂回しても進めません");
-
-                this.navigation.Stop();
-                this.moveIssued = false;
-                this.vnavmesh.TryReloadNavmesh(out _);
-
-                // 読み込みに少し時間がかかる。待ってから測り直す。
-                this.blockCheckedUtc = now + TimeSpan.FromSeconds(5);
-                this.blockCheckPosition = here;
-                this.blockDetours = 0;
-                return;
-            }
-
-            this.trace.Trouble("読み込み直しても進めない", $"{fate.Name} を諦めます");
-            this.navigation.Stop();
-            this.MarkStuck(fate.Id);
-            this.target = null;
+            this.EscapeStuckSpot(fate, now, here);
             return;
         }
 
@@ -1197,6 +1176,64 @@ public sealed class FateRunner(
         this.trace.Trouble("迂回の経路が頼めない", $"{fate.Name} へ普通に引き直します");
         this.navigation.Stop();
         this.moveIssued = false;
+    }
+
+    /// <summary>
+    /// 詰まった場所から力づくで離れる。
+    ///
+    /// <b>経路探索に頼らない。</b>
+    /// 地形の内側や狭い隙間に入り込むと、そこを起点にした経路は
+    /// どう引いても出口が無く、迂回もメッシュの引き直しも効かない。
+    ///
+    /// そこへ連れてきたのはこちらなので、こちらで出す。
+    /// vnavmesh の Path.MoveTo は経路探索を通さず、渡した点へそのまま向かう。
+    /// これで真上や斜め上へ動かし、詰まりから抜け出す。
+    ///
+    /// GatherBuddyReborn も同じ考え方で、詰まったときは
+    /// ナビメッシュを介さず直接movementを奪って 25m 先へ動かしている
+    /// （AutoGather/Helpers/AdvancedUnstuck.cs の Start）。
+    /// </summary>
+    private void EscapeStuckSpot(FateInfo fate, DateTime now, Vector3 here)
+    {
+        this.escapeAttempts++;
+
+        if (this.escapeAttempts > MaxEscapeAttempts)
+        {
+            this.trace.Trouble("抜け出せない", $"{fate.Name} を諦めます（{this.escapeAttempts - 1} 回試行）");
+            this.navigation.Stop();
+            this.MarkStuck(fate.Id);
+            this.target = null;
+            return;
+        }
+
+        // 積んである経路を捨てる。残っていると、また同じ壁へ押し付けられる。
+        this.navigation.Stop();
+        this.moveIssued = false;
+
+        // **まず真上へ。**地形に潜り込んでいる場合、横へ動かしても抜けない。
+        // 回を追うごとに高く、そして横へも広げる。
+        var lift = 20f * this.escapeAttempts;
+        var angle = this.escapeAttempts * 2.39996f; // 黄金角。毎回ちがう向きになる
+        var spread = 10f * (this.escapeAttempts - 1);
+
+        var away = new Vector3(
+            here.X + (MathF.Cos(angle) * spread),
+            here.Y + lift,
+            here.Z + (MathF.Sin(angle) * spread));
+
+        this.trace.Trouble(
+            "詰まった場所から離れる",
+            $"{fate.Name} ({here.X:F0},{here.Y:F0},{here.Z:F0}) → " +
+            $"({away.X:F0},{away.Y:F0},{away.Z:F0}) {this.escapeAttempts} 回目");
+
+        // 経路探索を通さずに、その点へ直接向かわせる。
+        this.vnavmesh.TryMoveAlong([away], true);
+
+        // 動く時間を与えてから測り直す。
+        this.blockCheckedUtc = now + EscapeSettleTime;
+        this.blockCheckPosition = here;
+        this.blockDetours = 0;
+        this.detourTask = null;
     }
 
     /// <summary>
@@ -1291,11 +1328,27 @@ public sealed class FateRunner(
                     $"({Player.Position.X:F0},{Player.Position.Y:F0},{Player.Position.Z:F0}) → " +
                     $"({spot.X:F0},{spot.Y:F0},{spot.Z:F0})");
 
-                // 少し持ち上げて飛んで向かう。着いたら降下の段取りに戻る。
-                this.navigation.BeginMove(MountService.LiftForFlight(spot), 3f, true, out _);
+                // **経路探索を通さずに向かう。**
+                //
+                // 降りられない場所は、たいてい経路も引けない場所でもある。
+                // BeginMove で頼むと経路が見つからず、その場に浮いたままになる。
+                // Path.MoveTo は渡した点へそのまま向かうので、ここを抜けられる。
+                //
+                // 途中で引っかからないよう、いったん上へ出てから向かう。
+                var overhead = Player.Position with { Y = Player.Position.Y + 20f };
+                this.vnavmesh.TryMoveAlong([overhead, MountService.LiftForFlight(spot), spot], true);
+
                 this.landingSinceUtc = DateTime.UtcNow;
                 this.landingRefuge = spot;
                 return;
+            }
+
+            // 立てる場所すら分からない。力づくで上へ出てから考え直す。
+            if (Player.Available)
+            {
+                var up = Player.Position with { Y = Player.Position.Y + 30f };
+                this.trace.Trouble("降りられる所が無い", $"いったん上へ出ます ({up.Y:F0})");
+                this.vnavmesh.TryMoveAlong([up], true);
             }
 
             this.MarkStuck(fate.Id);
