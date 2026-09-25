@@ -112,6 +112,17 @@ public sealed class FateRunner(
     private static readonly TimeSpan PresetCheckInterval = TimeSpan.FromSeconds(1);
 
     /// <summary>
+    /// 追いかけている敵がこれだけ動いたら、経路を引き直す。
+    ///
+    /// 小さくすると敵に吸い付くが、引き直しが増えて足が止まる。
+    /// 敵が多少動いても、近づいていれば BMR が拾うので、粗くてよい。
+    /// </summary>
+    private const float ApproachRepathMeters = 5f;
+
+    /// <summary>近づく経路を引き直す間隔。経路探索は重いので続けて投げない。</summary>
+    private static readonly TimeSpan ApproachRepathInterval = TimeSpan.FromSeconds(1);
+
+    /// <summary>
     /// 敵が 1 匹も見えないとき、中心からこれ以上離れていたら寄る。
     ///
     /// 円の端では敵が湧いても見えないことがある。
@@ -191,6 +202,15 @@ public sealed class FateRunner(
 
     /// <summary>敵へ近づいている最中か。戦闘に入ったら下ろす。</summary>
     private bool approaching;
+
+    /// <summary>いま経路を引いている先。敵が動いても、ここから離れるまでは引き直さない。</summary>
+    private Vector3 approachTarget;
+
+    /// <summary>近づく経路を最後に引いた時刻。続けて引き直さないための間隔に使う。</summary>
+    private DateTime approachIssuedUtc = DateTime.MinValue;
+
+    /// <summary>近づく経路を引いた回数。増え続けるなら引き直しすぎている。</summary>
+    private int approachIssues;
 
     /// <summary>vnavmesh で歩かせるためにプリセットの移動を止めているか。止めたぶんは必ず戻す。</summary>
     private bool movementParked;
@@ -1135,8 +1155,29 @@ public sealed class FateRunner(
     {
         if (this.approaching)
         {
-            // 経路が切れていたら引き直す。
-            if (this.navigation.Tick(destination, MobReachMeters) is MoveStatus.Moving)
+            // **追いかける先は、動いた分だけ引き直す。**
+            //
+            // 敵は動く。毎フレーム新しい座標を渡すと、そのたびに
+            // 「目的地が変わった」と見えて経路を引き直すことになる。
+            // 経路を引き直すたびに足が止まるので、進んでは止まりを
+            // 繰り返してガクガク動く（2026-09-25 実測。170 ミリ秒ごとに
+            // 引き直していて、その間ほとんど進んでいなかった）。
+            //
+            // 少し動いたくらいでは引き直さない。最後に狙った場所から
+            // 大きく離れたときだけ引き直す。
+            var moved = Vector3.Distance(destination, this.approachTarget);
+
+            if (moved <= ApproachRepathMeters &&
+                this.navigation.Tick(this.approachTarget, MobReachMeters) is MoveStatus.Moving)
+            {
+                return;
+            }
+
+            // 引き直す間隔も空ける。経路探索そのものが重く、
+            // 続けて投げると足が止まったままになる。
+            if (moved > ApproachRepathMeters &&
+                DateTime.UtcNow - this.approachIssuedUtc < ApproachRepathInterval &&
+                this.navigation.Tick(this.approachTarget, MobReachMeters) is MoveStatus.Moving)
             {
                 return;
             }
@@ -1166,13 +1207,19 @@ public sealed class FateRunner(
         // 歩いている間はプリセットの移動を止める。止めないと vnavmesh と取り合う。
         this.ParkPresetMovement();
         this.approaching = true;
-        this.trace.Decision("敵へ近づく", why);
+        this.approachTarget = destination;
+        this.approachIssuedUtc = DateTime.UtcNow;
+
+        // 引き直した回数を出す。ガクガクするときはここが増え続ける。
+        this.approachIssues++;
+        this.trace.Decision("敵へ近づく", $"{why}（経路 {this.approachIssues} 回目）");
     }
 
     /// <summary>近づく移動をやめ、プリセットの移動を戻す。</summary>
     private void StopApproach()
     {
         this.approaching = false;
+        this.approachIssues = 0;
         this.navigation.Stop();
         this.ResumePresetMovement();
     }
