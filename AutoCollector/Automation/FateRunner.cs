@@ -173,6 +173,9 @@ public sealed class FateRunner(
     /// </summary>
     private (uint TerritoryId, ushort Id, Vector3 Point)? landable;
 
+    /// <summary>降りられずに移っている先。着くまで降下を試さない。</summary>
+    private Vector3? landingRefuge;
+
     /// <summary>このセッションで詰まった FATE。もう狙わない。</summary>
     private readonly HashSet<ushort> blacklist = [];
 
@@ -308,6 +311,7 @@ public sealed class FateRunner(
         this.pendingReward = null;
         this.leftFateId = null;
         this.landable = null;
+        this.landingRefuge = null;
         this.Completed = 0;
         this.StoppedReason = null;
         this.presetApplied = false;
@@ -957,6 +961,7 @@ public sealed class FateRunner(
         }
 
         this.landingSinceUtc = DateTime.UtcNow;
+        this.landingRefuge = null;
         this.SetStep(FateStep.Landing, $"{fate.Name} に着きました（降りています）");
     }
 
@@ -990,11 +995,54 @@ public sealed class FateRunner(
         {
             this.trace.Trouble("着地できない", $"{LandingTimeout.TotalSeconds:F0}秒たっても降りられませんでした");
             this.mount.ClearDismounting();
+
+            // **その場に浮いたまま放り出さない。**
+            //
+            // 水面の上など、降りられない場所で諦めると、空中に止まったまま
+            // 次の判断へ進むことになる。そこから次の FATE を目指しても、
+            // 出発点が宙に浮いたままなので経路が引けないことがある。
+            //
+            // 立てる場所を聞いて、そこまで飛んでから降りる。
+            if (Player.Available &&
+                this.vnavmesh.TryIsReady(out var meshReady) && meshReady &&
+                this.vnavmesh.TryNearestPointReachable(Player.Position, 50f, 100f, out var refuge) &&
+                refuge is { } spot)
+            {
+                this.trace.Decision(
+                    "降りられる所まで移る",
+                    $"({Player.Position.X:F0},{Player.Position.Y:F0},{Player.Position.Z:F0}) → " +
+                    $"({spot.X:F0},{spot.Y:F0},{spot.Z:F0})");
+
+                // 少し持ち上げて飛んで向かう。着いたら降下の段取りに戻る。
+                this.navigation.BeginMove(MountService.LiftForFlight(spot), 3f, true, out _);
+                this.landingSinceUtc = DateTime.UtcNow;
+                this.landingRefuge = spot;
+                return;
+            }
+
             this.MarkStuck(fate.Id);
             this.target = null;
             this.SetStep(FateStep.Waiting, "FATE を探しています");
             this.waitingSinceUtc = DateTime.UtcNow;
             return;
+        }
+
+        // 立てる場所へ移っている最中は、着くまで降りようとしない。
+        // 降下と移動が競合して、また同じ所で止まる。
+        if (this.landingRefuge is { } moving)
+        {
+            var flat = Vector2.Distance(
+                new Vector2(Player.Position.X, Player.Position.Z),
+                new Vector2(moving.X, moving.Z));
+
+            if (flat > 5f)
+            {
+                this.trace.State("移動中（着地先）", $"あと {flat:F0}m");
+                return;
+            }
+
+            this.navigation.Stop();
+            this.landingRefuge = null;
         }
 
         this.mount.TickDismount();
@@ -1078,6 +1126,7 @@ public sealed class FateRunner(
             if (this.Step != FateStep.Landing)
             {
                 this.landingSinceUtc = DateTime.UtcNow;
+                this.landingRefuge = null;
                 this.navigation.Stop();
                 this.SetStep(FateStep.Landing, $"{current.Name} に入りました（降りています）");
             }
