@@ -137,6 +137,9 @@ public sealed class Plugin : IDalamudPlugin
 
     internal MountService MountService { get; private set; } = null!;
 
+    /// <summary>FATE 周回の動きを追うための記録。</summary>
+    internal FateTrace FateTrace { get; private set; } = null!;
+
     /// <summary>収集品の出どころ（製作か採集か）を数える。</summary>
     internal CollectableSourceService CollectableSource { get; private set; } = null!;
 
@@ -474,12 +477,13 @@ public sealed class Plugin : IDalamudPlugin
         // FATE 周回。バイカラージェムのように FATE でしか増えない通貨を受け持つ。
         // 移動は専用の NavigationService を持たせる。交換の移動と同じ実体を使うと、
         // 片方を止めたときにもう片方の経路まで消える。
+        this.FateTrace = new FateTrace(this.AnomalyLog);
         this.BossMod = new BossModIpc(this.AnomalyLog);
         this.FateScanner = new FateScanner(this.AnomalyLog);
         this.FateZoneCatalog = new FateZoneCatalog(this.AnomalyLog);
         this.FateTokens = new FateTokenService(this.AnomalyLog);
         this.BuddyService = new BuddyService(this.AnomalyLog);
-        this.MountService = new MountService(this.AnomalyLog);
+        this.MountService = new MountService(this.AnomalyLog, this.FateTrace);
         this.FateRunner = new FateRunner(
             this.AnomalyLog,
             this.FateScanner,
@@ -487,6 +491,7 @@ public sealed class Plugin : IDalamudPlugin
             this.BossMod,
             this.BuddyService,
             this.MountService,
+            this.FateTrace,
             this.Lifestream,
             this.AetheryteService);
         this.Fate = new FateEarner(this.FateRunner, this.FateTokens, this.AnomalyLog);

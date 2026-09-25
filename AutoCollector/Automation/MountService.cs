@@ -31,7 +31,7 @@ namespace AutoCollector.Automation;
 /// PlayerState.CanFly は「このエリアで風脈を解放しているか」。
 /// 解放していないエリアでジャンプしても飛び上がらないので、そこは走る。
 /// </summary>
-public sealed unsafe class MountService(AnomalyLog anomalyLog)
+public sealed unsafe class MountService(AnomalyLog anomalyLog, FateTrace trace)
 {
     /// <summary>マウントルーレット。利用者が設定したマウントが出る。</summary>
     private const uint MountRouletteAction = 9;
@@ -59,6 +59,10 @@ public sealed unsafe class MountService(AnomalyLog anomalyLog)
     private static readonly TimeSpan ClimbDuration = TimeSpan.FromSeconds(2.5);
 
     private readonly AnomalyLog anomalyLog = anomalyLog;
+    private readonly FateTrace trace = trace;
+
+    /// <summary>降りると決めたか。着くまで離陸させないための旗。</summary>
+    private bool dismounting;
 
     /// <summary>飛び上がった時刻。上昇の猶予を計るのに使う。</summary>
     private DateTime tookOffUtc = DateTime.MinValue;
@@ -123,7 +127,25 @@ public sealed unsafe class MountService(AnomalyLog anomalyLog)
             return true;
         }
 
-        var distance = Vector3.Distance(Player.Position, destination);
+        // **降りると決めたあとは、着くまで何もしない。**
+        //
+        // 空中で降りる操作をすると降下が始まり、その最中は InFlight が
+        // false になる。ここで「飛んでいない」と見て飛び上がらせると、
+        // 降りかけては上がるのを繰り返す。
+        //
+        // **距離の判定より先に置く。** 着いた場所で降りている最中は
+        // 距離が近いので、あとに置くと素通りしてしまう。
+        if (this.dismounting)
+        {
+            this.trace.State("マウント", $"降りています（{FateTrace.Describe()}）");
+            return true;
+        }
+
+        // 水平の距離で測る。飛んでいる最中は真上に数十メートルの差があり、
+        // そのまま測ると近くても「遠い」と出る。
+        var distance = Vector2.Distance(
+            new Vector2(Player.Position.X, Player.Position.Z),
+            new Vector2(destination.X, destination.Z));
 
         // 近ければ歩く。乗り降りのほうが時間を食う。
         if (distance < MinDistanceToMount)
@@ -187,13 +209,30 @@ public sealed unsafe class MountService(AnomalyLog anomalyLog)
     /// </summary>
     public const float FlightLift = 30f;
 
-    /// <summary>マウントから降りる。降りるまで true（まだ途中）を返す。</summary>
+    /// <summary>
+    /// マウントから降りる。降りるまで true（まだ途中）を返す。
+    ///
+    /// <b>空中では 1 回では降りない。</b>
+    /// 上空で降りる操作をすると、その場から降下が始まるだけで、
+    /// 地面に着くまで数秒かかる。その間もずっと「騎乗中」のままなので、
+    /// 呼び出し側は true が返るあいだ待ち続けること。
+    ///
+    /// <b>降下中は飛行の判定が落ちる。</b>
+    /// 降下に入ると InFlight が false になるが、まだ騎乗中で空にいる。
+    /// ここを「飛んでいないから飛び上がろう」と扱うと、降りかけては
+    /// 上がるのを繰り返す。実際にそうなった（2026-09-25 中央ラノシア）。
+    /// そのため降りると決めた時点で旗を立て、着くまで離陸を止める。
+    /// </summary>
     public bool TickDismount()
     {
         if (!IsMounted)
         {
+            this.dismounting = false;
             return false;
         }
+
+        // 降りると決めた。着くまで離陸させない。
+        this.dismounting = true;
 
         if (Player.IsCasting || Player.IsAnimationLocked)
         {
@@ -208,6 +247,7 @@ public sealed unsafe class MountService(AnomalyLog anomalyLog)
         try
         {
             ActionManager.Instance()->UseAction(ActionType.Mount, 0);
+            this.trace.Decision("降りる", IsFlying ? "空中なので降下してから降りる" : "地上で降りる");
         }
         catch (Exception ex)
         {
@@ -216,6 +256,14 @@ public sealed unsafe class MountService(AnomalyLog anomalyLog)
 
         return true;
     }
+
+    /// <summary>
+    /// 降りる途中かどうかを忘れる。
+    ///
+    /// 目的地が変わって、また飛んで向かうときに呼ぶ。
+    /// これを呼ばないと二度と離陸しない。
+    /// </summary>
+    public void ClearDismounting() => this.dismounting = false;
 
     private bool TryMount()
     {

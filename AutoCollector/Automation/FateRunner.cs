@@ -67,6 +67,7 @@ public sealed class FateRunner(
     BossModIpc bossMod,
     BuddyService buddy,
     MountService mount,
+    FateTrace trace,
     LifestreamIpc lifestream,
     AetheryteService aetherytes)
 {
@@ -91,6 +92,7 @@ public sealed class FateRunner(
     private readonly BossModIpc bossMod = bossMod;
     private readonly BuddyService buddy = buddy;
     private readonly MountService mount = mount;
+    private readonly FateTrace trace = trace;
     private readonly LifestreamIpc lifestream = lifestream;
     private readonly AetheryteService aetherytes = aetherytes;
 
@@ -570,6 +572,14 @@ public sealed class FateRunner(
         this.target = fate;
         this.moveStartedUtc = DateTime.UtcNow;
         this.moveIssued = false;
+
+        // 別の FATE へ向かうので、降りる途中だった記録は捨てる。
+        // 残すと二度と飛ばなくなる。
+        this.mount.ClearDismounting();
+
+        this.trace.Decision(
+            "次の FATE へ",
+            $"{fate.Name} 進捗{fate.Progress}% {FateTrace.DescribeDistance(fate.Position)}");
         this.SetStep(FateStep.MovingToFate, $"{fate.Name} へ向かっています");
     }
 
@@ -694,6 +704,10 @@ public sealed class FateRunner(
                 }
 
                 this.StatusDetail = $"{live.Name} へ向かっています（{live.Progress}%）";
+                this.trace.State(
+                    "移動中",
+                    $"{live.Name} {live.Progress}% {FateTrace.DescribeDistance(live.Position)} " +
+                    $"経路={(this.flyingWhenIssued ? "飛行" : "地上")}");
                 return;
         }
     }
@@ -1032,6 +1046,7 @@ public sealed class FateRunner(
     {
         if (this.Step != step)
         {
+            this.trace.Decision($"{this.Step} → {step}", detail);
             this.Step = step;
         }
 
