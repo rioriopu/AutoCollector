@@ -51,6 +51,8 @@ public sealed class FateTab(Plugin plugin)
         ImGui.Separator();
 
         DrawMisc(cfg);
+
+        this.DrawTestTools();
     }
 
     // ---- いまの状態と操作 ----
@@ -480,6 +482,60 @@ public sealed class FateTab(Plugin plugin)
         ImGui.TextWrapped(
             "中断するのは FATE の切れ目です。戦っている最中や、"
             + "納品 FATE の報酬を待っている間は中断しません。");
+        ImGui.Unindent();
+    }
+
+    /// <summary>
+    /// 検証のための仕掛け。
+    ///
+    /// <b>マップの FATE が枯れる状況は、待っていても滅多に起きない。</b>
+    /// 次のマップへ移る動きを確かめられないので、
+    /// 「見つからない」と思い込ませる口を用意する。
+    /// </summary>
+    private void DrawTestTools()
+    {
+        ImGui.Spacing();
+
+        if (!ImGui.CollapsingHeader("動作確認用"))
+        {
+            return;
+        }
+
+        ImGui.Indent();
+
+        var pretend = this.plugin.FateScanner.PretendEmpty;
+        if (ImGui.Checkbox("FATE が見つからないことにする", ref pretend))
+        {
+            this.plugin.FateScanner.PretendEmpty = pretend;
+
+            // 記録に残す。あとでログを読むとき、本当に枯れていたのか
+            // こちらが枯れたことにしたのかが分からないと判断を誤る。
+            this.plugin.AnomalyLog.Warn(
+                "Fate",
+                pretend
+                    ? "【動作確認】FATE が見つからないことにします。次のマップへ移る動きを確かめます"
+                    : "【動作確認】FATE を通常どおり探します");
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(
+                "このマップに狙える FATE が 1 つも無い、と思い込ませます。\n"
+                + "次のマップへテレポするかを確かめるために使います。\n"
+                + "\n"
+                + "いま参加している FATE には効きません。\n"
+                + "戦っている最中に切ると、後始末を通らずに離脱してしまうためです。\n"
+                + "\n"
+                + "設定には保存しません。読み込み直すと戻ります。");
+        }
+
+        if (pretend)
+        {
+            ImGui.TextColored(
+                ImGuiColors.DalamudOrange,
+                "  FATE を探さない状態です。確認が済んだら外してください");
+        }
+
         ImGui.Unindent();
     }
 

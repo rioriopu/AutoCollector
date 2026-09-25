@@ -130,8 +130,26 @@ public sealed unsafe class FateScanner(AnomalyLog anomalyLog)
     public string? LastError { get; private set; }
 
     /// <summary>いまのエリアに湧いている FATE をすべて読む。読めなければ空を返す。</summary>
+    /// <summary>
+    /// 検証用に、FATE が 1 つも無いことにする。
+    ///
+    /// <b>マップの FATE が枯れた状況は、待っていても滅多に起きない。</b>
+    /// 次のマップへ移る動きを確かめるために、こちらから
+    /// 「見つからない」と思い込ませる。
+    ///
+    /// 参加中の FATE（<see cref="GetCurrent"/>）には効かせない。
+    /// 戦っている最中に切ると、戦闘の後始末を通らずに離脱してしまう。
+    /// </summary>
+    public bool PretendEmpty { get; set; }
+
     public IReadOnlyList<FateInfo> ListAll()
     {
+        // 検証用。見つからないことにする。
+        if (this.PretendEmpty)
+        {
+            return [];
+        }
+
         try
         {
             var manager = FateManager.Instance();
