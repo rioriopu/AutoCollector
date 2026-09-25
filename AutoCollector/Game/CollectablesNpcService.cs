@@ -94,8 +94,10 @@ public sealed class CollectablesNpcService(AnomalyLog anomalyLog, NpcLocationSer
 
             if (bases is null || talks is null)
             {
+                // 控えない。ここで空を控えると IsBuilt が「走査済み」を名乗り、
+                // 以後ずっと納品先が見つからないまま固定される。
                 this.anomalyLog.Error("Collectables", "シートを読めないため納品窓口を探せません");
-                return this.cache = found;
+                return found;
             }
 
             foreach (var npc in bases)
@@ -144,6 +146,17 @@ public sealed class CollectablesNpcService(AnomalyLog anomalyLog, NpcLocationSer
         catch (Exception ex)
         {
             this.anomalyLog.Error("Collectables", $"納品窓口を探せませんでした: {ex.Message}");
+
+            // **途中結果を完成として覚えない。**
+            // 6 万行の走査中に 1 回でも例外が出ると、そこまでの部分結果が
+            // 「全部見つけた」扱いで確定してしまう。
+            return found;
+        }
+
+        // 空なら控えない。次に呼ばれたときにやり直す。
+        if (found.Count == 0)
+        {
+            return found;
         }
 
         return this.cache = found;

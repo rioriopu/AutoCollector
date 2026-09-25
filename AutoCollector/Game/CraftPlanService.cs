@@ -209,6 +209,13 @@ public sealed class CraftPlanService(
         catch (Exception ex)
         {
             this.anomalyLog.Warn("Craft", $"ジョブの一覧を作れませんでした: {ex.Message}");
+            return result;
+        }
+
+        // 空なら控えない。次に呼ばれたときにやり直す。
+        if (result.Count == 0)
+        {
+            return result;
         }
 
         return this.jobs = result;
@@ -239,8 +246,9 @@ public sealed class CraftPlanService(
 
             if (items is null || recipes is null || craftTypes is null)
             {
+                // 控えない。シートが読めないのは一時的なことがある。
                 this.anomalyLog.Error("Craft", "シートを読めないため、作れる収集品を求められません");
-                return this.craftables = result;
+                return result;
             }
 
             // クリスタルの分類。名前で引く。番号を埋め込まない。
@@ -300,6 +308,17 @@ public sealed class CraftPlanService(
         catch (Exception ex)
         {
             this.anomalyLog.Error("Craft", $"作れる収集品を求められませんでした: {ex.Message}");
+
+            // 途中まで集めた結果を完成として覚えない。
+            return result.OrderBy(x => x.NotebookOrder).ToList();
+        }
+
+        // **空なら控えない。**
+        // 報酬の索引（CollectableRewardService）がまだ空だと、ここも 0 件になる。
+        // 控えてしまうと、索引が揃ったあとも「作れる収集品が無い」のまま固定される。
+        if (result.Count == 0)
+        {
+            return result;
         }
 
         return this.craftables = result.OrderBy(x => x.NotebookOrder).ToList();

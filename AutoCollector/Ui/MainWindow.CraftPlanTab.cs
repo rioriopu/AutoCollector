@@ -69,7 +69,23 @@ public sealed partial class MainWindow
             this.craftPlanCurrencyItemId = currencies[0].ItemId;
         }
 
-        var currencyIndex = Math.Max(0, currencies.FindIndex(x => x.ItemId == this.craftPlanCurrencyItemId));
+        // **見つからないときに 0 へ丸めない。**
+        //
+        // Math.Max(0, -1) で先頭へ落としていたが、そうすると
+        // 画面には先頭のスクリップが出る一方、実際に使われるのは
+        // craftPlanCurrencyItemId に残った古い値のままになる。
+        // 「画面に出ているもの」と「実際に使われるもの」が食い違い、
+        // 次に何か操作した瞬間、選んだ覚えのないもので確定する。
+        //
+        // 一覧から消えたのなら、選び直しにする。
+        var currencyIndex = currencies.FindIndex(x => x.ItemId == this.craftPlanCurrencyItemId);
+
+        if (currencyIndex < 0)
+        {
+            currencyIndex = 0;
+            this.craftPlanCurrencyItemId = currencies[0].ItemId;
+            this.craftPlanTargetItemId = 0;
+        }
 
         ImGui.SetNextItemWidth(320f);
         using (var combo = ImRaii.Combo("欲しいスクリップ", currencies[currencyIndex].Name))
@@ -105,7 +121,16 @@ public sealed partial class MainWindow
             return;
         }
 
-        var jobIndex = Math.Max(0, jobs.ToList().FindIndex(x => x.CraftType == this.craftPlanJob));
+        // 通貨と同じ理由で 0 へ丸めない。画面と実際が食い違う。
+        var jobIndex = jobs.ToList().FindIndex(x => x.CraftType == this.craftPlanJob);
+
+        if (jobIndex < 0)
+        {
+            jobIndex = 0;
+            this.craftPlanJob = jobs[0].CraftType;
+            this.craftPlanTargetItemId = 0;
+            this.craftPlanLevelBand = 0;
+        }
 
         ImGui.SetNextItemWidth(200f);
         using (var jobCombo = ImRaii.Combo("ジョブ", jobs[jobIndex].Name))

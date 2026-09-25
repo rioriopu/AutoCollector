@@ -101,8 +101,11 @@ public sealed class CollectableRewardService(AnomalyLog anomalyLog, SpecialCurre
 
             if (shopItems is null || scrips is null)
             {
+                // **控えない。**シートを読めないのは一時的なことがある。
+                // ここで空を控えると、以後ずっと「収集品の報酬は 1 件も分からない」
+                // になり、製作計画も納品も立ち行かなくなる。
                 this.anomalyLog.Error("Collectables", "シートを読めないため、収集品の報酬を求められません");
-                return this.index = result;
+                return result;
             }
 
             foreach (var group in shopItems)
@@ -170,6 +173,17 @@ public sealed class CollectableRewardService(AnomalyLog anomalyLog, SpecialCurre
         catch (Exception ex)
         {
             this.anomalyLog.Error("Collectables", $"収集品の報酬を求められませんでした: {ex.Message}");
+
+            // 例外のあとも控えない。途中まで集めた結果を完成として覚えると、
+            // 欠けたままの索引を一生使い続けることになる。
+            return result;
+        }
+
+        // **空なら控えない。**次に呼ばれたときにやり直す。
+        // 空を控えると、やり直す口が無いまま固定されてしまう。
+        if (result.Count == 0)
+        {
+            return result;
         }
 
         return this.index = result;
