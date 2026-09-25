@@ -124,9 +124,6 @@ public sealed class FateRunner(
     /// <summary>テレポートが終わるのを待つ上限。</summary>
     private static readonly TimeSpan TeleportTimeout = TimeSpan.FromSeconds(60);
 
-    /// <summary>レベルシンクを押し直すまでの間隔。反映を待つ。</summary>
-    private static readonly TimeSpan SyncRetryInterval = TimeSpan.FromSeconds(2);
-
     /// <summary>降りるのを待つ上限。空からの降下は数秒かかる。</summary>
     private static readonly TimeSpan LandingTimeout = TimeSpan.FromSeconds(30);
 
@@ -178,9 +175,6 @@ public sealed class FateRunner(
 
     /// <summary>BMR の AI を入れたか。入れたぶんは必ず戻す。</summary>
     private bool aiEnabled;
-
-    /// <summary>レベルシンクを押した時刻。連打しないための間隔に使う。</summary>
-    private DateTime syncPressedUtc = DateTime.MinValue;
 
     /// <summary>交換から戻ったときに向かう座標。設定で座標まで戻す場合だけ入る。</summary>
     private Vector3? resumePosition;
@@ -988,13 +982,6 @@ public sealed class FateRunner(
             this.prefetched = this.PickNext(cfg, exclude: current.Id);
         }
 
-        // **レベルシンクを自分でも押す。**
-        //
-        // BMR に任せてあるが、効かないことがあった。押していない間は
-        // 参加した扱いにならず、敵も倒せない。
-        // 長く使われてきた Lua スクリプトも /lsync を自分で送っている。
-        this.TickLevelSync();
-
         // **敵が遠ければ歩いて近づく。**
         //
         // BMR は見えている敵と戦うだけで、遠くの敵を探しには行かない。
@@ -1006,39 +993,7 @@ public sealed class FateRunner(
             "戦闘中",
             $"{current.Name} {current.Progress}% " +
             $"シンク={(this.scanner.IsPlayerSyncedToFate() ? "済" : "未")} " +
-            $"プリセット={(this.presetApplied ? this.appliedPresetName : "未適用")}");
-    }
-
-    /// <summary>
-    /// レベルシンクが入っていなければ押す。
-    ///
-    /// <b>入っていれば何もしない。</b>押し直すと解除されてしまう。
-    /// </summary>
-    private void TickLevelSync()
-    {
-        if (this.scanner.IsPlayerSyncedToFate())
-        {
-            this.syncPressedUtc = DateTime.MinValue;
-            return;
-        }
-
-        // 連打しない。押してから反映まで少し間がある。
-        if (DateTime.UtcNow - this.syncPressedUtc < SyncRetryInterval)
-        {
-            return;
-        }
-
-        this.syncPressedUtc = DateTime.UtcNow;
-
-        try
-        {
-            Svc.Commands.ProcessCommand("/lsync");
-            this.trace.Decision("レベルシンクを押した", "まだ入っていなかった");
-        }
-        catch (Exception ex)
-        {
-            this.trace.Trouble("レベルシンクを押せない", ex.Message);
-        }
+            $"プリセット={(this.bossMod.TryGetActivePreset(out var nowActive) ? nowActive ?? "なし" : "読めず")}");
     }
 
     /// <summary>
@@ -1332,6 +1287,13 @@ public sealed class FateRunner(
         this.appliedPresetName = name;
         this.ApplyFateStrategies(cfg, name);
         this.EnableAi();
+
+        // 本当に有効になったかを確かめる。SetActive が true を返しても、
+        // 別の機能があとから解除していることがある。
+        this.bossMod.TryGetActivePreset(out var active);
+        this.trace.Decision(
+            "戦闘の用意ができた",
+            $"要求={name} 実際={active ?? "なし"}");
     }
 
     /// <summary>
@@ -1360,6 +1322,12 @@ public sealed class FateRunner(
         this.bossMod.TrySetFollowTarget(true);
         this.bossMod.TrySetFollowCombat(true);
         this.bossMod.TrySetMaxDistanceToTarget(distance);
+
+        // **騎乗中は AI に動かせない。**
+        //
+        // 既定では騎乗していても AI が動かそうとする。こちらは vnavmesh で
+        // 飛ばしているので、両方が動かそうとして取り合いになり飛べなくなる。
+        this.bossMod.TrySetIdleWhileMounted(true);
 
         // 近接は戦闘が始まる前から詰めないと、いつまでも届かない。
         this.bossMod.TrySetFollowOutOfCombat(melee);

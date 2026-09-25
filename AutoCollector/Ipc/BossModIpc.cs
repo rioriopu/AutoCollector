@@ -151,6 +151,16 @@ public sealed class BossModIpc(AnomalyLog anomalyLog) : IpcGateBase("BossModRebo
     public bool TrySetMaxDistanceToTarget(float meters)
         => this.TryProcessCommand($"/bmrai maxdistancetarget {meters:0.##}");
 
+    /// <summary>
+    /// 騎乗中は AI に動かせない。
+    ///
+    /// <b>入れないと飛べない。</b>BMR の既定（ForbidAIMovementMounted = false）では
+    /// 騎乗していても AI が動かそうとする。こちらは vnavmesh で飛ばしているので、
+    /// 両方が同時に動かそうとして取り合いになり、飛び上がれなくなる。
+    /// </summary>
+    public bool TrySetIdleWhileMounted(bool on)
+        => this.TryProcessCommand($"/bmrai idlewhilemounted {(on ? "on" : "off")}");
+
     /// <summary>コマンドを送る。登録されていなければ記録に残して false。</summary>
     private bool TryProcessCommand(string command)
     {
