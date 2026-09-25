@@ -27,8 +27,15 @@ public sealed class FateTrace(AnomalyLog anomalyLog)
     private string lastLine = string.Empty;
     private DateTime lastWroteUtc = DateTime.MinValue;
 
-    /// <summary>記録を残すか。設定の詳細ログに合わせる。</summary>
-    public static bool Enabled => Plugin.C.DetailedLogActive || Plugin.C.DebugMode;
+    /// <summary>
+    /// 記録を残すか。
+    ///
+    /// <b>周回が動いているあいだは常に残す。</b>
+    /// 設定で切れるようにしていたが、それでは
+    /// 「動かない」と言われたときに何も手がかりが無い。
+    /// 間引いてあるので出続けても邪魔にならない。
+    /// </summary>
+    public static bool Enabled => true;
 
     /// <summary>
     /// いまの状態を書く。内容が前回と同じなら、しばらく黙る。
@@ -94,7 +101,11 @@ public sealed class FateTrace(AnomalyLog anomalyLog)
             var pos = $"({p.X:F0},{p.Y:F0},{p.Z:F0})";
 
             var flags = string.Join(",", DescribeFlags());
-            return $"{pos} {(flags.Length == 0 ? "地上" : flags)}";
+
+            // **誰の記録かを必ず書く。**
+            // ゲームを複数起動していると、記録は 1 つのファイルに混ざる。
+            // 名前が無いと、どの画面で起きたことか分からない。
+            return $"{Player.Name} {pos} {(flags.Length == 0 ? "地上" : flags)}";
         }
         catch (Exception ex)
         {

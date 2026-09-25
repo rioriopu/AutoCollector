@@ -165,9 +165,12 @@ public sealed class FateRunner(
     /// <summary>周回を始める。始められない場合は理由を返す。</summary>
     public bool Start(out string reason)
     {
+        this.trace.Decision("開始を押した", $"段階={this.Step}");
+
         if (this.IsRunning)
         {
             reason = "すでに動いています";
+            this.trace.Trouble("開始できない", reason);
             return false;
         }
 
@@ -176,18 +179,21 @@ public sealed class FateRunner(
         if (cfg.FateZones.Count == 0)
         {
             reason = "周回するマップが選ばれていません";
+            this.trace.Trouble("開始できない", reason);
             return false;
         }
 
         if (!this.bossMod.IsLoaded)
         {
             reason = "BossMod Reborn が導入されていません";
+            this.trace.Trouble("開始できない", reason);
             return false;
         }
 
         if (!this.navigation.IsAvailable)
         {
             reason = "vnavmesh が導入されていません";
+            this.trace.Trouble("開始できない", reason);
             return false;
         }
 
@@ -197,6 +203,7 @@ public sealed class FateRunner(
             && !FateCombatPreset.Ensure(this.bossMod, this.anomalyLog))
         {
             reason = $"BossMod Reborn にプリセット「{FateCombatPreset.Name}」を用意できませんでした";
+            this.trace.Trouble("開始できない", reason);
             return false;
         }
 
@@ -219,6 +226,7 @@ public sealed class FateRunner(
         this.SetStep(FateStep.Waiting, "FATE を探しています");
         this.waitingSinceUtc = DateTime.UtcNow;
         this.anomalyLog.Info("Fate", $"FATE 周回を開始しました（マップ {cfg.FateZones.Count} 件）");
+        this.trace.Decision("開始した", $"マップ {cfg.FateZones.Count} 件 いまのエリア={Svc.ClientState.TerritoryType}");
 
         reason = string.Empty;
         return true;
