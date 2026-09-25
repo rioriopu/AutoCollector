@@ -931,8 +931,21 @@ public sealed class FateRunner(
 
             // 目的地を持ち上げる。これが離陸の条件（次の点が自分より高い）
             // を満たすことにもなり、経路が地面を擦るのも防ぐ。
+            //
+            // **ただし、いまの高さより上へは持ち上げない。**
+            //
+            // 飛行には高度の上限がある。上限に張り付いているときに
+            // さらに上の点を目指させると、そこへは永久に届かず、
+            // 天井に押し付けられたまま進めなくなる
+            // （2026-09-25 実測。Y=58 で頭打ちのまま、+49m 上の点を目指していた）。
+            //
+            // 自分がいま居る高さまでなら、必ず行ける。
+            var lifted = flying
+                ? MathF.Min(ground.Y + MountService.FlightLift, MathF.Max(ground.Y, Player.Position.Y))
+                : ground.Y;
+
             var destination = flying
-                ? ground with { Y = ground.Y + MountService.FlightLift }
+                ? ground with { Y = lifted }
                 : ground;
 
             // 飛ぶときは中心付近を目指す。端で止まると、そこが低い場所だと
@@ -1210,15 +1223,23 @@ public sealed class FateRunner(
         this.navigation.Stop();
         this.moveIssued = false;
 
-        // **まず真上へ。**地形に潜り込んでいる場合、横へ動かしても抜けない。
-        // 回を追うごとに高く、そして横へも広げる。
-        var lift = 20f * this.escapeAttempts;
+        // **上は当てにしない。**
+        //
+        // 飛行には高度の上限があり、そこに張り付いていると
+        // 上へ向かわせても 1m も上がらない（ゲームが
+        // 「高度上限付近です」と出す。2026-09-25 実測。Y=58 で頭打ち）。
+        //
+        // 下と横へ逃がす。降りる先は目的地の高さを手がかりにする。
+        // 目的地が下にあるなら、下がれば地形を抜けられることが多い。
         var angle = this.escapeAttempts * 2.39996f; // 黄金角。毎回ちがう向きになる
-        var spread = 10f * (this.escapeAttempts - 1);
+        var spread = 15f * this.escapeAttempts;
+
+        // 1 回目は真下、以降は斜め下へ。回を追うごとに深く、広くする。
+        var drop = 15f * this.escapeAttempts;
 
         var away = new Vector3(
             here.X + (MathF.Cos(angle) * spread),
-            here.Y + lift,
+            here.Y - drop,
             here.Z + (MathF.Sin(angle) * spread));
 
         this.trace.Trouble(
