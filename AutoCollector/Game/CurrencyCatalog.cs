@@ -57,11 +57,18 @@ public sealed class CurrencyCatalog(
         //
         // 特殊通貨の一覧にはクラフタースクリップ:白貨 のような、
         // すでに交換所から消えたものも残っている。選べても意味がない。
+        //
+        // <b>ただし絞り込めなかったときは、絞らない。</b>
+        // 交換の一覧は初回に作られるが、シートを読めない・まだログイン直後で
+        // 作れないといった理由で 0 件になることがある。
+        // そのとき「使える通貨が 1 つも無い」と読むと、スクリップが全部消えて
+        // トームストーンしか選べなくなる。絞り込みの材料が無いだけで、
+        // 実際に使えないと分かったわけではない（2026-09-25 実測）。
         var usable = this.UsableCurrencies();
 
         foreach (var (itemId, name) in this.specials.ListCurrencies())
         {
-            if (!usable.Contains(itemId))
+            if (usable.Count > 0 && !usable.Contains(itemId))
             {
                 continue;
             }
@@ -70,6 +77,46 @@ public sealed class CurrencyCatalog(
         }
 
         return list;
+    }
+
+    /// <summary>
+    /// 選べる通貨の一覧に、そのプリセットがいま選んでいるものを必ず含めたもの。
+    ///
+    /// <b>選択中のものが一覧に無いと、黙って別の通貨に書き換わる。</b>
+    /// 画面は一覧から番号で選ばせており、見つからないときは先頭
+    /// （＝トームストーン）を指す。その状態で何か操作すると、
+    /// 利用者が選んだ覚えのない通貨が保存されてしまう。
+    ///
+    /// 一覧から消えるのは、交換所から無くなった通貨のほかに、
+    /// 対応表や交換の一覧をまだ作れていない場合もある。
+    /// いずれにせよ、選択中のものを黙って捨ててよい理由にはならない。
+    /// </summary>
+    public IReadOnlyList<CurrencyChoice> ListChoicesIncluding(ExchangePreset preset)
+    {
+        var list = this.ListChoices();
+
+        if (!this.TryResolve(preset, out var currentItemId) || currentItemId == 0)
+        {
+            return list;
+        }
+
+        if (IndexOf(list, preset) >= 0)
+        {
+            return list;
+        }
+
+        var name = this.specials.ListCurrencies().FirstOrDefault(x => x.ItemId == currentItemId).Name;
+
+        var result = new List<CurrencyChoice>(list)
+        {
+            new(
+                preset.CurrencyItemId != 0 ? 0 : preset.TomestonesRowId,
+                currentItemId,
+                string.IsNullOrEmpty(name) ? $"ItemId {currentItemId}" : name,
+                "選択中（一覧に無い）"),
+        };
+
+        return result;
     }
 
     /// <summary>通貨の名前。見つからなければ ItemId をそのまま返す。</summary>

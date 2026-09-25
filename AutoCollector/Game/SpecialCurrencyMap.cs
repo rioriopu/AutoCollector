@@ -62,8 +62,39 @@ public sealed class SpecialCurrencyMap
 
     public string? VerifiedGameVersion { get; private set; }
 
-    /// <summary>いま有効な対応表。クライアント由来を優先する。</summary>
-    public IReadOnlyDictionary<int, uint> Entries => this.runtimeMap.Count > 0 ? this.runtimeMap : this.fallbackMap;
+    /// <summary>
+    /// いま有効な対応表。クライアント由来を優先しつつ、控えと**重ねて**使う。
+    ///
+    /// <b>片方だけを丸ごと採ってはいけない。</b>
+    /// 以前は「クライアントから 1 件でも取れたら、控えは一切見ない」としていた。
+    /// ところが CurrencyManager.SpecialItemBucket は、そのキャラクターが
+    /// まだ触れていないスクリップを載せていないことがある。
+    /// すると対応表が数件だけになり、そこから作る
+    /// <see cref="CurrencyCatalog.ListChoices"/> のスクリップが丸ごと消えて、
+    /// 監視する通貨がトームストーン 1 件しか選べなくなる（2026-09-25 実測）。
+    ///
+    /// 同じ番号が両方にあるときはクライアント側を採る。
+    /// 実際に動いているクライアントのほうが、同梱の控えより確かなため。
+    /// </summary>
+    public IReadOnlyDictionary<int, uint> Entries
+    {
+        get
+        {
+            if (this.runtimeMap.Count == 0)
+            {
+                return this.fallbackMap;
+            }
+
+            var merged = new Dictionary<int, uint>(this.fallbackMap);
+
+            foreach (var (index, itemId) in this.runtimeMap)
+            {
+                merged[index] = itemId;
+            }
+
+            return merged;
+        }
+    }
 
     /// <summary>
     /// クライアントから対応表を作り直す。ログイン後に呼ぶ。

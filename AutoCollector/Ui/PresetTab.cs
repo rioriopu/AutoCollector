@@ -386,7 +386,9 @@ public sealed class PresetTab(Plugin plugin)
         }
 
         // --- 通貨 ---
-        var choices = this.plugin.CurrencyCatalog.ListChoices()
+        // 選択中の通貨は、一覧に無くても必ず出す。
+        // 出さないと番号が見つからず、先頭のトームストーンに黙って書き換わる。
+        var choices = this.plugin.CurrencyCatalog.ListChoicesIncluding(preset)
             .Where(x => !string.IsNullOrEmpty(x.Name))
             .ToList();
 
