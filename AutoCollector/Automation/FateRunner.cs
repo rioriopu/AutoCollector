@@ -105,6 +105,16 @@ public sealed class FateRunner(
     /// </summary>
     private const float CentreSeekMeters = 20f;
 
+    /// <summary>
+    /// 飛んできたとき、中心からこれだけの範囲に入ってから降りる。
+    ///
+    /// <b>端で降りると高低差で詰む。</b>
+    /// 円に入った時点で降りていたため、低い場所に降りて高所の敵へ
+    /// 近づけなくなった（2026-09-25 実測）。
+    /// 中心付近なら、たいてい敵の居る高さに降りられる。
+    /// </summary>
+    private const float LandNearCentreMeters = 15f;
+
     /// <summary>テレポートが終わるのを待つ上限。</summary>
     private static readonly TimeSpan TeleportTimeout = TimeSpan.FromSeconds(60);
 
@@ -665,10 +675,12 @@ public sealed class FateRunner(
         //
         // 高さは見ない。飛んでいる最中は真上に数十メートルの差があり、
         // そのまま測ると「まだ遠い」と判断してしまう。
+        // 飛んでいるあいだは中心付近まで、歩きなら円に入れば着いたとみなす。
+        var arriveWithin = this.flyingWhenIssued ? LandNearCentreMeters : range + FateArrivalSlack;
         var arrived = Player.Available
                    && Vector2.Distance(
                           new Vector2(Player.Position.X, Player.Position.Z),
-                          new Vector2(live.Position.X, live.Position.Z)) <= range + FateArrivalSlack;
+                          new Vector2(live.Position.X, live.Position.Z)) <= arriveWithin;
 
         if (!arrived)
         {
@@ -710,7 +722,10 @@ public sealed class FateRunner(
             var destination = flying
                 ? live.Position with { Y = live.Position.Y + MountService.FlightLift }
                 : live.Position;
-            var moveRange = flying ? MountService.FlightLift : range;
+
+            // 飛ぶときは中心付近を目指す。端で止まると、そこが低い場所だと
+            // 高所の敵へ近づけなくなる。
+            var moveRange = flying ? LandNearCentreMeters : range;
 
             if (!this.navigation.BeginMove(destination, moveRange, flying, out var failure))
             {
@@ -735,17 +750,18 @@ public sealed class FateRunner(
             this.moveStartedUtc = DateTime.UtcNow;
         }
 
-        // **真上まで来たら、そこで飛行をやめて降りる。**
+        // **中心の近くまで来てから降りる。**
         //
-        // 持ち上げた座標を目的地にしているので、そのままでは真上で止まる。
-        // 水平の距離だけで見て、真上まで来たら降りる判断へ移る。
+        // 円に入った端で降りると、そこが低い場所だと高所の敵へ
+        // 近づけなくなる。高低差のあるマップで棒立ちになった
+        // （2026-09-25 実測）。中心付近なら、たいてい敵の居る高さに降りられる。
         if (this.flyingWhenIssued && Player.Available)
         {
             var flat = Vector2.Distance(
                 new Vector2(Player.Position.X, Player.Position.Z),
                 new Vector2(live.Position.X, live.Position.Z));
 
-            if (flat <= range)
+            if (flat <= LandNearCentreMeters)
             {
                 this.navigation.Stop();
                 this.EnterFate(cfg, live);
@@ -880,6 +896,59 @@ public sealed class FateRunner(
         {
             this.target = current;
 
+            // **飛んでいる最中は、中心の近くまで進んでから降りる。**
+            //
+            // 円に入った端で降りると、そこが低い場所だと高所の敵へ
+            // 近づけない。移動の段階に戻して、中心まで飛ばせる。
+            if (MountService.IsFlying && Player.Available)
+            {
+                var flat = Vector2.Distance(
+                    new Vector2(Player.Position.X, Player.Position.Z),
+                    new Vector2(current.Position.X, current.Position.Z));
+
+                if (flat > LandNearCentreMeters)
+                {
+                    if (this.Step != FateStep.MovingToFate)
+                    {
+                        this.SetStep(FateStep.MovingToFate, $"{current.Name} の中心へ向かっています");
+                    }
+
+                    this.TickMoving(cfg);
+                    return;
+                }
+            }
+
+            // **敵が見えているなら、その高さまで降りる。**
+            //
+            // 中心に降りても、敵が崖の上にいれば近づけない。
+            // 飛んでいるうちに敵の真上まで行けば、その高さに降りられる。
+            if (MountService.IsFlying
+                && this.scanner.FindNearestMob(current.Id, Player.Position) is { } mob
+                && mob.Distance > MobReachMeters)
+            {
+                var above = mob.Position with { Y = mob.Position.Y + MountService.FlightLift };
+
+                // 引いた経路は積み直さない。積むたびに探索が走り、
+                // そのあいだ進まない。
+                if (this.Step != FateStep.MovingToFate)
+                {
+                    this.SetStep(FateStep.MovingToFate, $"{current.Name} の敵の上へ向かっています");
+
+                    if (this.navigation.BeginMove(above, MobReachMeters, true, out _))
+                    {
+                        this.trace.Decision("敵の上へ飛ぶ", $"最寄りの敵まで {mob.Distance:F0}m");
+                        this.moveIssued = true;
+                        this.flyingWhenIssued = true;
+                    }
+                }
+                else
+                {
+                    this.navigation.Tick(above, MobReachMeters);
+                }
+
+                return;
+            }
+
             if (this.Step != FateStep.Landing)
             {
                 this.landingSinceUtc = DateTime.UtcNow;
@@ -993,6 +1062,17 @@ public sealed class FateRunner(
         if (!this.navigation.BeginMove(destination, MobReachMeters, false, out var failure))
         {
             this.trace.Trouble("近づけない", failure);
+
+            // **歩いて行けないなら飛ぶ。**
+            //
+            // 敵が崖の上にいると、地上の経路では辿り着けない。
+            // 乗り直して飛べば、高さを越えられる。
+            if (!MountService.IsMounted && MountService.CanFlyHere)
+            {
+                this.trace.Decision("飛んで近づく", "歩いて行ける経路が無い");
+                this.mount.ClearDismounting();
+            }
+
             return;
         }
 
