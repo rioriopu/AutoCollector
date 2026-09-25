@@ -118,6 +118,9 @@ public sealed class FateRunner(
     /// <summary>いまの目的地へ経路を引いたか。乗ってから引くので旗で覚える。</summary>
     private bool moveIssued;
 
+    /// <summary>経路を引いたとき飛んでいたか。地面に触れて解けたのを見分ける。</summary>
+    private bool flyingWhenIssued;
+
     /// <summary>交換から戻ったときに向かう座標。設定で座標まで戻す場合だけ入る。</summary>
     private Vector3? resumePosition;
 
@@ -590,9 +593,13 @@ public sealed class FateRunner(
         // **着いていたら、乗る判断より先に降りる。**
         //
         // 先に乗る判断をすると、着いた直後に降りて、また乗って、を繰り返す。
-        // 距離で見るので、円の中に入っていれば乗らない。
+        //
+        // 高さは見ない。飛んでいる最中は真上に数十メートルの差があり、
+        // そのまま測ると「まだ遠い」と判断してしまう。
         var arrived = Player.Available
-                   && Vector3.Distance(Player.Position, live.Position) <= range + FateArrivalSlack;
+                   && Vector2.Distance(
+                          new Vector2(Player.Position.X, Player.Position.Z),
+                          new Vector2(live.Position.X, live.Position.Z)) <= range + FateArrivalSlack;
 
         if (!arrived)
         {
@@ -605,10 +612,27 @@ public sealed class FateRunner(
             }
         }
 
+        // **飛行が解けたら経路を引き直す。**
+        //
+        // 地面に触れると飛行が解ける。そのまま走って向かうと遅いので、
+        // 乗り直し・飛び直しのあとに経路も引き直す。
+        if (this.moveIssued && this.flyingWhenIssued && !MountService.IsFlying)
+        {
+            this.navigation.Stop();
+            this.moveIssued = false;
+        }
+
         // 乗ったので経路を引く。飛べる状態なら飛ぶ経路になる。
         if (!this.moveIssued)
         {
-            if (!this.navigation.BeginMove(live.Position, range, MountService.IsFlying, out var failure))
+            var flying = MountService.IsFlying;
+
+            // 飛ぶときは目的地を持ち上げる。地表どうしを結ぶと経路が
+            // 地面を擦り、起伏に触れて飛行が解ける。
+            var destination = flying ? MountService.LiftForFlight(live.Position) : live.Position;
+            var moveRange = flying ? MountService.FlightLift : range;
+
+            if (!this.navigation.BeginMove(destination, moveRange, flying, out var failure))
             {
                 this.anomalyLog.Warn("Fate", $"{live.Name} へ移動できませんでした: {failure}");
                 this.MarkStuck(live.Id);
@@ -617,10 +641,31 @@ public sealed class FateRunner(
             }
 
             this.moveIssued = true;
+            this.flyingWhenIssued = flying;
             this.moveStartedUtc = DateTime.UtcNow;
         }
 
-        var status = this.navigation.Tick(live.Position, range);
+        // **真上まで来たら、そこで飛行をやめて降りる。**
+        //
+        // 持ち上げた座標を目的地にしているので、そのままでは真上で止まる。
+        // 水平の距離だけで見て、真上まで来たら降りる判断へ移る。
+        if (this.flyingWhenIssued && Player.Available)
+        {
+            var flat = Vector2.Distance(
+                new Vector2(Player.Position.X, Player.Position.Z),
+                new Vector2(live.Position.X, live.Position.Z));
+
+            if (flat <= range)
+            {
+                this.navigation.Stop();
+                this.EnterFate(cfg, live);
+                return;
+            }
+        }
+
+        var status = this.navigation.Tick(
+            this.flyingWhenIssued ? MountService.LiftForFlight(live.Position) : live.Position,
+            this.flyingWhenIssued ? MountService.FlightLift : range);
 
         switch (status)
         {

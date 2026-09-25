@@ -45,7 +45,23 @@ public sealed unsafe class MountService(AnomalyLog anomalyLog)
     /// <summary>同じ操作を送り続けないための間隔。</summary>
     private const int ActionThrottleMs = 1000;
 
+    /// <summary>
+    /// 飛び上がったあと、上昇に使う時間。
+    ///
+    /// <b>ジャンプ 1 回では地面すれすれにしかならない。</b>
+    /// そのまま経路を追わせると、起伏に触れて飛行が解除される。
+    /// 実測（中央ラノシア）でそうなった。
+    ///
+    /// 飛行中は前進キーで斜め上に上がるのではなく、
+    /// vnavmesh が引いた 3D 経路に沿って進む。出発時に十分な高さが
+    /// 無いと、その経路自体が地面を擦る高さになる。
+    /// </summary>
+    private static readonly TimeSpan ClimbDuration = TimeSpan.FromSeconds(2.5);
+
     private readonly AnomalyLog anomalyLog = anomalyLog;
+
+    /// <summary>飛び上がった時刻。上昇の猶予を計るのに使う。</summary>
+    private DateTime tookOffUtc = DateTime.MinValue;
 
     /// <summary>このエリアで飛べるか（風脈を解放しているか）。</summary>
     public static bool CanFlyHere
@@ -117,17 +133,59 @@ public sealed unsafe class MountService(AnomalyLog anomalyLog)
 
         if (!IsMounted)
         {
+            this.tookOffUtc = DateTime.MinValue;
             return this.TryMount();
         }
 
-        // 乗っている。飛べるエリアなら飛び上がる。
-        if (CanFlyHere && !IsFlying)
+        // 乗っている。飛べないエリアなら、このまま走って向かう。
+        if (!CanFlyHere)
         {
+            return false;
+        }
+
+        if (!IsFlying)
+        {
+            // まだ飛んでいない。飛び上がる。
+            //
+            // 2 回目以降もここへ来る。経路の途中で地面に触れて
+            // 飛行が解けたときに、もう一度飛び上がらせるため。
             return this.TryTakeOff();
+        }
+
+        // **飛んだ直後は少しだけ待つ。**
+        //
+        // ジャンプの動作が終わる前に経路を引くと、まだ地上判定のまま
+        // 経路が作られて、地面に沿った高さになってしまう。
+        if (DateTime.UtcNow - this.tookOffUtc < ClimbDuration)
+        {
+            return true;
         }
 
         return false;
     }
+
+    /// <summary>
+    /// 飛行で向かうときの目的地。
+    ///
+    /// <b>そのままの座標を渡すと地面を擦る。</b>
+    /// vnavmesh は 3D の経路を引くが、出発点と目的地がどちらも地表だと
+    /// 経路全体が地表付近になる。起伏に触れれば飛行が解ける。
+    /// 実測（中央ラノシア）でそうなった。
+    ///
+    /// 目的地を真上へ持ち上げると、経路が一度上がってから降りる形になり、
+    /// 途中の起伏を越えられる。着いてから下は自分で降りる。
+    /// </summary>
+    /// <param name="destination">本来の目的地。</param>
+    /// <param name="lift">持ち上げる高さ。</param>
+    public static Vector3 LiftForFlight(Vector3 destination, float lift = FlightLift)
+        => IsFlying ? destination with { Y = destination.Y + lift } : destination;
+
+    /// <summary>
+    /// 飛行時に目的地を持ち上げる高さ。
+    ///
+    /// 低すぎると起伏に触れ、高すぎると目的地の真上で長く降りることになる。
+    /// </summary>
+    public const float FlightLift = 30f;
 
     /// <summary>マウントから降りる。降りるまで true（まだ途中）を返す。</summary>
     public bool TickDismount()
@@ -207,6 +265,7 @@ public sealed unsafe class MountService(AnomalyLog anomalyLog)
             }
 
             am->UseAction(ActionType.GeneralAction, JumpAction);
+            this.tookOffUtc = DateTime.UtcNow;
             return true;
         }
         catch (Exception ex)
