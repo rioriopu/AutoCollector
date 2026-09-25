@@ -130,8 +130,12 @@ public sealed class FateRunner(
     /// 1000m 先だと十数秒かかることがあり、その間は当然 1m も進まない。
     /// 3 秒で見ていたため、経路が出来る前に「詰まった」と判断して
     /// 引き直しを繰り返し、いつまでも出発できなかった（2026-09-25 実測）。
+    ///
+    /// 逆に長すぎると、壁に当たったまま何十秒も押し続けることになる。
+    /// 出発前は経路の本数で見送るようにしたので、ここは
+    /// 「飛んでいるのに進んでいない」を拾える長さでよい。
     /// </summary>
-    private static readonly TimeSpan BlockCheckInterval = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan BlockCheckInterval = TimeSpan.FromSeconds(6);
 
     /// <summary>この間隔でこれだけ進んでいなければ、詰まっているとみなす。</summary>
     private const float BlockProgressMeters = 5f;
@@ -1074,19 +1078,21 @@ public sealed class FateRunner(
         var now = DateTime.UtcNow;
         var here = Player.Position;
 
-        // **経路を探している最中は、詰まったと判断しない。**
+        // **「経路を探している」を理由に見送らない。**
         //
-        // 遠い FATE への飛行経路は探すのに時間がかかる。
-        // 1000m 先だと十数秒かかることがあり、その間は 1m も進まない。
-        // これを詰まりと見て引き直すと、探し直しの繰り返しになり、
-        // いつまでも出発できない（2026-09-25 実測。2 分間その場に留まった）。
-        if ((this.vnavmesh.TryNavPathfindInProgress(out var finding) && finding) ||
-            (this.vnavmesh.TrySimpleMovePathfindInProgress(out var simple) && simple))
+        // vnavmesh は詰まると自分で経路を引き直す
+        // （AsyncMoveRequest の OnStuck → MoveTo。設定 RetryOnStuck が既定で有効）。
+        // そのため壁に当たっている間こそ「探している」が立ち続ける。
+        // これで見送っていたら、詰まりを一度も検出できなかった
+        // （2026-09-25 実測。探している 2305 回に対し、検出は 1 回だけ）。
+        //
+        // 経路がまだ 1 本も無いあいだ（出発前）だけ待つ。
+        // 経路を持っているなら、進んでいるかどうかで判断してよい。
+        if (this.vnavmesh.TryNumWaypoints(out var waypoints) && waypoints == 0)
         {
-            // 基準を取り直す。探し終えてから測り始める。
             this.blockCheckedUtc = now;
             this.blockCheckPosition = here;
-            this.trace.State("経路を探している", $"{fate.Name} まで {FateTrace.DescribeDistance(destination)}");
+            this.trace.State("経路を待っている", $"{fate.Name} まで {FateTrace.DescribeDistance(destination)}");
             return;
         }
 
@@ -1216,10 +1222,27 @@ public sealed class FateRunner(
             // 出発点が宙に浮いたままなので経路が引けないことがある。
             //
             // 立てる場所を聞いて、そこまで飛んでから降りる。
-            if (Player.Available &&
-                this.vnavmesh.TryIsReady(out var meshReady) && meshReady &&
-                this.vnavmesh.TryNearestPointReachable(Player.Position, 50f, 100f, out var refuge) &&
-                refuge is { } spot)
+            // 立てる場所を探す。空にいるので、まず真下の床を見る。
+            // 見つからなければ、周りを広く探す。
+            Vector3? refuge = null;
+
+            if (Player.Available && this.vnavmesh.TryIsReady(out var meshReady) && meshReady)
+            {
+                if (this.vnavmesh.TryPointOnFloor(Player.Position, out var below) && below is not null)
+                {
+                    refuge = below;
+                }
+                else if (this.vnavmesh.TryNearestPointReachable(Player.Position, 50f, 200f, out var near) && near is not null)
+                {
+                    refuge = near;
+                }
+                else if (this.vnavmesh.TryNearestPoint(Player.Position, 100f, 200f, out var any) && any is not null)
+                {
+                    refuge = any;
+                }
+            }
+
+            if (refuge is { } spot)
             {
                 this.trace.Decision(
                     "降りられる所まで移る",
