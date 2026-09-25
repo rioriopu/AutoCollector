@@ -824,6 +824,17 @@ public sealed class Plugin : IDalamudPlugin
         // 束ねている側を止めただけでは、納品そのものは止まらない。
         this.CollectableDelivery?.Stop(reason);
 
+        // **FATE 周回も直接止める。**
+        //
+        // 稼ぎ手ごしの停止（StopAllForEmergency）は、利用者が明示的に止めたときしか
+        // 通らない。アンロードでは stopExternalAutomation が false になるため、
+        // そちらに任せていると BMR のプリセットと AI が有効なまま残り、
+        // プラグインを外したのに戦い続け、敵を追い続けることになる。
+        //
+        // FateRunner.Stop は走っていなくても BMR の解除だけは必ず行うので、
+        // ここを無条件に通してよい。
+        this.FateRunner?.Stop(reason);
+
         // 何よりも先に発火経路を封鎖する。inFlight はクリアしない（未解決として残す）。
         this.ExchangeExecutor?.Abort(reason);
 
