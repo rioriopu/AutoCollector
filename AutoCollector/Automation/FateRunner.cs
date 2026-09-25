@@ -814,9 +814,21 @@ public sealed class FateRunner(
         // これが無いと 100% の FATE を毎フレーム拾い直し、
         // 離脱と経路引きを往復して一歩も動けなくなる。
         var current = this.scanner.GetCurrent();
-        if (current is not null && current.Id == this.leftFateId)
+
+        if (this.leftFateId is { } left)
         {
-            current = null;
+            if (current is not null && current.Id == left)
+            {
+                // まだその FATE の円の中にいる。見なかったことにする。
+                current = null;
+            }
+            else
+            {
+                // 円から出た。もう拾われないので、印は要らない。
+                // ここで消さないと、同じ番号の FATE が後から湧いたときに
+                // 二度と入れなくなる。
+                this.leftFateId = null;
+            }
         }
 
         if (current is not null && current.State == FateState.Running)
@@ -993,12 +1005,16 @@ public sealed class FateRunner(
         this.escapeAttempts = 0;
         this.watchdogSince = DateTime.MinValue;
 
-        // 向かう先が、さっき離れた FATE とは別なら、覚えていた印を消す。
-        // 同じ番号の FATE が後から湧いたときに、入れなくなるのを防ぐ。
-        if (this.leftFateId != fate.Id)
-        {
-            this.leftFateId = null;
-        }
+        // **離れた FATE の印は、ここで消さない。**
+        //
+        // 消していたため、次の FATE へ向かうと決めた瞬間に
+        // さっき終えた FATE がまた「参加中」として拾われ、
+        // 100% なので離脱、また次を決める、を繰り返していた。
+        //
+        // 利用者からは、終わった FATE の場所へわざわざ飛んで戻り、
+        // 不自然に動いてから次へ向かうように見える（2026-09-25 実測）。
+        //
+        // 印は、その FATE の円から出たときに消す（TickCore を参照）。
 
         // 別の FATE へ向かうので、降りる途中だった記録は捨てる。
         // 残すと二度と飛ばなくなる。
