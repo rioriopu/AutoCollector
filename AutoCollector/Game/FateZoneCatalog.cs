@@ -25,12 +25,21 @@ public sealed record FateExpansion(uint ExVersionId, string Name, IReadOnlyList<
 /// docs/00_設計決定.md の D-2 に従い、一覧を埋め込まずシートから引く。
 /// 新しい拡張が来ても、こちらを直さずに選択肢へ現れる。
 ///
-/// 絞り込みは TerritoryIntendedUse == 1（通常のフィールド）。
-/// ただしこの条件には、ウルヴズジェイルのように FATE が湧かない
-/// フィールドも混ざる。<b>「フィールドである」ことと「FATE が湧く」ことは別。</b>
-/// シートから後者を判定する方法が見つかっていないため、
-/// 一覧には出したうえで、実際に周回して FATE が無ければ
-/// 次のマップへ移る（FateSwapZoneWhenEmpty）ことで吸収する。
+/// 絞り込みは TerritoryIntendedUse == 1（通常のフィールド）かつ Mount 可。
+///
+/// <b>IntendedUse だけでは足りない。</b>
+/// この条件には「ウルヴズジェイル係船場」（250）のような
+/// PvP の待機場所が混ざる。フィールド扱いだが FATE は湧かない。
+///
+/// シートで見分けられる。この場所だけ <c>Mount</c> が false で、
+/// Bg も <c>.../pvp/...</c> になっている。
+/// 実データ（ver 2026.09.15）で確かめたところ、
+/// IntendedUse==1 の 48 件のうち Mount==false はこの 1 件だけで、
+/// 残る 47 件はすべて騎乗できる通常のフィールドだった。
+///
+/// 騎乗できないフィールドを周回対象にする意味は無い
+/// （FATE の間を移動できない）ため、この条件で落とす。
+/// 番号は埋め込まない。docs/00_設計決定.md の D-2 に従う。
 /// </summary>
 public sealed class FateZoneCatalog(AnomalyLog anomalyLog)
 {
@@ -62,6 +71,7 @@ public sealed class FateZoneCatalog(AnomalyLog anomalyLog)
             var zones = territories
                 .Where(t => t.IsInUse
                          && t.TerritoryIntendedUse.RowId == FieldIntendedUse
+                         && t.Mount
                          && !string.IsNullOrWhiteSpace(t.PlaceName.ValueNullable?.Name.ExtractText()))
                 .Select(t => new FateZone(
                     t.RowId,
