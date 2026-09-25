@@ -390,12 +390,28 @@ public sealed class FateRunner(
         // ReleaseCombat は適用していなければ即座に戻るので、余分な害は無い。
         this.ReleaseCombat();
 
+        // **移動は段階を見ずに必ず止める。**
+        //
+        // 詰まりからの脱出は vnavmesh へ直接 Path.MoveTo を送っている。
+        // これは段階（Step）と関係なく走り続けるため、
+        // Idle や Done で先に return していると止まらない。
+        // 利用者から見ると「止めたのに勝手に飛び続ける」になる
+        // （2026-09-25 実測）。
+        this.navigation.Stop();
+        this.vnavmesh.TryStop();
+
+        // 頼んである経路探索の結果も捨てる。
+        // 残しておくと、止めたあとに出来上がって積まれてしまう。
+        this.detourTask = null;
+        this.landingRefuge = null;
+        this.escapeAttempts = 0;
+        this.blockDetours = 0;
+        this.moveIssued = false;
+
         if (this.Step is FateStep.Idle or FateStep.Done)
         {
             return;
         }
-
-        this.navigation.Stop();
 
         // 降下の途中で止められることがある。そのままだと降下が続き、
         // 次に誰かが経路を積んだときに捨てさせてしまう。
