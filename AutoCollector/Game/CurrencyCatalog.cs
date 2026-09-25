@@ -1,6 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using ECommons.DalamudServices;
+using Lumina.Excel.Sheets;
 
 namespace AutoCollector.Game;
 
@@ -105,7 +107,16 @@ public sealed class CurrencyCatalog(
             return list;
         }
 
+        // 名前は特殊通貨の表から引く。トームストーンはそこに載っていないので、
+        // 見つからなければアイテムのシートから引き直す。
+        // どちらでも引けなければ ItemId をそのまま出す。名前が空だと
+        // 画面側の絞り込み（名前が空のものを落とす）で、また消えてしまう。
         var name = this.specials.ListCurrencies().FirstOrDefault(x => x.ItemId == currentItemId).Name;
+
+        if (string.IsNullOrEmpty(name))
+        {
+            name = Svc.Data.GetExcelSheet<Item>()?.GetRowOrDefault(currentItemId)?.Name.ExtractText() ?? string.Empty;
+        }
 
         var result = new List<CurrencyChoice>(list)
         {
