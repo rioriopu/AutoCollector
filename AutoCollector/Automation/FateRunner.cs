@@ -1463,6 +1463,16 @@ public sealed class FateRunner(
 
     private void MarkStuck(ushort fateId)
     {
+        // **諦めるなら、いま走っている経路も止める。**
+        //
+        // 止めないと vnavmesh は前の目的地へ向かって飛び続ける。
+        // こちらは「探している」つもりでも体は元の FATE へ進み、
+        // 次の FATE を決めた瞬間に向きが変わるため、
+        // 空中でくるりと反転したように見える
+        // （2026-09-25 実測。諦めてから 6 秒間に 111m 進んでいた）。
+        this.navigation.Stop();
+        this.moveIssued = false;
+
         this.stuckCounts.TryGetValue(fateId, out var count);
         count++;
         this.stuckCounts[fateId] = count;
