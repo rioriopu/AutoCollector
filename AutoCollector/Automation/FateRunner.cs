@@ -152,6 +152,16 @@ public sealed class FateRunner(
     /// <summary>抜け出す動きに与える時間。この間は測り直さない。</summary>
     private static readonly TimeSpan EscapeSettleTime = TimeSpan.FromSeconds(4);
 
+    /// <summary>見張りが「動いた」と認める距離。</summary>
+    private const float WatchdogProgressMeters = 3f;
+
+    /// <summary>
+    /// 動くはずの段階で、これだけ動かなければ詰まりとみなす。
+    ///
+    /// 経路探索や着地には時間がかかるので、短くしすぎない。
+    /// </summary>
+    private static readonly TimeSpan WatchdogPatience = TimeSpan.FromSeconds(25);
+
     /// <summary>
     /// 敵が 1 匹も見えないとき、中心からこれ以上離れていたら寄る。
     ///
@@ -214,6 +224,10 @@ public sealed class FateRunner(
 
     /// <summary>この移動で、詰まりから抜け出そうとした回数。</summary>
     private int escapeAttempts;
+
+    /// <summary>動けていない状態がいつから続いているか。段階をまたいで見張る。</summary>
+    private DateTime watchdogSince = DateTime.MinValue;
+    private Vector3 watchdogPosition;
 
     /// <summary>頼んである迂回の経路探索。出来るまで待つ。</summary>
     private System.Threading.Tasks.Task<System.Collections.Generic.List<Vector3>>? detourTask;
@@ -380,6 +394,68 @@ public sealed class FateRunner(
     }
 
     /// <summary>
+    /// 段階に関係なく、動けなくなっていないかを見張る。
+    ///
+    /// <b>「動くつもりなのに動いていない」を捕まえる。</b>
+    /// 待っているだけの段階（FATE が湧くのを待つ、報酬を待つ）は
+    /// 動かなくて当たり前なので見ない。
+    ///
+    /// 動くはずの段階で座標が変わらない状態が続いたら、
+    /// 地形に挟まっているとみなして脱出へ進む。
+    /// </summary>
+    /// <returns>脱出の処理をしたなら true。その場合この Tick は先へ進めない。</returns>
+    private bool TickStuckWatchdog()
+    {
+        // 動くはずの段階かどうか。
+        var shouldMove = this.Step is FateStep.MovingToFate
+                                   or FateStep.Landing
+                                   or FateStep.Traveling
+                      || (this.Step == FateStep.Fighting && this.approaching);
+
+        if (!shouldMove || !Player.Available)
+        {
+            this.watchdogSince = DateTime.MinValue;
+            return false;
+        }
+
+        // 報酬待ちは足を止めてよい。
+        if (this.pendingReward is not null)
+        {
+            this.watchdogSince = DateTime.MinValue;
+            return false;
+        }
+
+        var now = DateTime.UtcNow;
+        var here = Player.Position;
+
+        if (this.watchdogSince == DateTime.MinValue ||
+            Vector3.Distance(here, this.watchdogPosition) > WatchdogProgressMeters)
+        {
+            this.watchdogSince = now;
+            this.watchdogPosition = here;
+            return false;
+        }
+
+        if (now - this.watchdogSince < WatchdogPatience)
+        {
+            return false;
+        }
+
+        // 動くはずなのに、ずっと同じ場所にいる。
+        this.trace.Trouble(
+            "動けていない",
+            $"段階={this.Step} {WatchdogPatience.TotalSeconds:F0}秒間 " +
+            $"({here.X:F0},{here.Y:F0},{here.Z:F0}) から動いていません");
+
+        this.watchdogSince = now;
+        this.watchdogPosition = here;
+
+        // 狙っている FATE があればそれを、無ければ番号なしで脱出へ。
+        this.EscapeStuckSpot(this.target, now, here);
+        return true;
+    }
+
+    /// <summary>
     /// いまの場所から脱出する。画面のボタンから呼ぶ。
     ///
     /// <b>周回していなくても使える。</b>
@@ -462,6 +538,7 @@ public sealed class FateRunner(
         this.escapeAttempts = 0;
         this.blockDetours = 0;
         this.moveIssued = false;
+        this.watchdogSince = DateTime.MinValue;
 
         if (this.Step is FateStep.Idle or FateStep.Done)
         {
@@ -600,6 +677,17 @@ public sealed class FateRunner(
         if (Svc.Condition[ConditionFlag.Unconscious])
         {
             this.TickDead(cfg);
+            return;
+        }
+
+        // **どの段階でも、動けなくなっていないかを見張る。**
+        //
+        // 詰まりの検出は FATE へ向かっている最中にしか置いていなかった。
+        // そのため着地の途中や、敵へ近づいている最中に地形へ挟まると、
+        // 誰も気づかないまま止まり続けていた。
+        // 段階に関係なく見張り、抜け出せなければ帰還まで持っていく。
+        if (this.TickStuckWatchdog())
+        {
             return;
         }
 
@@ -876,6 +964,7 @@ public sealed class FateRunner(
         this.blockDetours = 0;
         this.detourTask = null;
         this.escapeAttempts = 0;
+        this.watchdogSince = DateTime.MinValue;
 
         // 向かう先が、さっき離れた FATE とは別なら、覚えていた印を消す。
         // 同じ番号の FATE が後から湧いたときに、入れなくなるのを防ぐ。
@@ -1277,7 +1366,7 @@ public sealed class FateRunner(
     /// ナビメッシュを介さず直接movementを奪って 25m 先へ動かしている
     /// （AutoGather/Helpers/AdvancedUnstuck.cs の Start）。
     /// </summary>
-    private void EscapeStuckSpot(FateInfo fate, DateTime now, Vector3 here)
+    private void EscapeStuckSpot(FateInfo? fate, DateTime now, Vector3 here)
     {
         this.escapeAttempts++;
 
@@ -1299,7 +1388,11 @@ public sealed class FateRunner(
             this.navigation.Stop();
             this.vnavmesh.TryStop();
             this.moveIssued = false;
-            this.MarkStuck(fate.Id);
+            if (fate is not null)
+            {
+                this.MarkStuck(fate.Id);
+            }
+
             this.target = null;
 
             // 帰還は詠唱がある。終わるまで周回を進めない。
@@ -1366,7 +1459,7 @@ public sealed class FateRunner(
 
         this.trace.Trouble(
             "詰まった場所から離れる",
-            $"{fate.Name} ({here.X:F0},{here.Y:F0},{here.Z:F0}) → " +
+            $"{fate?.Name ?? "移動"} ({here.X:F0},{here.Y:F0},{here.Z:F0}) → " +
             $"({away.X:F0},{away.Y:F0},{away.Z:F0}) {this.escapeAttempts} 回目 " +
             $"{(found is null ? "（当て推量）" : "（メッシュ上の点）")}");
 
