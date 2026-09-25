@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using AutoCollector.Automation;
+using AutoCollector.Earning.Fate;
 using AutoCollector.Diagnostics;
 using AutoCollector.Earning;
 using AutoCollector.Earning.Combat;
@@ -117,6 +118,22 @@ public sealed class Plugin : IDalamudPlugin
 
     /// <summary>ギャザラーで稼ぐ。いまは振り分けにだけ使う。</summary>
     internal GathererEarner Gatherer { get; private set; } = null!;
+
+    // ---- FATE 周回（稼ぎ方の 1 つ） ----
+
+    internal FateEarner Fate { get; private set; } = null!;
+
+    internal FateRunner FateRunner { get; private set; } = null!;
+
+    internal BossModIpc BossMod { get; private set; } = null!;
+
+    internal FateScanner FateScanner { get; private set; } = null!;
+
+    internal FateZoneCatalog FateZoneCatalog { get; private set; } = null!;
+
+    internal FateTokenService FateTokens { get; private set; } = null!;
+
+    internal BuddyService BuddyService { get; private set; } = null!;
 
     /// <summary>収集品の出どころ（製作か採集か）を数える。</summary>
     internal CollectableSourceService CollectableSource { get; private set; } = null!;
@@ -451,9 +468,29 @@ public sealed class Plugin : IDalamudPlugin
         this.Combat = new CombatEarner(this.AutoDuty, this.AnomalyLog, this.TomestoneService);
         this.Crafter = new CrafterEarner(this.Artisan, this.AnomalyLog, this.CollectableSource);
         this.Gatherer = new GathererEarner(this.CollectableSource);
+
+        // FATE 周回。バイカラージェムのように FATE でしか増えない通貨を受け持つ。
+        // 移動は専用の NavigationService を持たせる。交換の移動と同じ実体を使うと、
+        // 片方を止めたときにもう片方の経路まで消える。
+        this.BossMod = new BossModIpc(this.AnomalyLog);
+        this.FateScanner = new FateScanner(this.AnomalyLog);
+        this.FateZoneCatalog = new FateZoneCatalog(this.AnomalyLog);
+        this.FateTokens = new FateTokenService(this.AnomalyLog);
+        this.BuddyService = new BuddyService(this.AnomalyLog);
+        this.FateRunner = new FateRunner(
+            this.AnomalyLog,
+            this.FateScanner,
+            new NavigationService(this.AnomalyLog, this.Vnavmesh),
+            this.BossMod,
+            this.BuddyService,
+            this.Lifestream,
+            this.AetheryteService);
+        this.Fate = new FateEarner(this.FateRunner, this.FateTokens, this.AnomalyLog);
+
         this.Earners.Register(this.Combat);
         this.Earners.Register(this.Crafter);
         this.Earners.Register(this.Gatherer);
+        this.Earners.Register(this.Fate);
         this.ExchangeExecutor = new ExchangeExecutor(
             this.AnomalyLog,
             this.ShopService,
@@ -668,6 +705,13 @@ public sealed class Plugin : IDalamudPlugin
             //
             // 走っていなければ即座に戻るため、ふだんの負荷は増えない。
             this.CollectableDelivery.Tick();
+
+            // **FATE 周回も間引かない。**
+            //
+            // 達成度 100% を見た瞬間に離れることが、この機能の要になっている。
+            // 100 ミリ秒ごとにしか見ないと、そのぶん離脱が遅れてその場に留まる。
+            // 走っていなければ即座に戻るので、ふだんの負荷は増えない。
+            this.FateRunner.Tick();
 
             var now = DateTime.UtcNow;
             if (now < this.nextTickUtc)

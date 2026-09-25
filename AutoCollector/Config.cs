@@ -295,4 +295,98 @@ public sealed class Config
     /// null でない間は新しい交換を受け付けない。
     /// </summary>
     public AutoCollector.Automation.PurchaseAttempt? InFlight { get; set; }
+
+    // ------------------------------------------------------------------
+    // FATE 周回
+    //
+    // 稼ぎ方の 1 つとして足したもの。交換の設定には影響しない。
+    // ------------------------------------------------------------------
+
+    /// <summary>FATE 周回を使うか。</summary>
+    public bool FateEnabled { get; set; }
+
+    /// <summary>
+    /// 周回するマップ（TerritoryType の行番号）。
+    ///
+    /// 画面では拡張（新生・蒼天・紅蓮・漆黒・暁月・黄金）単位でも選べるが、
+    /// 保存はマップ単位で行う。拡張で保存すると、パッチでマップが増えたときに
+    /// 利用者が選んだ覚えのないマップで周回が始まってしまう。
+    /// </summary>
+    public List<uint> FateZones { get; set; } = [];
+
+    /// <summary>いまのマップに狙える FATE が無いとき、次のマップへ移るか。</summary>
+    public bool FateSwapZoneWhenEmpty { get; set; } = true;
+
+    /// <summary>マップを移るまでに待つ秒数。すぐ湧くことがあるので少しだけ待つ。</summary>
+    public int FateZoneSwapWaitSeconds { get; set; } = 10;
+
+    /// <summary>残り時間がこれ未満の FATE は狙わない（秒）。着く前に終わるため。</summary>
+    public int FateMinTimeRemainingSec { get; set; } = 120;
+
+    /// <summary>達成度がこれを超えている FATE は狙わない（%）。</summary>
+    public int FateMaxProgressPct { get; set; } = 90;
+
+    /// <summary>
+    /// レベル差で FATE を絞るか。
+    ///
+    /// <b>既定は false。</b>レベルシンクが働くため、高レベルでも低レベルの
+    /// FATE を完了できる。既定で絞ると対象が 1 つも無くなることがある。
+    /// </summary>
+    public bool FateLevelFilterEnabled { get; set; }
+
+    /// <summary>自分より下に許すレベル差。</summary>
+    public int FateMaxLevelBelow { get; set; } = 5;
+
+    /// <summary>自分より上に許すレベル差。</summary>
+    public int FateMaxLevelAbove { get; set; } = 5;
+
+    /// <summary>納品 FATE も回すか。</summary>
+    public bool FateCollectEnabled { get; set; } = true;
+
+    /// <summary>
+    /// 達成度がこれを超えたら、次の FATE を先に決めておく（%）。
+    ///
+    /// 100% を見てから探し始めると、その間その場に立ち尽くすことになる。
+    /// </summary>
+    public int FatePrefetchPct { get; set; } = 70;
+
+    /// <summary>戦闘に使う BossMod Reborn のプリセット名。空なら専用のものを用意する。</summary>
+    public string FateCombatPreset { get; set; } = string.Empty;
+
+    /// <summary>バディ（チョコボ）を自動で呼び出すか。持っていなければ自動で見送る。</summary>
+    public bool FateBuddyEnabled { get; set; } = true;
+
+    /// <summary>バディの残りがこれを切ったら呼び直す（秒）。</summary>
+    public int FateBuddyMinSecondsRemaining { get; set; } = 300;
+
+    /// <summary>ギサールの野菜がこれを切ったら買いに行く。</summary>
+    public int FateGysahlMinCount { get; set; } = 10;
+
+    /// <summary>一度に買うギサールの野菜の数。</summary>
+    public int FateGysahlBuyQuantity { get; set; } = 99;
+
+    /// <summary>ギサールの野菜を自動で買うか。</summary>
+    public bool FateGysahlAutoBuy { get; set; } = true;
+
+    /// <summary>交換のあと、元いた座標まで戻るか。エリアまでは必ず戻る。</summary>
+    public bool FateReturnToExactSpot { get; set; }
+
+    /// <summary>死亡したときの動き。</summary>
+    public FateDeathAction FateDeathAction { get; set; } = FateDeathAction.Wait;
+
+    /// <summary>レイズを待つ上限（秒）。</summary>
+    public int FateRaiseWaitSeconds { get; set; } = 15;
+}
+
+/// <summary>FATE 周回中に戦闘不能になったときの動き。</summary>
+public enum FateDeathAction
+{
+    /// <summary>レイズを待つ。時間切れで街へ戻る。既定。</summary>
+    Wait,
+
+    /// <summary>すぐ街へ戻る。</summary>
+    Return,
+
+    /// <summary>ソロなら戻り、パーティなら待つ。</summary>
+    Auto,
 }
