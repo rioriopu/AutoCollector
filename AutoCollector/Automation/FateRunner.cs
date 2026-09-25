@@ -665,6 +665,10 @@ public sealed class FateRunner(
         // 報酬待ちの状態はどの段階でも更新する。マップを離れてよいかの判断に使う。
         this.RefreshPendingReward();
 
+        // 飛んでいるあいだ、届いた高さを覚える。
+        // そのマップで飛べる高さの上限を知る手段が他に無い。
+        MountService.ObserveCeiling();
+
         // 1. 自動操作が成立しない状況では何もしない。
         //    戦闘・詠唱・動作中は FATE 周回では正常なので弾かれない。
         if (!SafetyGuard.IsSafeToRunFate(out var blockReason, out _))
@@ -1092,20 +1096,9 @@ public sealed class FateRunner(
             // 目的地を持ち上げる。これが離陸の条件（次の点が自分より高い）
             // を満たすことにもなり、経路が地面を擦るのも防ぐ。
             //
-            // **ただし、いまの高さより上へは持ち上げない。**
-            //
-            // 飛行には高度の上限がある。上限に張り付いているときに
-            // さらに上の点を目指させると、そこへは永久に届かず、
-            // 天井に押し付けられたまま進めなくなる
-            // （2026-09-25 実測。Y=58 で頭打ちのまま、+49m 上の点を目指していた）。
-            //
-            // 自分がいま居る高さまでなら、必ず行ける。
-            var lifted = flying
-                ? MathF.Min(ground.Y + MountService.FlightLift, MathF.Max(ground.Y, Player.Position.Y))
-                : ground.Y;
-
+            // 飛べる高さの上限は LiftForFlight が抑える。
             var destination = flying
-                ? ground with { Y = lifted }
+                ? MountService.LiftForFlight(ground)
                 : ground;
 
             // 飛ぶときは中心付近を目指す。端で止まると、そこが低い場所だと
@@ -1138,7 +1131,8 @@ public sealed class FateRunner(
                 $"騎乗={MountService.IsMounted} 飛行={MountService.IsFlying} " +
                 $"{MountService.DescribeFlightStatus()} " +
                 $"目的地の高さ={destination.Y:F0}（本来{live.Position.Y:F0}） " +
-                $"自分の高さ={(Player.Available ? Player.Position.Y : 0):F0}");
+                $"自分の高さ={(Player.Available ? Player.Position.Y : 0):F0} " +
+                $"飛べる高さ={(MountService.KnownCeiling is { } c ? $"{c:F0}" : "未確認")}");
 
             this.moveIssued = true;
             this.flyingWhenIssued = flying;
@@ -1668,7 +1662,9 @@ public sealed class FateRunner(
                 && this.scanner.FindNearestMob(current.Id, Player.Position) is { } mob
                 && mob.Distance > MobReachMeters)
             {
-                var above = mob.Position with { Y = mob.Position.Y + MountService.FlightLift };
+                // 持ち上げは LiftForFlight に通す。自分で足すと、
+                // 飛べる高さの上限を超えた点を目指してしまう。
+                var above = MountService.LiftForFlight(mob.Position);
 
                 // 引いた経路は積み直さない。積むたびに探索が走り、
                 // そのあいだ進まない。

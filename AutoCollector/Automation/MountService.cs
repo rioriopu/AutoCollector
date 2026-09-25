@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Numerics;
 using AutoCollector.Diagnostics;
 using Dalamud.Game.ClientState.Conditions;
@@ -127,6 +128,65 @@ public sealed unsafe class MountService(AnomalyLog anomalyLog, FateTrace trace)
     public static bool IsFlying => Svc.Condition[ConditionFlag.InFlight];
 
     /// <summary>
+    /// マップごとに、飛んでいて実際に届いた一番高い高さ。
+    ///
+    /// <b>飛行の上限はマップごとに違う。</b>
+    /// 実測（記録から集計）では
+    /// 中央ラノシア(134)=90 / 高地ラノシア(139)=31 / 南ザナラーン(146)=58 だった。
+    /// 決め打ちできる値ではなく、シートにも載っていない。
+    ///
+    /// 上限そのものを読む手段が無いので、<b>飛べた高さを覚える</b>。
+    /// 一度でもその高さに居られたなら、そこへは行ける。
+    /// </summary>
+    private static readonly Dictionary<uint, float> CeilingByTerritory = [];
+
+    /// <summary>
+    /// 飛んでいるあいだ、届いた高さを覚える。毎フレーム呼ぶ。
+    ///
+    /// これを積み重ねると、そのマップで飛べる高さの上限に近づく。
+    /// </summary>
+    public static void ObserveCeiling()
+    {
+        try
+        {
+            if (!IsFlying || !Player.Available)
+            {
+                return;
+            }
+
+            var territory = Svc.ClientState.TerritoryType;
+            var y = Player.Position.Y;
+
+            if (!CeilingByTerritory.TryGetValue(territory, out var known) || y > known)
+            {
+                CeilingByTerritory[territory] = y;
+            }
+        }
+        catch
+        {
+            // 覚えられなくても動きは変えない。
+        }
+    }
+
+    /// <summary>
+    /// そのマップで飛べると分かっている高さ。まだ分からなければ null。
+    /// </summary>
+    public static float? KnownCeiling
+    {
+        get
+        {
+            try
+            {
+                return CeilingByTerritory.TryGetValue(Svc.ClientState.TerritoryType, out var y) ? y : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+    }
+
+    /// <summary>
     /// 移動の準備を 1 フレーム進める。
     ///
     /// 戻り値が true なら「まだ準備中」。呼び出し側は移動を始めずに待つ。
@@ -231,8 +291,44 @@ public sealed unsafe class MountService(AnomalyLog anomalyLog, FateTrace trace)
     /// 持ち上げた座標を渡す。vnavmesh はその高さの差を見て離陸するため、
     /// 「飛んでから持ち上げる」のでは離陸してくれない。
     /// </remarks>
+    /// <remarks>
+    /// <b>飛べる高さを超えて持ち上げない。</b>
+    ///
+    /// 飛行には高度の上限があり、そこに張り付いていると上へは 1m も進めない
+    /// （ゲームが「高度上限付近です」と出す）。
+    /// それより上の点を目的地にすると、永久に届かないまま
+    /// 天井に押し付けられて動けなくなる（2026-09-25 実測。Y=58 で頭打ち）。
+    ///
+    /// vnavmesh は高度の上限を知らない。voxel の空間として空いていれば
+    /// 経路を引くため、上限より上でも「行ける」と答えてしまう。
+    /// 上限を知っているのはゲームだけなので、ここで抑える。
+    ///
+    /// 上限そのものを読む手段が無いため、<b>いま自分が居る高さ</b>を上限とみなす。
+    /// いま居られる高さなら、必ずそこへ行ける。
+    /// </remarks>
     public static Vector3 LiftForFlight(Vector3 destination, float lift = FlightLift)
-        => destination with { Y = destination.Y + lift };
+    {
+        var raised = destination.Y + lift;
+
+        try
+        {
+            // 飛べると分かっている高さ（実際に居られた高さ）を上限にする。
+            // まだ分からなければ、いま自分が居る高さを使う。
+            var ceiling = KnownCeiling ?? (Player.Available ? Player.Position.Y : (float?)null);
+
+            if (ceiling is { } limit)
+            {
+                // 目的地より下へは下げない。地面を擦らせないため。
+                raised = MathF.Min(raised, MathF.Max(destination.Y, limit));
+            }
+        }
+        catch
+        {
+            // 読めなければ持ち上げたままにする。ふだんの動きは変えない。
+        }
+
+        return destination with { Y = raised };
+    }
 
     /// <summary>
     /// 飛行時に目的地を持ち上げる高さ。
