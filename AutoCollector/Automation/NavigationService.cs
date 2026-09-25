@@ -57,6 +57,15 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
     private readonly AnomalyLog anomalyLog = anomalyLog;
     private readonly VnavmeshIpc vnavmesh = vnavmesh;
 
+    /// <summary>
+    /// 直前の <see cref="BeginMove(Vector3, float, bool, out string)"/> が
+    /// 「別の経路探索の最中」で断られたか。
+    ///
+    /// <b>これは失敗ではない。</b>少し待てば受け取れる。
+    /// 呼び出し側は、これが true のときに「辿り着けない」と数えてはいけない。
+    /// </summary>
+    public bool Busy { get; private set; }
+
     private bool moveIssued;
     private int stableFrames;
     private int idleShortFrames;
@@ -182,9 +191,19 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
 
         if (!accepted)
         {
+            // **これは失敗ではなく「まだ受け取れない」。**
+            //
+            // vnavmesh の経路探索は非同期で、前の探索が終わる前に頼むと断られる。
+            // 少し待てば受け取れるので、呼び出し側が「辿り着けない」と
+            // 数えてはいけない。数えていたため、FATE へ向かい始めた直後に
+            // 2 回断られただけで、その FATE を候補から外していた
+            // （2026-09-25 実測。5 つの FATE を 0.3 秒で全部外していた）。
+            this.Busy = true;
             failureReason = "vnavmesh が別の経路探索を実行中です";
             return false;
         }
+
+        this.Busy = false;
 
         this.moveIssued = true;
         failureReason = string.Empty;

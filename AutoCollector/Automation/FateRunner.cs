@@ -859,6 +859,16 @@ public sealed class FateRunner(
 
             if (!this.navigation.BeginMove(destination, moveRange, flying, out var failure))
             {
+                // **経路探索の最中なら、ただ待つ。**
+                // これは失敗ではないので、辿り着けなかったと数えない。
+                // 数えていたため、向かい始めた直後に 2 回断られただけで
+                // その FATE を候補から外していた（2026-09-25 実測）。
+                if (this.navigation.Busy)
+                {
+                    this.StatusDetail = $"{live.Name} へ向かう経路を待っています";
+                    return;
+                }
+
                 this.anomalyLog.Warn("Fate", $"{live.Name} へ移動できませんでした: {failure}");
                 this.MarkStuck(live.Id);
                 this.target = null;
@@ -1257,6 +1267,12 @@ public sealed class FateRunner(
 
         if (!this.navigation.BeginMove(destination, MobReachMeters, false, out var failure))
         {
+            // 経路探索の最中なら、ただ待つ。失敗ではない。
+            if (this.navigation.Busy)
+            {
+                return;
+            }
+
             // 歩かせられないので、止めていたプリセットの移動を戻す。
             this.ResumePresetMovement();
             this.trace.Trouble("近づけない", failure);
