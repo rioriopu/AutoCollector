@@ -1140,13 +1140,7 @@ public sealed class PresetTab(Plugin plugin)
                 return;
             }
 
-            if (ImGui.Button("この通貨の交換候補を読み込む"))
-            {
-                resolver.BeginBuild(currencyItemId);
-            }
-
-            ImGui.SameLine();
-            ImGui.TextColored(ImGuiColors.DalamudGrey, "一度読み込めば、次からはすぐ出ます");
+            DrawLoadButton(resolver, currencyItemId);
             return;
         }
 
@@ -1380,9 +1374,42 @@ public sealed class PresetTab(Plugin plugin)
     /// 武器の交換は通貨だけでは成立しない。足りないまま開始すると
     /// 交換所まで行って断られる。出発前に画面で分かるようにしておく。
     /// </summary>
-    /// <summary>「--エリア選択--」などの、選ばせるための先頭行。</summary>
-    private const string AreaPlaceholder = "--エリア選択--";
-    private const string ShopPlaceholder = "--交換先を選択--";
+    /// <summary>
+    /// 「--①エリア選択--」などの、選ばせるための先頭行。
+    ///
+    /// 番号を振ってあるのは、どこから触ればよいか
+    /// 見ただけで分かるようにするため。
+    /// </summary>
+    private const string AreaPlaceholder = "--①エリア選択--";
+    private const string ShopPlaceholder = "--②交換先を選択--";
+
+    /// <summary>
+    /// 交換候補を読み込むボタン。
+    ///
+    /// <b>ここが最初の一歩なので、目立たせる。</b>
+    /// 通貨を選んだ直後は、この読み込みを済ませないと何も出ない。
+    /// ふつうのボタンだと、どこを押せばよいのか分からない。
+    /// </summary>
+    private static void DrawLoadButton(ExchangeResolver resolver, uint currencyItemId)
+    {
+        using (ImRaii.PushColor(ImGuiCol.Button, OrangeButton)
+               .Push(ImGuiCol.ButtonHovered, OrangeButtonHovered)
+               .Push(ImGuiCol.ButtonActive, OrangeButtonActive))
+        {
+            if (ImGui.Button("この通貨の交換候補を読み込む"))
+            {
+                resolver.BeginBuild(currencyItemId);
+            }
+        }
+
+        ImGui.SameLine();
+        ImGui.TextColored(ImGuiColors.DalamudGrey, "一度読み込めば、次からはすぐ出ます");
+    }
+
+    /// <summary>読み込みボタンの色。押してほしいものとして橙で出す。</summary>
+    private static readonly Vector4 OrangeButton = new(0.80f, 0.45f, 0.10f, 1f);
+    private static readonly Vector4 OrangeButtonHovered = new(0.92f, 0.56f, 0.16f, 1f);
+    private static readonly Vector4 OrangeButtonActive = new(0.70f, 0.38f, 0.06f, 1f);
 
     /// <summary>交換先 1 件（都市の交易商か、マップの交易商）。</summary>
     private sealed record FateVendor(
@@ -1531,7 +1558,10 @@ public sealed class PresetTab(Plugin plugin)
         var resolver = this.plugin.ExchangeResolver;
         var links = this.plugin.NpcShopLinkMap;
 
-        // この通貨に、地域ごとの交易商が居るか。居なければ何も出さない。
+        // **まだ読み込んでいないなら、ここでは何もしない。**
+        // 読み込みボタンは下の DrawRewardPicker が出す。
+        // ここで先に抜けてしまうと、ボタンごと消えて
+        // 「何をすればいいのか分からない」画面になる。
         if (!resolver.IsBuiltFor(currencyItemId))
         {
             return false;

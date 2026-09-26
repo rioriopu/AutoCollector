@@ -14,8 +14,28 @@ namespace AutoCollector.Game;
 /// <param name="MaxRank">そのマップの上限ランク。</param>
 public sealed record SharedFateZoneRank(uint TerritoryId, byte CurrentRank, byte MaxRank)
 {
-    /// <summary>このマップが上限に達しているか。</summary>
+    /// <summary>
+    /// このマップが上限に達しているか。
+    ///
+    /// <b>MaxRank が 0 のことがある。</b>
+    /// 実機（2026-09-27）で、全マップ COMPLETE・RANK4 の状態なのに
+    /// 「0/6 マップ」と判定される不具合が出た。
+    /// CurrentRank は正しく読めていたので、MaxRank 側が
+    /// 埋まっていなかったことになる。
+    ///
+    /// <b>上限はシートからも取れない。</b>
+    /// FateProgressUI の列 1 はどのマップも 6 だが、
+    /// 実際の上限は 漆黒 3 / 暁月 3 / 黄金 4 で一致しない。
+    ///
+    /// そこで MaxRank が読めているときだけそれを信じ、
+    /// 読めていないときは <see cref="SharedFateRankService"/> 側で
+    /// 「その拡張でいちばん高いランク」を上限とみなして判定する。
+    /// ここでは判断できないので、素直に false を返す。
+    /// </summary>
     public bool IsMaxed => this.MaxRank > 0 && this.CurrentRank >= this.MaxRank;
+
+    /// <summary>上限が読めているか。</summary>
+    public bool HasMaxRank => this.MaxRank > 0;
 }
 
 /// <summary>
@@ -176,6 +196,19 @@ public sealed class SharedFateRankService(AnomalyLog anomalyLog)
                             zone.MaxRank);
                     }
                 }
+
+                // **読めた値をそのまま記録に残す。**
+                // 画面の表示と食い違ったとき、どの値がどう違うのかが
+                // 分からないと直しようがない。
+                if (result.Count > 0
+                    && ECommons.Throttlers.EzThrottler.Throttle("AutoCollector.RankDump", 10000))
+                {
+                    this.anomalyLog.Info(
+                        "SharedFate",
+                        "読み取った達成度: " + string.Join(
+                            " / ",
+                            result.Values.Select(x => $"{x.TerritoryId}:{x.CurrentRank}/{x.MaxRank}")));
+                }
             }
         }
         catch (Exception ex)
@@ -216,15 +249,44 @@ public sealed class SharedFateRankService(AnomalyLog anomalyLog)
             return false;
         }
 
-        foreach (var territory in group)
+        // この拡張のぶんだけ取り出す。
+        var inGroup = group
+            .Where(ranks.ContainsKey)
+            .Select(t => ranks[t])
+            .ToList();
+
+        if (inGroup.Count != group.Count)
         {
-            if (!ranks.TryGetValue(territory, out var rank) || !rank.IsMaxed)
-            {
-                return false;
-            }
+            // 1 つでも読めていないなら判断しない。
+            return false;
         }
 
-        return true;
+        // **上限が読めているならそれで判定する。**
+        if (inGroup.All(x => x.HasMaxRank))
+        {
+            return inGroup.All(x => x.IsMaxed);
+        }
+
+        // **上限が読めないときの逃げ道。**
+        //
+        // 実機（2026-09-27）で MaxRank が 0 のまま埋まらないことがあった。
+        // 上限はシートにも無い（FateProgressUI の列 1 はどのマップも 6 だが、
+        // 実際は 漆黒 3 / 暁月 3 / 黄金 4）。
+        //
+        // ただしシェアF.A.T.E の上限は拡張の中で共通なので、
+        // <b>その拡張で到達しているいちばん高いランク</b>を上限とみなせる。
+        // 全マップがその値に届いていれば「全マップ最大」と判断してよい。
+        //
+        // これで誤るのは「全マップが同じランクで、まだ上限に届いていない」
+        // ときだけ。その場合は都市へ行って空振りするが、
+        // 逆に「本当は最大なのに一生解放されない」よりは実害が小さい。
+        var highest = inGroup.Max(x => x.CurrentRank);
+        if (highest == 0)
+        {
+            return false;
+        }
+
+        return inGroup.All(x => x.CurrentRank >= highest);
     }
 
     /// <summary>
@@ -255,7 +317,25 @@ public sealed class SharedFateRankService(AnomalyLog anomalyLog)
             return "F.A.T.E達成度の画面を一度開くと判定できます";
         }
 
-        var maxed = group.Count(t => ranks.TryGetValue(t, out var r) && r.IsMaxed);
+        // 判定と同じ数え方をする。食い違うと、
+        // 「全マップ最大」と書いてあるのに選べない、といった形になる。
+        var inGroup = group
+            .Where(ranks.ContainsKey)
+            .Select(t => ranks[t])
+            .ToList();
+
+        int maxed;
+        if (inGroup.Count == group.Count && inGroup.All(x => x.HasMaxRank))
+        {
+            maxed = inGroup.Count(x => x.IsMaxed);
+        }
+        else
+        {
+            // 上限が読めないので、到達しているいちばん高いランクを上限とみなす。
+            var highest = inGroup.Count > 0 ? inGroup.Max(x => x.CurrentRank) : (byte)0;
+            maxed = highest == 0 ? 0 : inGroup.Count(x => x.CurrentRank >= highest);
+        }
+
         return $"ランク最大 {maxed}/{group.Count} マップ";
     }
 }
