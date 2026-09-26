@@ -113,6 +113,15 @@ public sealed class ExchangePreset
     /// <summary>ユーザーが交換所 NPC を明示指定した場合の ENpcBase.RowId。0 なら自動選択。</summary>
     public uint PreferredNpcDataId { get; set; }
 
+    /// <summary>
+    /// 「交換エリア」で選んだ拡張の名前。空なら未選択。
+    ///
+    /// 番号ではなく名前で持つ。拡張の番号はシートから引くもので、
+    /// 設定ファイルに番号を残すと、シートが変わったときに意味が変わる。
+    /// 名前ならシートと突き合わせて確かめられる。
+    /// </summary>
+    public string FateAreaName { get; set; } = string.Empty;
+
     /// <summary>SelectString 等の選択肢を絞り込むためのヒント文字列。ユーザー操作で確定した値を保存する。</summary>
     public string? MenuHint { get; set; }
 

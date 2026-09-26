@@ -59,6 +59,12 @@ public sealed class SharedFateRankService(AnomalyLog anomalyLog)
     /// <summary>拡張の区切り（シートの並び順）→ そのマップ群。</summary>
     private IReadOnlyList<IReadOnlyList<uint>>? zoneGroups;
 
+    /// <summary>ランクを覚えておく時間。</summary>
+    private const long CacheMilliseconds = 1000;
+
+    private IReadOnlyDictionary<uint, SharedFateZoneRank>? cachedRanks;
+    private long cachedAt;
+
     /// <summary>
     /// シェアF.A.T.E に出てくるマップを、拡張ごとにまとめて返す。
     ///
@@ -133,6 +139,16 @@ public sealed class SharedFateRankService(AnomalyLog anomalyLog)
     /// </summary>
     public IReadOnlyDictionary<uint, SharedFateZoneRank> ReadCurrentRanks()
     {
+        // 画面から毎フレーム呼ばれる。エージェントを読むたびに
+        // 18 ゾーン分を走査すると描画の時間を食うため、少しだけ覚える。
+        // ランクは F.A.T.E を回している最中にしか上がらないので、
+        // 1 秒遅れて反映されても困らない。
+        var now = Environment.TickCount64;
+        if (this.cachedRanks is not null && now - this.cachedAt < CacheMilliseconds)
+        {
+            return this.cachedRanks;
+        }
+
         var result = new Dictionary<uint, SharedFateZoneRank>();
 
         try
@@ -166,6 +182,14 @@ public sealed class SharedFateRankService(AnomalyLog anomalyLog)
         {
             this.anomalyLog.Warn("SharedFate", $"シェアF.A.T.E のランクを読めませんでした: {ex.Message}");
             return new Dictionary<uint, SharedFateZoneRank>();
+        }
+
+        // 読めなかった（画面をまだ開いていない）ときは覚えない。
+        // 覚えてしまうと、開いた直後の 1 秒間だけ古い「読めない」が残る。
+        if (result.Count > 0)
+        {
+            this.cachedRanks = result;
+            this.cachedAt = now;
         }
 
         return result;
@@ -202,6 +226,17 @@ public sealed class SharedFateRankService(AnomalyLog anomalyLog)
 
         return true;
     }
+
+    /// <summary>
+    /// そのマップのいまのランク。読めなければ 0。
+    /// </summary>
+    public byte CurrentRankOf(uint territoryId)
+        => this.ReadCurrentRanks().TryGetValue(territoryId, out var rank) ? rank.CurrentRank : (byte)0;
+
+    /// <summary>
+    /// ランクを読める状態か（シェアF.A.T.E の画面が一度でも開かれたか）。
+    /// </summary>
+    public bool CanReadRanks() => this.ReadCurrentRanks().Count > 0;
 
     /// <summary>
     /// 進み具合を人が読める形で返す。画面表示と、記録に使う。

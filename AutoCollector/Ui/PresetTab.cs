@@ -564,6 +564,9 @@ public sealed class PresetTab(Plugin plugin)
                 "  トームストーンはスロット番号で保存するため、パッチで入れ替わっても自動追従します");
         }
 
+        // --- 交換エリア・交換先（バイカラージェムのように交易商が各地に居る通貨だけ） ---
+        this.DrawFateAreaPicker(preset, ref changed);
+
         // --- 交換対象 ---
         this.DrawRewardPicker(preset, ref changed);
 
@@ -1370,6 +1373,385 @@ public sealed class PresetTab(Plugin plugin)
     /// 武器の交換は通貨だけでは成立しない。足りないまま開始すると
     /// 交換所まで行って断られる。出発前に画面で分かるようにしておく。
     /// </summary>
+    /// <summary>「--エリア選択--」などの、選ばせるための先頭行。</summary>
+    private const string AreaPlaceholder = "--エリア選択--";
+    private const string ShopPlaceholder = "--交換先を選択--";
+
+    /// <summary>交換先 1 件（都市の交易商か、マップの交易商）。</summary>
+    private sealed record FateVendor(
+        uint NpcId,
+        string Name,
+        uint TerritoryId,
+        bool IsCity,
+        bool IsUnlocked,
+        string LockReason);
+
+    /// <summary>拡張 1 件と、そこにある交換先。</summary>
+    private sealed record FateArea(string Name, IReadOnlyList<FateVendor> Vendors);
+
+    /// <summary>
+    /// 交換エリアと交換先を、いまの索引から組み立てる。
+    ///
+    /// <b>エリアの名前はシートから引く。</b>「漆黒」などの文字を
+    /// コードへ書かない（docs/00_設計決定.md の D-2）。
+    /// シェアF.A.T.E のマップ群 1 組が 1 拡張なので、
+    /// その代表マップの ExVersion から名前を得る。
+    ///
+    /// 並びは都市を先頭にし、あとはマップを続ける。
+    /// </summary>
+    private List<FateArea> BuildAreas(uint currencyItemId)
+    {
+        var resolver = this.plugin.ExchangeResolver;
+        var links = this.plugin.NpcShopLinkMap;
+        var ranks = this.plugin.SharedFateRankService;
+
+        // その通貨で行ける交易商を、NPC ごとにまとめる。
+        var vendors = resolver.LiveResults
+            .GroupBy(x => x.NpcDataId)
+            .Select(g => g.First())
+            .ToList();
+
+        if (vendors.Count == 0)
+        {
+            return [];
+        }
+
+        var areas = new List<FateArea>();
+
+        foreach (var group in ranks.ZoneGroups)
+        {
+            // この拡張のマップに居る交易商。
+            var mapVendors = vendors
+                .Where(v => group.Contains(v.TerritoryId))
+                .ToList();
+
+            if (mapVendors.Count == 0)
+            {
+                continue;
+            }
+
+            // 同じ拡張の都市の交易商。マップ側から相棒を辿って探す。
+            var cityVendors = vendors
+                .Where(v => links.IsCityNpc(v.NpcDataId)
+                            && group.Contains(links.SampleZoneForCityNpc(v.NpcDataId)))
+                .ToList();
+
+            var unlocked = ranks.IsCityShopUnlocked(group[0]);
+            var progress = ranks.DescribeProgress(group[0]);
+
+            var list = new List<FateVendor>();
+
+            foreach (var city in cityVendors)
+            {
+                list.Add(new FateVendor(
+                    city.NpcDataId,
+                    NpcLocationService.GetTerritoryName(city.TerritoryId),
+                    city.TerritoryId,
+                    true,
+                    unlocked,
+                    ranks.CanReadRanks()
+                        ? $"全マップ最大が条件。いま {progress}"
+                        : "シェアF.A.T.E の画面を一度開くと判定できます"));
+            }
+
+            // マップの交易商は、その拡張のマップ順に並べる。
+            foreach (var territory in group)
+            {
+                var vendor = mapVendors.FirstOrDefault(v => v.TerritoryId == territory);
+                if (vendor is null)
+                {
+                    continue;
+                }
+
+                list.Add(new FateVendor(
+                    vendor.NpcDataId,
+                    NpcLocationService.GetTerritoryName(territory),
+                    territory,
+                    false,
+                    true,
+                    string.Empty));
+            }
+
+            var name = GetExpansionName(group[0]);
+            if (!string.IsNullOrEmpty(name))
+            {
+                areas.Add(new FateArea(name, list));
+            }
+        }
+
+        return areas;
+    }
+
+    /// <summary>マップの territory から拡張の名前を引く。</summary>
+    private static string GetExpansionName(uint territoryId)
+    {
+        var territories = Svc.Data.GetExcelSheet<Lumina.Excel.Sheets.TerritoryType>();
+        if (territories is null || !territories.TryGetRow(territoryId, out var row))
+        {
+            return string.Empty;
+        }
+
+        var versions = Svc.Data.GetExcelSheet<Lumina.Excel.Sheets.ExVersion>();
+        return versions?.GetRowOrDefault(row.ExVersion.RowId)?.Name.ExtractText() ?? string.Empty;
+    }
+
+    /// <summary>薄く出した品を押したときの説明を、少しのあいだ出す。</summary>
+    private string lockedMessage = string.Empty;
+    private long lockedMessageUntil;
+
+    /// <summary>
+    /// 交換エリア → 交換先 → 交換できる品、の順に選ばせる。
+    ///
+    /// クラフタースクリップの「系統」「種別」と同じ形にしている。
+    ///
+    /// <b>シェアF.A.T.E のランクで、出せるものが変わる。</b>
+    ///   ・都市の交易商は、その拡張の 6 マップ全部が最大でないと選べない
+    ///   ・各品は、決まった段階に達していないと選べない
+    /// 選べないものは薄く出し、押したときに理由を出す。
+    /// 隠してしまうと「なぜ無いのか」が分からなくなる。
+    /// </summary>
+    private void DrawFateAreaPicker(ExchangePreset preset, ref bool changed)
+    {
+        if (!this.plugin.CurrencyCatalog.TryResolve(preset, out var currencyItemId))
+        {
+            return;
+        }
+
+        var resolver = this.plugin.ExchangeResolver;
+        var links = this.plugin.NpcShopLinkMap;
+
+        // この通貨に、地域ごとの交易商が居るか。居なければ何も出さない。
+        if (!resolver.IsBuiltFor(currencyItemId))
+        {
+            return;
+        }
+
+        resolver.BeginBuild(currencyItemId);
+
+        var areas = this.BuildAreas(currencyItemId);
+        if (areas.Count == 0)
+        {
+            return;
+        }
+
+        ImGui.Separator();
+
+        // --- 交換エリア ---
+        var areaLabels = new List<string> { AreaPlaceholder };
+        areaLabels.AddRange(areas.Select(a => a.Name));
+
+        var areaIndex = 0;
+        for (var i = 0; i < areas.Count; i++)
+        {
+            if (areas[i].Name == preset.FateAreaName)
+            {
+                areaIndex = i + 1;
+                break;
+            }
+        }
+
+        ImGui.SetNextItemWidth(280f);
+        if (ImGui.Combo("交換エリア", ref areaIndex, areaLabels.ToArray(), areaLabels.Count))
+        {
+            preset.FateAreaName = areaIndex == 0 ? string.Empty : areas[areaIndex - 1].Name;
+
+            // エリアが変われば交換先も別物。選び直しにする。
+            preset.PreferredNpcDataId = 0;
+            changed = true;
+        }
+
+        if (areaIndex == 0)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudGrey, "  エリアを選ぶと、その地方の交換先が出ます");
+            return;
+        }
+
+        var area = areas[areaIndex - 1];
+
+        // --- 交換先 ---
+        // 都市を先頭に、あとはマップを並べる。
+        var shopLabels = new List<string> { ShopPlaceholder };
+        shopLabels.AddRange(area.Vendors.Select(v => v.Name));
+
+        var shopIndex = 0;
+        for (var i = 0; i < area.Vendors.Count; i++)
+        {
+            if (area.Vendors[i].NpcId == preset.PreferredNpcDataId)
+            {
+                shopIndex = i + 1;
+                break;
+            }
+        }
+
+        ImGui.SetNextItemWidth(280f);
+        using (var combo = ImRaii.Combo("交換先", shopLabels[shopIndex]))
+        {
+            if (combo)
+            {
+                for (var i = 0; i < shopLabels.Count; i++)
+                {
+                    // 先頭の「--交換先を選択--」は常に選べる。
+                    var vendor = i == 0 ? null : area.Vendors[i - 1];
+                    var locked = vendor is not null && !vendor.IsUnlocked;
+
+                    using (ImRaii.Disabled(false))
+                    {
+                        // **薄くするが、押せるようにしておく。**
+                        // Disabled にすると押しても何も起きず、
+                        // 「なぜ選べないのか」を出す機会が無くなる。
+                        using var color = ImRaii.PushColor(
+                            ImGuiCol.Text,
+                            ImGuiColors.DalamudGrey3,
+                            locked);
+
+                        if (ImGui.Selectable(shopLabels[i], i == shopIndex))
+                        {
+                            if (locked)
+                            {
+                                this.ShowLockedMessage(
+                                    $"{vendor!.Name}：シェアF.A.T.E のランクが足りないため選べません" +
+                                    $"（{vendor.LockReason}）");
+                            }
+                            else
+                            {
+                                preset.PreferredNpcDataId = vendor?.NpcId ?? 0;
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        this.DrawLockedMessage();
+
+        if (shopIndex == 0)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudGrey, "  交換先を選ぶと、交換できる品が出ます");
+            return;
+        }
+
+        // --- 交換できる品 ---
+        this.DrawVendorGoods(preset, currencyItemId, area.Vendors[shopIndex - 1], ref changed);
+        this.DrawLockedMessage();
+    }
+
+    /// <summary>
+    /// 選んだ交換先で交換できる品を並べる。
+    ///
+    /// <b>ランクに届いていない品は薄く出し、押されたら理由を出す。</b>
+    /// 隠すと「あるはずの品が無い」と見え、不具合と区別がつかない。
+    /// </summary>
+    private void DrawVendorGoods(
+        ExchangePreset preset,
+        uint currencyItemId,
+        FateVendor vendor,
+        ref bool changed)
+    {
+        var resolver = this.plugin.ExchangeResolver;
+        var ranks = this.plugin.SharedFateRankService;
+
+        var goods = resolver.LiveResults
+            .Where(x => x.NpcDataId == vendor.NpcId)
+            .GroupBy(x => x.RewardItemId)
+            // 同じ品が複数の段階のショップに載る。いちばん低い段階で買えるものを採る。
+            .Select(g => g.OrderBy(x => x.RequiredRank).ThenBy(x => x.CurrencyCost).First())
+            .OrderBy(x => x.RequiredRank)
+            .ThenBy(x => x.CurrencyCost)
+            .ToList();
+
+        if (goods.Count == 0)
+        {
+            ImGui.TextColored(ImGuiColors.DalamudYellow, "  この交換先で交換できる品が見つかりません");
+            return;
+        }
+
+        var currentRank = ranks.CurrentRankOf(vendor.TerritoryId);
+        var canRead = ranks.CanReadRanks();
+
+        ImGui.TextColored(
+            ImGuiColors.DalamudGrey,
+            vendor.IsCity
+                ? $"  {goods.Count} 件"
+                : $"  {goods.Count} 件 / いまのランク {(canRead ? currentRank.ToString() : "不明")}");
+
+        using var child = ImRaii.Child(
+            "##fategoods",
+            new Vector2(0f, 220f),
+            true);
+
+        if (!child)
+        {
+            return;
+        }
+
+        foreach (var good in goods)
+        {
+            var name = ItemName(good.RewardItemId);
+
+            // ランクが足りているか。読めないときは「足りている」とは言えないが、
+            // ここで全部塞ぐと何も選べなくなる。品の制限は実行時にも効くので、
+            // 読めないときは通して、下に注意書きを出す。
+            var locked = good.RequiredRank > 0
+                         && canRead
+                         && currentRank < good.RequiredRank;
+
+            var selected = preset.Rewards.Any(r => r.RewardItemId == good.RewardItemId);
+
+            using (ImRaii.PushColor(ImGuiCol.Text, ImGuiColors.DalamudGrey3, locked))
+            {
+                var label = good.RequiredRank > 0
+                    ? $"{name}  （{good.CurrencyCost} 個 / ランク{good.RequiredRank}〜）"
+                    : $"{name}  （{good.CurrencyCost} 個）";
+
+                if (ImGui.Selectable($"{label}##good{good.RewardItemId}", selected))
+                {
+                    if (locked)
+                    {
+                        this.ShowLockedMessage(
+                            $"{name}：F.A.T.Eランクが低いため交換できません" +
+                            $"（ランク{good.RequiredRank} から。いま {currentRank}）");
+                    }
+                    else if (selected)
+                    {
+                        preset.Rewards.RemoveAll(r => r.RewardItemId == good.RewardItemId);
+                        changed = true;
+                    }
+                    else
+                    {
+                        preset.Rewards.Add(new ExchangeEntry
+                        {
+                            RewardItemId = good.RewardItemId,
+                        });
+                        preset.PreferredNpcDataId = vendor.NpcId;
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>薄く出したものを押されたときの説明を出す。</summary>
+    private void ShowLockedMessage(string message)
+    {
+        this.lockedMessage = message;
+
+        // 押したときだけ出す。出しっぱなしにすると、何を押したときの
+        // 説明なのか分からなくなる。
+        this.lockedMessageUntil = Environment.TickCount64 + 4000;
+    }
+
+    private void DrawLockedMessage()
+    {
+        if (string.IsNullOrEmpty(this.lockedMessage)
+            || Environment.TickCount64 > this.lockedMessageUntil)
+        {
+            return;
+        }
+
+        ImGui.TextColored(ImGuiColors.DalamudYellow, $"  {this.lockedMessage}");
+    }
+
     /// <summary>
     /// シェアF.A.T.E のランクによる制限を説明する。
     ///

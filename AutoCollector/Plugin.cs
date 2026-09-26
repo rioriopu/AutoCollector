@@ -55,6 +55,9 @@ public sealed class Plugin : IDalamudPlugin
     /// <summary>シェアF.A.T.E のランク。都市の交易商が使えるかの判定に要る。</summary>
     internal SharedFateRankService SharedFateRankService { get; private set; } = null!;
 
+    /// <summary>品ごとの「何ランクで解放されるか」。</summary>
+    internal FateShopRankMap FateShopRankMap { get; private set; } = null!;
+
     internal CurrencyCatalog CurrencyCatalog { get; private set; } = null!;
 
     internal CollectablesNpcService CollectablesNpcService { get; private set; } = null!;
@@ -451,7 +454,11 @@ public sealed class Plugin : IDalamudPlugin
         // その拡張の 6 マップすべてがランク最大でないと利用できない。
         this.SharedFateRankService = new SharedFateRankService(this.AnomalyLog);
 
-        this.ExchangeResolver = new ExchangeResolver(this.AnomalyLog, this.TomestoneService, this.NpcLocationService, this.SpecialCurrencyMap, this.NpcShopLinkMap, this.SharedFateRankService);
+        // 品ごとの「何ランクで解放されるか」。
+        // 暁月・黄金はショップの分割、漆黒はエントリの印で持たれている。
+        this.FateShopRankMap = new FateShopRankMap(this.AnomalyLog);
+
+        this.ExchangeResolver = new ExchangeResolver(this.AnomalyLog, this.TomestoneService, this.NpcLocationService, this.SpecialCurrencyMap, this.NpcShopLinkMap, this.SharedFateRankService, this.FateShopRankMap);
         this.ShopService = new ShopService(this.AnomalyLog, DataFileLoader.LoadShopLayout(this.AnomalyLog));
         this.InclusionShopService = new InclusionShopService(this.AnomalyLog, this.SpecialCurrencyMap);
         this.InclusionShopObserver = new InclusionShopObserver(this.AnomalyLog, this.InclusionShopService);

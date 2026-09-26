@@ -30,7 +30,8 @@ public sealed class ExchangeResolver(
     NpcLocationService npcLocationService,
     SpecialCurrencyMap specialCurrencyMap,
     NpcShopLinkMap npcShopLinks,
-    SharedFateRankService sharedFateRanks)
+    SharedFateRankService sharedFateRanks,
+    FateShopRankMap fateShopRanks)
 {
     private readonly AnomalyLog anomalyLog = anomalyLog;
     private readonly TomestoneService tomestoneService = tomestoneService;
@@ -42,6 +43,9 @@ public sealed class ExchangeResolver(
 
     /// <summary>シェアF.A.T.E のランク。都市の交易商が使えるかの判定に要る。</summary>
     private readonly SharedFateRankService sharedFateRanks = sharedFateRanks;
+
+    /// <summary>品ごとの「何ランクで解放されるか」。</summary>
+    private readonly FateShopRankMap fateShopRanks = fateShopRanks;
 
     /// <summary>構築中の一時データ: ShopId → そのショップ内の該当エントリ。</summary>
     private readonly Dictionary<uint, List<ShopEntryRecord>> shopEntries = [];
@@ -765,6 +769,7 @@ public sealed class ExchangeResolver(
                         HasUnresolvedCost = entry.HasUnresolvedCost,
                         ItemCategory = entry.ItemCategory,
                         ShopName = this.shopNames.GetValueOrDefault(shopId, string.Empty),
+                        RequiredRank = this.fateShopRanks.RequiredStage(shopId, entry.RewardItemId),
                     });
                     continue;
                 }
@@ -796,6 +801,7 @@ public sealed class ExchangeResolver(
                         NpcPosition = hasLocation ? location.Position : default,
                         Path = npc.Path,
                         MenuHint = npc.MenuHint,
+                        RequiredRank = this.fateShopRanks.RequiredStage(shopId, entry.RewardItemId),
                     });
                 }
             }
