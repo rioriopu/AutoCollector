@@ -49,6 +49,9 @@ public sealed class Plugin : IDalamudPlugin
 
     internal SpecialCurrencyMap SpecialCurrencyMap { get; private set; } = null!;
 
+    /// <summary>シートから辿れない交換所を NPC に結びつける表。</summary>
+    internal NpcShopLinkMap NpcShopLinkMap { get; private set; } = null!;
+
     internal CurrencyCatalog CurrencyCatalog { get; private set; } = null!;
 
     internal CollectablesNpcService CollectablesNpcService { get; private set; } = null!;
@@ -436,7 +439,11 @@ public sealed class Plugin : IDalamudPlugin
         this.NpcLocationService = new NpcLocationService(this.AnomalyLog);
         this.SpecialCurrencyMap = new SpecialCurrencyMap(this.AnomalyLog);
 
-        this.ExchangeResolver = new ExchangeResolver(this.AnomalyLog, this.TomestoneService, this.NpcLocationService, this.SpecialCurrencyMap);
+        // シートから辿れない交換所を NPC に結びつける表。
+        // 広域交易商 ベリルのように、CustomTalk が空で行き先の書かれていない
+        // NPC があるため、外部データで補う。
+        this.NpcShopLinkMap = new NpcShopLinkMap(this.AnomalyLog);
+        this.ExchangeResolver = new ExchangeResolver(this.AnomalyLog, this.TomestoneService, this.NpcLocationService, this.SpecialCurrencyMap, this.NpcShopLinkMap);
         this.ShopService = new ShopService(this.AnomalyLog, DataFileLoader.LoadShopLayout(this.AnomalyLog));
         this.InclusionShopService = new InclusionShopService(this.AnomalyLog, this.SpecialCurrencyMap);
         this.InclusionShopObserver = new InclusionShopObserver(this.AnomalyLog, this.InclusionShopService);

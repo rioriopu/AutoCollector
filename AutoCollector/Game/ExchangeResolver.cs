@@ -28,12 +28,16 @@ public sealed class ExchangeResolver(
     AnomalyLog anomalyLog,
     TomestoneService tomestoneService,
     NpcLocationService npcLocationService,
-    SpecialCurrencyMap specialCurrencyMap)
+    SpecialCurrencyMap specialCurrencyMap,
+    NpcShopLinkMap npcShopLinks)
 {
     private readonly AnomalyLog anomalyLog = anomalyLog;
     private readonly TomestoneService tomestoneService = tomestoneService;
     private readonly NpcLocationService npcLocationService = npcLocationService;
     private readonly SpecialCurrencyMap specialCurrencyMap = specialCurrencyMap;
+
+    /// <summary>シートから辿れない交換所を NPC に結びつける表。</summary>
+    private readonly NpcShopLinkMap npcShopLinks = npcShopLinks;
 
     /// <summary>構築中の一時データ: ShopId → そのショップ内の該当エントリ。</summary>
     private readonly Dictionary<uint, List<ShopEntryRecord>> shopEntries = [];
@@ -468,7 +472,51 @@ public sealed class ExchangeResolver(
 
         if (this.enpcCursor >= total)
         {
+            // **シートから辿れないショップを、ここで結びつける。**
+            //
+            // 一部のショップは ENpcData からどう辿っても届かない。
+            // 例：広域交易商 ベリルは CustomTalk を 1 つ持つだけで、
+            // その CustomTalk の中身が空（実測 ver 2026.09.15）。
+            //
+            // 走査を終えたこの時点なら、対象のショップは shopEntries に
+            // 載っているので、あとは NPC を教えるだけで済む。
+            this.ApplyManualNpcLinks();
+
             this.Stage = ResolverBuildStage.ResolvingLocations;
+        }
+    }
+
+    /// <summary>
+    /// 外部データで補った「この NPC はこのショップを開く」を当てはめる。
+    ///
+    /// シートに情報が無いものだけを対象にするので、
+    /// すでに NPC が分かっているショップは触らない。
+    /// </summary>
+    private void ApplyManualNpcLinks()
+    {
+        var applied = 0;
+
+        foreach (var shop in this.shopEntries.Keys)
+        {
+            foreach (var npcId in this.npcShopLinks.NpcsFor(shop))
+            {
+                // 走査で見つかっていれば、そちらを優先する。
+                // 手で書いた表より、ゲームのデータのほうが確かなので。
+                if (this.shopToNpcs.TryGetValue(shop, out var existing) && existing.Count > 0)
+                {
+                    continue;
+                }
+
+                this.RecordNpc(shop, npcId, HandlerPath.Direct, null);
+                applied++;
+            }
+        }
+
+        if (applied > 0)
+        {
+            this.anomalyLog.Info(
+                "Exchange",
+                $"シートから辿れない交換所 {applied} 件に、外部データの NPC を当てはめました");
         }
     }
 

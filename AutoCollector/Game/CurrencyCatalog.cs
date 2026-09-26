@@ -110,12 +110,33 @@ public sealed class CurrencyCatalog(
             list.Add(new CurrencyChoice(0, itemId, name, "スクリップ"));
         }
 
+        // **アイテムそのものを通貨にする交換もある。**
+        //
+        // バイカラージェムのように、SpecialShop のコストが
+        // 特殊通貨バケット（CostType==3）ではなく、ふつうのアイテム
+        // （ItemCost に ItemId がそのまま入る）になっているものがある。
+        // 特殊通貨の表には載らないので、これまで一覧に出てこなかった。
+        //
+        // <b>種類は決め打ちしない。</b>
+        // 交換所のコストとして実際に使われているアイテムのうち、
+        // 「通貨として扱うもの」を選び出す。判断は ItemCurrency に任せる。
+        foreach (var (itemId, name) in this.ListItemCurrencies())
+        {
+            if (list.Any(x => x.ItemId == itemId))
+            {
+                continue;
+            }
+
+            list.Add(new CurrencyChoice(0, itemId, name, "そのほかの通貨"));
+        }
+
         // **何が並んだかを必ず残す。**
         // 「1 件しか選べない」という報告を、推測ではなく記録で追えるようにする。
         // 中身が変わったときだけ書くので、出続けて邪魔になることはない。
         var summary =
             $"通貨の一覧: トームストーン {list.Count(x => x.TomestonesRowId != 0 || x.Group == "アラガントームストーン")} 件 / " +
-            $"スクリップ {list.Count(x => x.Group == "スクリップ")} 件 " +
+            $"スクリップ {list.Count(x => x.Group == "スクリップ")} 件 / " +
+            $"そのほか {list.Count(x => x.Group == "そのほかの通貨")} 件 " +
             $"（交換に使える通貨 {usable.Count} 件 / 特殊通貨の表 {this.specials.Entries.Count} 件 " +
             $"クライアント由来={this.specials.ResolvedFromClient}）" +
             $" [{string.Join(", ", list.Select(x => x.Name))}]";
@@ -192,6 +213,110 @@ public sealed class CurrencyCatalog(
     /// <summary>通貨の名前。見つからなければ ItemId をそのまま返す。</summary>
     public string NameOf(uint itemId)
         => this.ListChoices().FirstOrDefault(x => x.ItemId == itemId)?.Name ?? $"ItemId {itemId}";
+
+    /// <summary>
+    /// アイテムそのものを通貨として使う交換の、その通貨。
+    ///
+    /// <b>バイカラージェムのような通貨は、特殊通貨の表に載らない。</b>
+    /// SpecialShop のコストには 2 つの形があり、
+    /// <list type="bullet">
+    /// <item>特殊通貨バケット（CostType==3）— スクリップなど。
+    ///       入っているのは通貨そのものではなくバケットの番号で、
+    ///       <see cref="SpecialCurrencyMap"/> が ItemId へ直す</item>
+    /// <item>ふつうのアイテム — ItemCost に ItemId がそのまま入る。
+    ///       バイカラージェム、モブハントの戦利品、各蛮族の貨幣など</item>
+    /// </list>
+    /// 後者は特殊通貨の表に載らないため、これまで一覧へ出てこなかった。
+    ///
+    /// <b>種類は決め打ちしない。</b>
+    /// 交換所のコストとして実際に使われているアイテムのうち、
+    /// ゲームが「通貨」に分類しているもの（ItemUICategory==100）を採る。
+    /// 実測では 33 種で、バイカラージェム・モブハントの戦利品・
+    /// トロフィークリスタル・各蛮族の貨幣などが並ぶ（ver 2026.09.15）。
+    /// パッチで増えても、こちらを直さずに追従する。
+    /// </summary>
+    private IReadOnlyList<(uint ItemId, string Name)> ListItemCurrencies()
+    {
+        if (this.itemCurrencyCache is { } cached)
+        {
+            return cached;
+        }
+
+        var found = new List<(uint ItemId, string Name)>();
+
+        try
+        {
+            var shops = Svc.Data.GetExcelSheet<SpecialShop>();
+            var items = Svc.Data.GetExcelSheet<Item>();
+
+            if (shops is null || items is null)
+            {
+                // **空を控えない。** 読めなかっただけで、無いとは限らない。
+                return found;
+            }
+
+            var seen = new HashSet<uint>();
+
+            foreach (var shop in shops)
+            {
+                foreach (var entry in shop.Item)
+                {
+                    foreach (var cost in entry.ItemCosts)
+                    {
+                        var costItemId = cost.ItemCost.RowId;
+
+                        if (costItemId == 0 || !seen.Add(costItemId))
+                        {
+                            continue;
+                        }
+
+                        var row = items.GetRowOrDefault(costItemId);
+
+                        // ゲームが「通貨」に分類しているものだけ。
+                        // 素材や装備をコストにする交換も多いので、絞らないと
+                        // 一覧が数百件になって選べなくなる。
+                        if (row is null || row.Value.ItemUICategory.RowId != CurrencyUiCategory)
+                        {
+                            continue;
+                        }
+
+                        var name = row.Value.Name.ExtractText();
+
+                        if (!string.IsNullOrEmpty(name))
+                        {
+                            found.Add((costItemId, name));
+                        }
+                    }
+                }
+            }
+
+            found.Sort((a, b) => string.CompareOrdinal(a.Name, b.Name));
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Warn("Currency", $"アイテム通貨の一覧を作れませんでした: {ex.Message}");
+            return found;
+        }
+
+        // 空なら控えない。次に呼ばれたときにやり直す。
+        if (found.Count > 0)
+        {
+            this.itemCurrencyCache = found;
+        }
+
+        return found;
+    }
+
+    /// <summary>ItemUICategory の「通貨」。スクリップもバイカラージェムもここに入る。</summary>
+    private const uint CurrencyUiCategory = 100;
+
+    /// <summary>
+    /// アイテム通貨の一覧。シートを総なめするので一度だけ作る。
+    ///
+    /// パッチを跨ぐとプラグインごと読み込み直されるため、
+    /// 実行中に中身が変わることはない。
+    /// </summary>
+    private IReadOnlyList<(uint ItemId, string Name)>? itemCurrencyCache;
 
     /// <summary>
     /// いま交換に使える通貨。
