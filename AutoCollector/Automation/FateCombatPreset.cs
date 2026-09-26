@@ -143,11 +143,16 @@ public static class FateCombatPreset
         (ModuleFateUtils, "Handin", "Disabled"),
 
         // **的を勝手に変えさせない。**
-        // NoTarget（既定・0 番）以外が書かれていたら直す。
-        // 既定値は書き出されないため、「入っていない」＝正しい。
+        //
+        // 狙う相手は AutoCollector（FateTargetService）が決める。
+        // BMR に選び直させると、敵視を持っているだけの FATE 外の敵へ移る
+        // （AIHintsBuilder.cs:148 が FateId に関係なく優先度 0 にする）。
+        //
+        // 周回中は一時方針で Never を入れる。プリセット本体は
+        // 利用者が他の用途にも使えるよう、選び直しを許す Hostiles / Always
+        // だけを弾く。Never が書かれていても不備ではない。
         (ModuleAutoTarget, "Retarget", "Hostiles"),
         (ModuleAutoTarget, "Retarget", "Always"),
-        (ModuleAutoTarget, "Retarget", "Never"),
 
         // **自分から狙いに行く。** Passive は Execute の冒頭で即 return するため、
         // 反撃さえしない。Aggressive（既定・0 番）以外なら直す。

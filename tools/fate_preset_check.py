@@ -17,7 +17,6 @@ FORBIDDEN = [
     (FU, "Handin", "Disabled"),
     (AT, "Retarget", "Hostiles"),
     (AT, "Retarget", "Always"),
-    (AT, "Retarget", "Never"),
     (AT, "General", "Passive"),
     (AT, "Everything", "Enabled"),
     (AT, "CollectFATE", "Enabled"),
@@ -128,6 +127,15 @@ case("ジョブのローテーションが無い",
      build(at=[{"Track":"FATE","Option":"Enabled"}],
            fu=[{"Track":"Collect","Option":"Disabled"},{"Track":"Sync","Option":"Enable"}],
            nm=[{"Track":"Destination","Option":"Pathfind"}], with_sam=False), False)
+
+print("\n=== 不備ではないもの（誤検知しないか）===")
+# Retarget=Never は周回中に一時方針で入れる値。
+# 狙う相手は AutoCollector が決めるので、BMR に選び直させない。
+# これを不備と読むと、起動のたびにプリセットを作り直してしまう。
+case("Retarget=Never（周回中に入れる値）",
+     build(at=[{"Track":"FATE","Option":"Enabled"},{"Track":"Retarget","Option":"Never"}],
+           fu=[{"Track":"Collect","Option":"Disabled"},{"Track":"Sync","Option":"Enable"}],
+           nm=[{"Track":"Destination","Option":"Pathfind"}]), True)
 
 print("\n=== モジュールの境目をまたがないか（旧実装の穴）===")
 # 旧実装は文字列検索だったため、AutoTarget の Collect（存在しない）と

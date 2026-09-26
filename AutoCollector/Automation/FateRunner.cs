@@ -463,6 +463,16 @@ public sealed class FateRunner(
     private uint travelTargetTerritory;
 
     /// <summary>
+    /// 狙ってよい敵を決める。
+    ///
+    /// <b>狙う相手はこちらで決め、BMR には戦うことだけをさせる。</b>
+    /// BMR の設定だけでは「FATE 以外に自分から絡まない」を表現できない
+    /// （AIHintsBuilder.cs:148 が敵視のある敵を FateId に関係なく
+    /// 優先度 0 にし、AutoTarget.cs:224 がそれを候補に入れる）。
+    /// </summary>
+    private readonly FateTargetService targets = new(anomalyLog);
+
+    /// <summary>
     /// 飛んで FATE へ入る段取り。
     ///
     /// <b>飛行の間はこれが移動を持つ。</b>
@@ -514,6 +524,12 @@ public sealed class FateRunner(
 
     /// <summary>納品をやり直した回数。</summary>
     private int handInAttempts;
+
+    /// <summary>納品へ向かう間、的の抑止を入れているか。</summary>
+    private bool handInParked;
+
+    /// <summary>直前に狙うと決めた相手。同じ相手を何度も記録しないために持つ。</summary>
+    private ulong lastTargetId;
 
     /// <summary>戦闘の段階へ入った時刻。参加扱いになるのを待つのに使う。</summary>
     private DateTime fightingSinceUtc = DateTime.MinValue;
@@ -669,6 +685,12 @@ public sealed class FateRunner(
         this.retreatAttempts = 0;
         this.groundOnlyFate = null;
         this.teleportRejectedUtc = DateTime.MinValue;
+        this.handingIn = false;
+        this.handInParked = false;
+        this.handInAttempts = 0;
+        this.handInHeldAtStart = 0;
+        this.lastTargetId = 0;
+        this.targets.Reset();
         this.approach.Cancel("周回を始め直します");
         this.StoppedReason = null;
         this.presetApplied = false;
@@ -2696,6 +2718,17 @@ public sealed class FateRunner(
             this.prefetched = this.PickNext(cfg, exclude: current.Id);
         }
 
+        // **狙う相手は、こちらで決める。**
+        //
+        // BMR の設定だけでは「FATE 以外に自分から絡まない」を表現できない。
+        // AIHintsBuilder.cs:148 が敵視のある敵を FateId に関係なく優先度 0 にし、
+        // AutoTarget.cs:224 がそれを候補に入れる。Everything=Disabled は
+        // 「新しく引っ張らない」だけなので、一度絡まれた FATE 外の敵は残る。
+        //
+        // そこでハードターゲットをこちらで置き、BMR には
+        // 「いま狙っている相手と戦う」ことだけをさせる。
+        this.TickAcquireTarget(current);
+
         // **納品の段階に入っていれば、敵へ近づかない。**
         //
         // 10 個たまると BMR の FateUtils が納品 NPC を狙って移動を強制する。
@@ -2717,6 +2750,122 @@ public sealed class FateRunner(
             $"{current.Name} {current.Progress}% " +
             $"シンク={(this.scanner.IsPlayerSyncedToFate() ? "済" : "未")} " +
             $"プリセット={(this.bossMod.TryGetActivePreset(out var nowActive) ? nowActive ?? "なし" : "読めず")}");
+    }
+
+    /// <summary>
+    /// 狙う相手を決めて、ハードターゲットに置く。
+    ///
+    /// <b>自分から仕掛けるのは FATE の敵だけ。絡まれたら反撃する。</b>
+    /// 判定は <see cref="FateTargetService"/> が持つ。
+    /// 「絡まれたか」はゲームの敵視リスト（<c>UIState.Hater</c>）で見る。
+    /// BMR も同じものを読んでいる（WorldStateGameSync.cs:258-265）。
+    ///
+    /// <b>納品中は呼ばない。</b>納品へ向かう最中に敵を狙うと、
+    /// BMR がそちらへ走って納品に行かない。
+    /// </summary>
+    private void TickAcquireTarget(FateInfo current)
+    {
+        if (this.handingIn)
+        {
+            return;
+        }
+
+        var picked = this.targets.AcquireTarget(current.Id, current.Position, current.Radius);
+
+        if (picked is null)
+        {
+            // 狙う相手が居ない。残っているターゲットを外しておく。
+            // 外さないと、円の外の敵を狙ったままオートアタックが続く。
+            this.targets.ReleaseTarget();
+            return;
+        }
+
+        if (this.lastTargetId == picked.GameObjectId)
+        {
+            return;
+        }
+
+        this.lastTargetId = picked.GameObjectId;
+
+        this.trace.Decision(
+            "狙う相手を決めた",
+            $"{picked.Name} ({picked.GameObjectId:X}) " +
+            $"{Vector3.Distance(Player.Position, picked.Position):F0}m " +
+            $"敵視={this.targets.CountAggroOnMe()}件");
+    }
+
+    /// <summary>
+    /// 納品の最中に絡まれた敵を狙う。
+    ///
+    /// 納品へ向かう間は新しい敵を狙わないが、絡まれたら振り払う。
+    /// ダイアログは戦闘中に開かないので、片付けないと納品できない。
+    /// </summary>
+    private void TickAcquireTargetDuringHandIn(FateInfo current)
+    {
+        var picked = this.targets.AcquireTarget(current.Id, current.Position, current.Radius);
+
+        if (picked is null)
+        {
+            this.targets.ReleaseTarget();
+            return;
+        }
+
+        if (this.lastTargetId == picked.GameObjectId)
+        {
+            return;
+        }
+
+        this.lastTargetId = picked.GameObjectId;
+        this.trace.State("納品前に振り払う相手", $"{picked.Name} ({picked.GameObjectId:X})");
+    }
+
+    /// <summary>
+    /// 納品へ向かう間、新しい敵を狙わせない。
+    ///
+    /// <b>プリセットを差し替えず、一時方針で上書きする。</b>
+    /// 差し替えると技のローテーションごと入れ替わり、戻すときに取りこぼす。
+    /// 一時方針なら戦闘力はそのままで、狙う・動くだけを止められる。
+    /// AutoFATEGrind も同じ作法（AutoFate.Collect.cs:159-161）。
+    /// </summary>
+    private void ParkTargetingForHandIn()
+    {
+        if (this.handInParked || !this.presetApplied)
+        {
+            return;
+        }
+
+        // 新しい敵を狙わない。Passive は Execute の冒頭で戻るだけなので、
+        // すでに狙っている相手への攻撃は続く（AutoTarget.cs:110-111）。
+        if (this.bossMod.TryAddTransientStrategy(
+                this.appliedPresetName, ModuleAutoTarget, TrackGeneral, OptionPassive, out var ok) && ok)
+        {
+            this.handInParked = true;
+            return;
+        }
+
+        this.anomalyLog.Warn("Fate", "納品へ向かう間の的の抑止を設定できませんでした");
+    }
+
+    /// <summary>納品の抑止を戻す。</summary>
+    private void ResumeTargetingAfterHandIn()
+    {
+        if (!this.handInParked)
+        {
+            return;
+        }
+
+        this.handInParked = false;
+
+        if (!this.presetApplied)
+        {
+            return;
+        }
+
+        if (!this.bossMod.TryClearTransientStrategy(
+                this.appliedPresetName, ModuleAutoTarget, TrackGeneral, out var ok) || !ok)
+        {
+            this.anomalyLog.Warn("Fate", "納品の抑止を戻せませんでした（AutoTarget.General）");
+        }
     }
 
     /// <summary>
@@ -2776,6 +2925,21 @@ public sealed class FateRunner(
             // 残すと、FateUtils の移動強制と引っ張り合いになる。
             this.StopApproach();
 
+            // **納品へ向かう間は、新しい敵を狙わない。**
+            //
+            // AutoTarget.General を Passive にすると、AutoTarget は
+            // Execute の冒頭で戻り、優先度を一切触らなくなる
+            // （AutoTarget.cs:110-111）。技は撃てるので、
+            // 絡まれたときの反撃はできる。
+            //
+            // AutoFATEGrind も納品へ歩く間は同じ上書きをしている
+            // （AutoFate.Collect.cs:160）。
+            this.ParkTargetingForHandIn();
+
+            // 狙っていた敵も外す。残すと BMR がそちらへ走る。
+            this.targets.ReleaseTarget();
+            this.lastTargetId = 0;
+
             this.anomalyLog.Info(
                 "Fate",
                 $"{current.Name} で納品の品が {count} 個たまりました。納品へ向かいます");
@@ -2788,6 +2952,37 @@ public sealed class FateRunner(
 
         // 納品の段階にいる。
 
+        // **交戦中は納品できない。**
+        //
+        // 納品 NPC のダイアログは戦闘中に開かない。AutoFATEGrind が
+        // 実測で確かめている（AutoFate.Collect.cs:85「whose dialog refuses
+        // to open in combat」、同 88 行で InCombat を弾いている）。
+        //
+        // 追ってきた敵を倒してからでないと納品できないので、
+        // 一時的に狙う許可を戻して戦わせる。
+        if (Svc.Condition[ConditionFlag.InCombat])
+        {
+            if (this.handInParked)
+            {
+                this.trace.State("納品の前に振り払う", $"{current.Name} 交戦中なので、先に戦います");
+                this.ResumeTargetingAfterHandIn();
+            }
+
+            // 絡んできた敵を狙う。納品へ向かう前に片付ける。
+            this.TickAcquireTargetDuringHandIn(current);
+
+            this.StatusDetail = $"{current.Name} 納品の前に交戦を解いています（{count} 個）";
+            return true;
+        }
+
+        // 戦闘が切れた。狙う許可を畳んで納品へ戻る。
+        if (!this.handInParked)
+        {
+            this.ParkTargetingForHandIn();
+            this.targets.ReleaseTarget();
+            this.lastTargetId = 0;
+        }
+
         // **減ったら成立。** 進捗の上昇だけでは判断しない。他人の納品かもしれない。
         if (count < this.handInHeldAtStart)
         {
@@ -2798,6 +2993,9 @@ public sealed class FateRunner(
             this.trace.Decision("納品できた", $"{current.Name} {this.handInHeldAtStart} → {count} 個");
 
             this.handingIn = false;
+
+            // **的の抑止を戻す。** 戻さないと討伐へ帰っても敵を狙わない。
+            this.ResumeTargetingAfterHandIn();
 
             // まだ 10 個あるなら、続けて納品する。
             // 足りなければ討伐へ戻る。次のフレームで判断させる。
@@ -2842,6 +3040,9 @@ public sealed class FateRunner(
 
         this.handingIn = false;
         this.handInAttempts = 0;
+
+        // 的の抑止を戻す。戻さないと討伐へ帰っても敵を狙わない。
+        this.ResumeTargetingAfterHandIn();
         return false;
     }
 
@@ -3305,6 +3506,20 @@ public sealed class FateRunner(
             this.navigation.Stop();
             this.FinishRetreat(escaped: false);
             return;
+        }
+
+        // **戦闘を切って、乗って飛んで出る。**
+        //
+        // 100% になったら敵は無視してよい。ターゲットを外し、
+        // オートアタックを止めないと戦闘が切れず、戦闘中はマウントに
+        // 乗れないので飛んで離れられない。
+        //
+        // ターゲットは LeaveFate の ReleaseCombat で外しているが、
+        // 退避の最中に絡まれて狙い直すことがあるため、ここでも見る。
+        if (Svc.Condition[ConditionFlag.InCombat])
+        {
+            this.targets.ReleaseTarget();
+            this.targets.StopAutoAttack();
         }
 
         // **戦闘が済んだら、乗って出る。**
@@ -3795,9 +4010,34 @@ public sealed class FateRunner(
     private const string TrackSync = "Sync";
     private const string TrackChocobo = "Chocobo";
     private const string TrackFate = "FATE";
+
+    /// <summary>AutoTarget の General トラック。狙いに行くかどうか。</summary>
+    private const string TrackGeneral = "General";
+
+    /// <summary>AutoTarget の Retarget トラック。的を選び直すかどうか。</summary>
+    private const string TrackRetarget = "Retarget";
+
+    /// <summary>
+    /// 的を選び直さない。
+    ///
+    /// AutoTarget は優先度の並べ替えまでは行い、ForcedTarget を
+    /// 書く前に戻る（AutoTarget.cs:232-237）。
+    /// つまり、こちらが置いた的は残り、ジョブのモジュールは
+    /// その相手に技を撃てる。
+    /// </summary>
+    private const string OptionNever = "Never";
+
     private const string OptionEnabled = "Enabled";
     private const string OptionDisabled = "Disabled";
     private const string OptionNone = "None";
+
+    /// <summary>
+    /// 自分から狙いに行かない。
+    ///
+    /// AutoTarget は Execute の冒頭で戻るだけなので（AutoTarget.cs:110-111）、
+    /// 優先度を触らない。すでに狙っている相手への攻撃は続く。
+    /// </summary>
+    private const string OptionPassive = "Passive";
 
     /// <summary>レベルシンクを入れる。FateSync.Enable の名前。</summary>
     private const string OptionSyncEnable = "Enable";
@@ -3996,6 +4236,18 @@ public sealed class FateRunner(
         // FATE 内の敵を優先して狙う。
         TrySet(ModuleAutoTarget, TrackFate, OptionEnabled);
 
+        // **こちらが置いた的を、BMR に変えさせない。**
+        //
+        // 狙う相手は FateTargetService が決めている。BMR に選び直させると、
+        // FATE 外の敵（敵視を持っているだけのもの）へ移ることがある。
+        // AIHintsBuilder.cs:148 が敵視のある敵を FateId に関係なく
+        // 優先度 0 にするため、Everything=Disabled でも防げない。
+        //
+        // Never は Execute の冒頭近くで戻り、ForcedTarget を書かない
+        // （AutoTarget.cs:236-237）。優先度の計算だけは行うので、
+        // ジョブのモジュールは狙っている相手に技を撃てる。
+        TrySet(ModuleAutoTarget, TrackRetarget, OptionNever);
+
         void TrySet(string module, string track, string value)
         {
             if (this.bossMod.TryAddTransientStrategy(preset, module, track, value, out var ok) && ok)
@@ -4017,6 +4269,21 @@ public sealed class FateRunner(
     /// </summary>
     private void ReleaseCombat()
     {
+        // **ターゲットを外すのは、プリセットの有無に関わらず行う。**
+        //
+        // 以前はここで presetApplied を見て早期に戻っていた。
+        // プリセットを入れる前に離脱すると、ターゲットが残ったままになる。
+        //
+        // <b>ターゲットが残ると脱出できない。</b>
+        // 残っているとオートアタックが続き、戦闘中はマウントに乗れないので、
+        // 「100% になったら飛んで離れる」が成立しない。
+        //
+        // BMR 側にターゲットを外す手立ては無い。Plugin.SetTarget は
+        // null を渡されると何もせずに戻る（Plugin.cs:432-437）。
+        // つまり自分で外すしかない。
+        this.targets.ReleaseTarget();
+        this.targets.StopAutoAttack();
+
         if (!this.presetApplied)
         {
             return;
@@ -4047,6 +4314,11 @@ public sealed class FateRunner(
         this.handingIn = false;
         this.handInAttempts = 0;
         this.handInHeldAtStart = 0;
+
+        // プリセットごと外したので、抑止の記録も捨てる。
+        // 外す先が無いのに戻そうとしても警告が出るだけ。
+        this.handInParked = false;
+        this.lastTargetId = 0;
     }
 
     /// <summary>
