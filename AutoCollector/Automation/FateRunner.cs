@@ -304,12 +304,26 @@ public sealed class FateRunner(
     private const int MaxRetreatAttempts = 3;
 
     /// <summary>
-    /// 退避でマウントに乗れるのを待つ上限。
+    /// 退避でマウントに乗れるのを待つ上限（納品 FATE 以外）。
     ///
-    /// 過ぎたら諦めて歩いて円の外へ出る。
-    /// 飛べるエリアでも、戦闘が切れないなどで乗れないことがある。
+    /// <b>その場で待ってよい。</b>
+    /// 乗れない理由はたいてい一時的（戦闘が切れる直前、直前の操作の硬直、
+    /// 降りた直後のリキャスト）で、少し待てば乗れる。
+    /// 待たずに歩き出すと、何もない場所へ走る動きになる。
+    ///
+    /// 納品 FATE では短くする（<see cref="CollectRetreatMountPatience"/>）。
+    /// あちらは報酬を受け取るまでマップを離れられないため、
+    /// ここで長く待つと次の FATE へ向かう時間を削ることになる。
     /// </summary>
-    private static readonly TimeSpan RetreatMountPatience = TimeSpan.FromSeconds(8);
+    private static readonly TimeSpan RetreatMountPatience = TimeSpan.FromSeconds(20);
+
+    /// <summary>
+    /// 納品 FATE で、退避でマウントに乗れるのを待つ上限。
+    ///
+    /// 納品 FATE は 100% のあと報酬が入るまで最大 90 秒マップに留まる。
+    /// その間に次の FATE を回りたいので、ここでは長く待たない。
+    /// </summary>
+    private static readonly TimeSpan CollectRetreatMountPatience = TimeSpan.FromSeconds(8);
 
     /// <summary>
     /// 退避のとき、真上へどれだけ上がるか。
@@ -319,8 +333,17 @@ public sealed class FateRunner(
     /// </summary>
     private const float RetreatLiftMeters = 8f;
 
-    /// <summary>円の外へ出るのを待つ上限。出られなくても周回は続ける。</summary>
-    private static readonly TimeSpan RetreatTimeout = TimeSpan.FromSeconds(15);
+    /// <summary>
+    /// 円の外へ出るのを待つ上限。出られなくても周回は続ける。
+    ///
+    /// <b>乗るのを待つ時間より長くする。</b>
+    /// 短いと、乗れるのを待っている最中にこちらが先に切れてしまい、
+    /// 待った意味が無くなる。
+    /// </summary>
+    private static readonly TimeSpan RetreatTimeout = TimeSpan.FromSeconds(30);
+
+    /// <summary>納品 FATE で円の外へ出るのを待つ上限。報酬待ちがあるので短くする。</summary>
+    private static readonly TimeSpan CollectRetreatTimeout = TimeSpan.FromSeconds(15);
 
     /// <summary>テレポートが終わるのを待つ上限。</summary>
     private static readonly TimeSpan TeleportTimeout = TimeSpan.FromSeconds(60);
@@ -3695,7 +3718,13 @@ public sealed class FateRunner(
         }
 
         // 待ちすぎない。出られなくても周回は続ける。
-        if (DateTime.UtcNow - this.retreatSinceUtc > RetreatTimeout)
+        //
+        // **納品 FATE では短く切り上げる。**
+        // 報酬が入るまで最大 90 秒マップに留まるので、
+        // ここで長く粘ると次の FATE を回る時間を削ることになる。
+        var retreatLimit = finished.IsCollect ? CollectRetreatTimeout : RetreatTimeout;
+
+        if (DateTime.UtcNow - this.retreatSinceUtc > retreatLimit)
         {
             this.trace.Trouble(
                 "円の外へ出られない",
@@ -3862,9 +3891,19 @@ public sealed class FateRunner(
                 return true;
             }
 
-            // 乗れない。時間切れまでは待ち、それでも駄目なら
-            // 下の徒歩の経路へ落ちる（TickLeaving の続き）。
-            if (DateTime.UtcNow - this.retreatSinceUtc < RetreatMountPatience)
+            // **乗れるまで、その場で待つ。**
+            //
+            // 乗れない理由はたいてい一時的（戦闘が切れる直前、直前の操作の
+            // 硬直、降りた直後のリキャスト）で、少し待てば乗れる。
+            // 待たずに歩き出すと、何もない場所へ走る動きになる。
+            //
+            // 納品 FATE だけは短く切り上げる。報酬が入るまで最大 90 秒
+            // マップに留まるので、ここで長く粘ると次を回る時間が減る。
+            var mountPatience = finished.IsCollect
+                ? CollectRetreatMountPatience
+                : RetreatMountPatience;
+
+            if (DateTime.UtcNow - this.retreatSinceUtc < mountPatience)
             {
                 this.StatusDetail =
                     $"{finished.Name} マウントに乗れるのを待っています（{MountService.DescribeMountBlocker()}）";
