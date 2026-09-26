@@ -117,9 +117,10 @@ public sealed class CurrencyCatalog(
         // （ItemCost に ItemId がそのまま入る）になっているものがある。
         // 特殊通貨の表には載らないので、これまで一覧に出てこなかった。
         //
-        // <b>種類は決め打ちしない。</b>
-        // 交換所のコストとして実際に使われているアイテムのうち、
-        // 「通貨として扱うもの」を選び出す。判断は ItemCurrency に任せる。
+        // <b>出すのはバイカラージェムだけ。</b>
+        // 同じ形の通貨は実測で 33 種あるが（モブハントの戦利品、
+        // 各蛮族の貨幣など）、このプラグインで扱うのは FATE 周回で貯まる
+        // バイカラージェムだけでよい。並べても選び違えるもとになる。
         foreach (var (itemId, name) in this.ListItemCurrencies())
         {
             if (list.Any(x => x.ItemId == itemId))
@@ -127,7 +128,7 @@ public sealed class CurrencyCatalog(
                 continue;
             }
 
-            list.Add(new CurrencyChoice(0, itemId, name, "そのほかの通貨"));
+            list.Add(new CurrencyChoice(0, itemId, name, "FATE"));
         }
 
         // **何が並んだかを必ず残す。**
@@ -136,7 +137,7 @@ public sealed class CurrencyCatalog(
         var summary =
             $"通貨の一覧: トームストーン {list.Count(x => x.TomestonesRowId != 0 || x.Group == "アラガントームストーン")} 件 / " +
             $"スクリップ {list.Count(x => x.Group == "スクリップ")} 件 / " +
-            $"そのほか {list.Count(x => x.Group == "そのほかの通貨")} 件 " +
+            $"FATE {list.Count(x => x.Group == "FATE")} 件 " +
             $"（交換に使える通貨 {usable.Count} 件 / 特殊通貨の表 {this.specials.Entries.Count} 件 " +
             $"クライアント由来={this.specials.ResolvedFromClient}）" +
             $" [{string.Join(", ", list.Select(x => x.Name))}]";
@@ -228,12 +229,15 @@ public sealed class CurrencyCatalog(
     /// </list>
     /// 後者は特殊通貨の表に載らないため、これまで一覧へ出てこなかった。
     ///
-    /// <b>種類は決め打ちしない。</b>
-    /// 交換所のコストとして実際に使われているアイテムのうち、
-    /// ゲームが「通貨」に分類しているもの（ItemUICategory==100）を採る。
-    /// 実測では 33 種で、バイカラージェム・モブハントの戦利品・
-    /// トロフィークリスタル・各蛮族の貨幣などが並ぶ（ver 2026.09.15）。
-    /// パッチで増えても、こちらを直さずに追従する。
+    /// <b>この形の通貨のうち、出すのはバイカラージェムだけ。</b>
+    /// 同じ形は実測で 33 種ある（モブハントの戦利品、トロフィークリスタル、
+    /// 各蛮族の貨幣など。ver 2026.09.15）。しかしこのプラグインが稼ぐのは
+    /// FATE 周回で貯まるバイカラージェムだけなので、ほかを並べても
+    /// 選び違えるもとにしかならない。
+    ///
+    /// <b>ItemId は決め打ちせず、名前から引く。</b>
+    /// 番号を直接書くと、それが本当にその品かを確かめられない。
+    /// シートから引けば、パッチで番号が変わっても追従する。
     /// </summary>
     private IReadOnlyList<(uint ItemId, string Name)> ListItemCurrencies()
     {
@@ -246,51 +250,40 @@ public sealed class CurrencyCatalog(
 
         try
         {
-            var shops = Svc.Data.GetExcelSheet<SpecialShop>();
             var items = Svc.Data.GetExcelSheet<Item>();
 
-            if (shops is null || items is null)
+            if (items is null)
             {
                 // **空を控えない。** 読めなかっただけで、無いとは限らない。
                 return found;
             }
 
-            var seen = new HashSet<uint>();
-
-            foreach (var shop in shops)
+            foreach (var row in items)
             {
-                foreach (var entry in shop.Item)
+                // ゲームが「通貨」に分類しているものだけを見る。
+                // 同じ名前の別物（納品証など）を拾わないための関門。
+                if (row.ItemUICategory.RowId != CurrencyUiCategory)
                 {
-                    foreach (var cost in entry.ItemCosts)
-                    {
-                        var costItemId = cost.ItemCost.RowId;
-
-                        if (costItemId == 0 || !seen.Add(costItemId))
-                        {
-                            continue;
-                        }
-
-                        var row = items.GetRowOrDefault(costItemId);
-
-                        // ゲームが「通貨」に分類しているものだけ。
-                        // 素材や装備をコストにする交換も多いので、絞らないと
-                        // 一覧が数百件になって選べなくなる。
-                        if (row is null || row.Value.ItemUICategory.RowId != CurrencyUiCategory)
-                        {
-                            continue;
-                        }
-
-                        var name = row.Value.Name.ExtractText();
-
-                        if (!string.IsNullOrEmpty(name))
-                        {
-                            found.Add((costItemId, name));
-                        }
-                    }
+                    continue;
                 }
+
+                var name = row.Name.ExtractText();
+
+                if (name != BicolorGemName)
+                {
+                    continue;
+                }
+
+                found.Add((row.RowId, name));
+                break;
             }
 
-            found.Sort((a, b) => string.CompareOrdinal(a.Name, b.Name));
+            if (found.Count == 0)
+            {
+                this.anomalyLog.Warn(
+                    "Currency",
+                    $"「{BicolorGemName}」がアイテムの一覧に見つかりませんでした");
+            }
         }
         catch (Exception ex)
         {
@@ -309,6 +302,19 @@ public sealed class CurrencyCatalog(
 
     /// <summary>ItemUICategory の「通貨」。スクリップもバイカラージェムもここに入る。</summary>
     private const uint CurrencyUiCategory = 100;
+
+    /// <summary>
+    /// FATE 周回で貯まる通貨の名前。
+    ///
+    /// <b>ItemId（26807）を直接書かない。</b>
+    /// 番号だけでは、それが本当にその品かを読む人が確かめられない。
+    /// 名前で引けば、シートを見れば正しさが分かる。
+    ///
+    /// 「バイカラージェム納品証」「同【黄金】」は別の品で、分類も
+    /// 通貨ではなく雑貨。<see cref="CurrencyUiCategory"/> で弾かれるが、
+    /// 名前も完全一致で見るので二重に安全。
+    /// </summary>
+    private const string BicolorGemName = "バイカラージェム";
 
     /// <summary>
     /// アイテム通貨の一覧。シートを総なめするので一度だけ作る。
