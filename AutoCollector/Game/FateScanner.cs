@@ -399,13 +399,97 @@ public sealed unsafe class FateScanner(AnomalyLog anomalyLog)
         int maxLevelAbove,
         bool skipCollect,
         IReadOnlySet<ushort>? blacklist,
-        IReadOnlyList<FateSortKey>? sortOrder)
+        IReadOnlyList<FateSortKey>? sortOrder,
+        bool followParty = false)
     {
         var candidates = this.ListAll().Where(f => IsEligible(
             f, minTimeRemainingSec, maxProgressPct, levelFilter,
-            playerLevel, maxLevelBelow, maxLevelAbove, skipCollect, blacklist));
+            playerLevel, maxLevelBelow, maxLevelAbove, skipCollect, blacklist))
+            .ToList();
+
+        // **仲間が入っている FATE を優先する。**
+        //
+        // 同じ FATE に集まったほうが早く終わる。
+        // ただし条件（残り時間・達成度・見送り中など）は曲げない。
+        // 仲間の FATE が条件から外れているなら、ふつうに選び直す。
+        if (followParty && this.FindPartyFateId() is { } partyFate)
+        {
+            var shared = candidates.FirstOrDefault(f => f.Id == partyFate);
+            if (shared is not null)
+            {
+                return shared;
+            }
+        }
 
         return Sort(candidates, sortOrder ?? DefaultSortOrder, playerPos).FirstOrDefault();
+    }
+
+    /// <summary>
+    /// パーティの誰かが参加している FATE。いなければ null。
+    ///
+    /// <b>やり取りはしない。</b>相手の座標から、その場に湧いている FATE の
+    /// 円に入っているかを見るだけ。相手が同じプラグインを使っている必要は無い。
+    ///
+    /// 何人もいれば、いちばん多く入っている FATE を採る。
+    /// </summary>
+    public ushort? FindPartyFateId()
+    {
+        try
+        {
+            if (Svc.Party.Length == 0)
+            {
+                return null;
+            }
+
+            var fates = this.ListAll();
+            if (fates.Count == 0)
+            {
+                return null;
+            }
+
+            var me = Player.Available ? Player.Object?.GameObjectId ?? 0 : 0;
+            var counts = new Dictionary<ushort, int>();
+
+            foreach (var member in Svc.Party)
+            {
+                if (member.GameObject is null || member.GameObject.GameObjectId == me)
+                {
+                    continue;
+                }
+
+                var at = member.Position;
+
+                foreach (var fate in fates)
+                {
+                    if (fate.State != FateState.Running)
+                    {
+                        continue;
+                    }
+
+                    var flat = Vector2.Distance(
+                        new Vector2(at.X, at.Z),
+                        new Vector2(fate.Position.X, fate.Position.Z));
+
+                    if (flat <= fate.Radius)
+                    {
+                        counts[fate.Id] = counts.GetValueOrDefault(fate.Id) + 1;
+                        break;
+                    }
+                }
+            }
+
+            if (counts.Count == 0)
+            {
+                return null;
+            }
+
+            return counts.OrderByDescending(x => x.Value).First().Key;
+        }
+        catch (Exception ex)
+        {
+            this.LastError = ex.Message;
+            return null;
+        }
     }
 
     /// <summary>狙う対象になりうるか。</summary>

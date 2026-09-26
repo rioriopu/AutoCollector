@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Linq;
 using AutoCollector.Automation;
 using AutoCollector.Game;
@@ -204,6 +204,25 @@ public sealed class FateTab(Plugin plugin)
             }
 
             ImGui.Unindent();
+        }
+
+        var follow = cfg.FateFollowParty;
+        if (ImGui.Checkbox("パーティの仲間と同じ FATE を狙う", ref follow))
+        {
+            cfg.FateFollowParty = follow;
+            EzConfig.Save();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(
+                "仲間が入っている FATE が候補にあれば、そちらを選びます。\n"
+                + "\n"
+                + "同期はしません。仲間の居場所を見て選ぶだけなので、\n"
+                + "相手がこのプラグインを使っている必要はありません。\n"
+                + "\n"
+                + "条件（残り時間・達成度など）は曲げません。\n"
+                + "仲間の FATE が条件から外れていれば、ふつうに選び直します。");
         }
 
         var swap = cfg.FateSwapZoneWhenEmpty;

@@ -318,6 +318,17 @@ public sealed class Config
     public bool FateSwapZoneWhenEmpty { get; set; } = true;
 
     /// <summary>
+    /// パーティの仲間が入っている FATE を優先するか。
+    ///
+    /// <b>同期はしない。</b>相手の座標を見て、同じ FATE を選ぶだけ。
+    /// 相手が同じプラグインを使っている必要は無い。
+    ///
+    /// 条件（残り時間・達成度・見送り中など）は曲げない。
+    /// 仲間の FATE が条件から外れていれば、ふつうに選び直す。
+    /// </summary>
+    public bool FateFollowParty { get; set; } = true;
+
+    /// <summary>
     /// マップを移るまでに待つ秒数。
     ///
     /// <b>既定は 0＝待たない。</b>

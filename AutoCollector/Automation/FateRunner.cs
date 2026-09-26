@@ -8,6 +8,7 @@ using AutoCollector.Ipc;
 using Dalamud.Game.ClientState.Conditions;
 using ECommons.DalamudServices;
 using ECommons.GameHelpers;
+using ECommons.Throttlers;
 using FFXIVClientStructs.FFXIV.Client.Game.Fate;
 
 namespace AutoCollector.Automation;
@@ -1019,8 +1020,24 @@ public sealed class FateRunner(
 
             if (!this.TryTeleportTo(destination))
             {
-                this.anomalyLog.Warn("Fate", $"{NpcLocationService.GetTerritoryName(destination)} へテレポートできませんでした");
-                this.AdvanceZone(cfg);
+                // **失敗しても、すぐ次のマップへ送らない。**
+                //
+                // 戦闘中や詠唱中はテレポが弾かれる。そこで次のマップへ送ると、
+                // その行き先でも同じ理由で弾かれ、一覧の端から端まで
+                // 一瞬で駆け抜けてしまう（2026-09-26 実測。1 秒のあいだに
+                // 67 回マップを送り、たまたま止まった先へ飛んでいた）。
+                //
+                // 撃ち直せるようにして、猶予のあいだ待つ。
+                // 猶予を過ぎたら、下のタイムアウトが次のマップへ送る。
+                this.teleportIssued = false;
+
+                if (EzThrottler.Throttle("AutoCollector.FateTeleportWarn", 5000))
+                {
+                    this.anomalyLog.Warn(
+                        "Fate",
+                        $"{NpcLocationService.GetTerritoryName(destination)} へテレポートできません。落ち着くまで待ちます");
+                }
+
                 return;
             }
 
@@ -2351,7 +2368,8 @@ public sealed class FateRunner(
             cfg.FateMaxLevelAbove,
             skipCollect: !cfg.FateCollectEnabled,
             skip,
-            FateScanner.DefaultSortOrder);
+            FateScanner.DefaultSortOrder,
+            cfg.FateFollowParty);
     }
 
     /// <summary>見送りの期限が切れた FATE を、また狙えるようにする。</summary>
