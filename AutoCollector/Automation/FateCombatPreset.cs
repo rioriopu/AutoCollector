@@ -147,6 +147,15 @@ public static class FateCombatPreset
         // 既定値は書き出されないため、「入っていない」＝正しい。
         (ModuleAutoTarget, "Retarget", "Hostiles"),
         (ModuleAutoTarget, "Retarget", "Always"),
+        (ModuleAutoTarget, "Retarget", "Never"),
+
+        // **自分から狙いに行く。** Passive は Execute の冒頭で即 return するため、
+        // 反撃さえしない。Aggressive（既定・0 番）以外なら直す。
+        (ModuleAutoTarget, "General", "Passive"),
+
+        // **FATE 以外の敵に自分から絡まない。**
+        // Disabled（既定・0 番）以外なら直す。
+        (ModuleAutoTarget, "Everything", "Enabled"),
 
         // **納品前から討伐を止めさせない。**
         //
@@ -163,32 +172,35 @@ public static class FateCombatPreset
 
     private static readonly (string Module, string Track, string Option)[] Required =
     [
+        // **ここに入れてよいのは「既定値ではない値」だけ。**
+        //
+        // BMR の編集画面は、既定値へ戻したトラックを設定一覧から外す
+        // （UIPresetEditor.cs:269-271）。つまり既定値は JSON に現れない。
+        // 既定値を必須に入れると、正しい設定を毎回「不備」と誤判定し、
+        // 起動のたびにプリセットを作り直して利用者の調整を消す。
+        //
+        // 既定値（enum の 0 番）は Forbidden 側で「違う値が書かれていないか」を見る。
+        //
+        // BMR の enum を確認した結果（2026-09-26）:
+        //   GeneralStrategy     { Aggressive, Passive }        → Aggressive が既定
+        //   RetargetStrategy    { NoTarget, Hostiles, ... }    → NoTarget が既定
+        //   AutoTarget.Flag     { Disabled, Enabled }          → Disabled が既定
+        //   FateUtils.Flag      { Enabled, Disabled }          → Enabled が既定（逆！）
+        //   DestinationStrategy { None, Pathfind, Explicit }   → None が既定
+        //   AIHints.FateSync    { None, Enable, Disable }      → None が既定
+
+        // Enable は 1 番。既定は None なので、書かれていなければ不備。
         (ModuleFateUtils, "Sync", "Enable"),
+
+        // Disabled は 1 番。FateUtils の Flag は Enabled が既定なので、
+        // 書かれていなければ拾いに行ってしまう。
         (ModuleFateUtils, "Collect", "Disabled"),
 
-        // 敵を自分から狙いに行く。Passive では反撃もしない。
-        (ModuleAutoTarget, "General", "Aggressive"),
-
-        // FATE の敵は自分から狙う。
+        // Enabled は 1 番。書かれていなければ FATE の敵を狙わない。
         (ModuleAutoTarget, "FATE", "Enabled"),
 
-        // FATE 以外の敵には自分から絡まない。
-        (ModuleAutoTarget, "Everything", "Disabled"),
-
-        // 移動はプリセットに任せる。これが無いと敵へ近づかない。
+        // Pathfind は 1 番。書かれていなければ移動しない。
         (ModuleNormalMovement, "Destination", "Pathfind"),
-
-        // **撃破するまで的を変えない。**
-        // Hostiles は「味方を狙っていなければ切り替えてよい」なので、
-        // 生きている敵と戦っている最中でも、より優先度の高い敵が現れると
-        // そちらへ移る。NoTarget は「的が無いときだけ選び直す」。
-        // AutoTarget.cs の changeTarget を参照。
-        //
-        // <b>NoTarget は enum の 0 番なので、必須に入れられない。</b>
-        // 既定値のトラックは JSON に書き出されないため、
-        // 正しく NoTarget になっていても「入っていない」と読めてしまう。
-        // そのため Required からは外し、Forbidden 側で
-        // 「Hostiles や Always になっていないか」を見る。
     ];
 
     /// <summary>
