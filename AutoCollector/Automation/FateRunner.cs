@@ -1667,6 +1667,22 @@ public sealed class FateRunner(
             return;
         }
 
+        // **戦闘が始まったら、降りるのを待たない。**
+        //
+        // 敵に絡まれると降車が弾かれることがある。そのまま待ち続けると、
+        // 乗ったまま殴られるだけで何もしない
+        // （2026-09-26。FATE 範囲に入ったのに降りず、戦わない報告）。
+        //
+        // 戦闘を始めてしまえば BMR が動き、降りるのも BMR 側で面倒を見る。
+        if (Svc.Condition[ConditionFlag.InCombat] && !MountService.IsFlying)
+        {
+            this.trace.Decision("降りるのを待たない", "戦闘が始まったので先に戦う");
+            this.mount.ClearDismounting();
+            this.ApplyCombat(cfg);
+            this.SetStep(FateStep.Fighting, $"{fate.Name} と戦っています");
+            return;
+        }
+
         // 降りられないまま時間が過ぎた。
         if (DateTime.UtcNow - this.landingSinceUtc > LandingTimeout)
         {
@@ -2580,7 +2596,17 @@ public sealed class FateRunner(
     private void ApplyFateStrategies(Config cfg, string preset)
     {
         // 納品 FATE のアイテムを 10 個溜めたら自動で納品しに行く。
-        TrySet(ModuleFateUtils, TrackHandin, cfg.FateCollectEnabled ? OptionEnabled : OptionDisabled);
+        //
+        // **Enabled は送らない。**
+        // FateUtils の Flag は { Enabled, Disabled } で Enabled が 0 番、
+        // つまりその enum の既定値。BMR は既定値への一時方針を受け付けず、
+        // 毎回「設定できませんでした」と返す（着地のたびに警告が出ていた）。
+        //
+        // 既定値なので、送らなければ Enabled のまま。切りたいときだけ送る。
+        if (!cfg.FateCollectEnabled)
+        {
+            TrySet(ModuleFateUtils, TrackHandin, OptionDisabled);
+        }
 
         // 地面に落ちているアイテムは拾わない。
         //

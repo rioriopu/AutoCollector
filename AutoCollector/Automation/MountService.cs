@@ -409,7 +409,28 @@ public sealed unsafe class MountService(AnomalyLog anomalyLog, FateTrace trace)
 
         try
         {
-            ActionManager.Instance()->UseAction(ActionType.Mount, 0);
+            var am = ActionManager.Instance();
+            if (am is null)
+            {
+                return true;
+            }
+
+            // **降りられる状態かを確かめてから撃つ。**
+            //
+            // 撃てない状況（着地の途中、詠唱、戦闘の開始直後など）で送っても
+            // ゲームに弾かれるだけで、こちらは「送った」つもりになる。
+            // 弾かれ続けると、乗ったまま戦闘に入らない
+            // （2026-09-26。FATE に入ったのに降りず、戦わない報告）。
+            //
+            // GetActionStatus が 0 以外なら、いまは撃てない。次の機会を待つ。
+            var status = am->GetActionStatus(ActionType.Mount, 0);
+            if (status != 0)
+            {
+                this.trace.State("降りられない", $"いまは降りられません（状態 {status}）");
+                return true;
+            }
+
+            am->UseAction(ActionType.Mount, 0);
             this.trace.Decision("降りる", IsFlying ? "空中なので降下してから降りる" : "地上で降りる");
         }
         catch (Exception ex)
