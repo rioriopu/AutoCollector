@@ -55,6 +55,23 @@ public enum FateStep
 }
 
 /// <summary>
+/// FATE がどう終わったか。
+///
+/// <b>「終わった」と「達成した」を混ぜない。</b>
+/// 以前はどちらも完了として数え、「100% になりました」と記録していた。
+/// 進捗 40% で時間切れになっても完了 1 件が増えるため、
+/// 件数が実績を表さなくなっていた。
+/// </summary>
+public enum FateOutcome
+{
+    /// <summary>達成度 100% を見た。</summary>
+    Success,
+
+    /// <summary>達成しないまま終わった。時間切れ・失敗・消失。</summary>
+    Failed,
+}
+
+/// <summary>
 /// FATE を自動で回す。
 ///
 /// <b>稼ぎ方の 1 つとして動く。</b>
@@ -102,6 +119,13 @@ public sealed class FateRunner(
 
     /// <summary>同じ FATE で詰まってよい回数。超えたら二度と狙わない。</summary>
     private const int MaxStuckPerFate = 2;
+
+    /// <summary>
+    /// これより近い FATE へは、飛んで入る段取りを組まない。
+    ///
+    /// 乗って離陸して降りるほうが、走るより時間を食う。
+    /// </summary>
+    private const float FlyApproachMinMeters = 40f;
 
     /// <summary>
     /// 敵がこれより遠ければ歩いて近づく。
@@ -252,11 +276,41 @@ public sealed class FateRunner(
     /// <summary>終えた FATE の円から出るとき、半径にどれだけ足して離れるか。</summary>
     private const float RetreatMarginMeters = 10f;
 
+    /// <summary>
+    /// 退避の移動を「着いた」と認める距離。
+    ///
+    /// <b>これを足したぶん、目標は成功基準より外に置く。</b>
+    /// vnavmesh はこの距離まで近づいた時点で経路を切り上げるので、
+    /// 目標をちょうど成功基準に置くと、いつまでも基準に届かない。
+    /// </summary>
+    private const float RetreatArrivalRange = 5f;
+
+    /// <summary>退避の向きを変えて試す上限。</summary>
+    private const int MaxRetreatAttempts = 3;
+
     /// <summary>円の外へ出るのを待つ上限。出られなくても周回は続ける。</summary>
     private static readonly TimeSpan RetreatTimeout = TimeSpan.FromSeconds(15);
 
     /// <summary>テレポートが終わるのを待つ上限。</summary>
     private static readonly TimeSpan TeleportTimeout = TimeSpan.FromSeconds(60);
+
+    /// <summary>
+    /// 移れる別のマップが無いまま待つ上限。
+    ///
+    /// <b>永久に待たない。</b>1 つしか選ばれていないマップで FATE を
+    /// 狙えないなら、待っても状況は変わらない。以前は時刻を書き換える
+    /// だけだったので、黙って止まったように見えていた。
+    /// </summary>
+    private static readonly TimeSpan NoAlternativeZonePatience = TimeSpan.FromMinutes(10);
+
+    /// <summary>
+    /// テレポを撃ち直す間隔。
+    ///
+    /// <b>毎フレーム撃たない。</b>以前は失敗するとその場で旗を倒して
+    /// いたため、断られている間ずっと毎フレーム撃っていた。
+    /// ログだけ 5 秒に間引いていたので、記録からは気づけなかった。
+    /// </summary>
+    private static readonly TimeSpan TeleportRetryInterval = TimeSpan.FromSeconds(3);
 
     /// <summary>
     /// 降りるのを待つ上限。空からの降下は数秒かかる。
@@ -344,6 +398,18 @@ public sealed class FateRunner(
     private DateTime retreatSinceUtc = DateTime.MinValue;
 
     /// <summary>
+    /// 退避の行き先。
+    ///
+    /// <b>渡した先と監視する先を同じにするために覚える。</b>
+    /// 以前は監視のときだけ FATE の中心を渡していたため、
+    /// 円の中に立っていることが「到着」になっていた。
+    /// </summary>
+    private Vector3? retreatTo;
+
+    /// <summary>退避の向きを変えて試した回数。</summary>
+    private int retreatAttempts;
+
+    /// <summary>
     /// 報酬待ちの納品 FATE。着地するまでマップを離れない。
     ///
     /// <b>1 件だけでは足りない。</b>
@@ -372,18 +438,48 @@ public sealed class FateRunner(
 
     /// <summary>この行き先へテレポを撃ったか。毎フレーム撃ち直さないための旗。</summary>
     private bool teleportIssued;
+
+    /// <summary>テレポを断られた時刻。撃ち直す間隔を空けるのに使う。</summary>
+    private DateTime teleportRejectedUtc = DateTime.MinValue;
     private DateTime waitingSinceUtc = DateTime.MinValue;
     private DateTime deadSinceUtc = DateTime.MinValue;
 
     /// <summary>降り始めた時刻。降りられないまま続くのを打ち切るのに使う。</summary>
     private DateTime landingSinceUtc = DateTime.MinValue;
     private uint travelTargetTerritory;
+
+    /// <summary>
+    /// 飛んで FATE へ入る段取り。
+    ///
+    /// <b>飛行の間はこれが移動を持つ。</b>
+    /// 段階ごとに経路を引き直すので、ここで同時に経路を積まない。
+    /// </summary>
+    private readonly FateApproach approach = new(anomalyLog, trace, vnavmesh, mount);
+
+    /// <summary>
+    /// 開始したときに固定した巡回ルート。
+    ///
+    /// <b>生きた設定の添字を進めない。</b>
+    /// 設定画面は描画のたびに並べ替えるため、周回中にチェックを
+    /// 外すと添字が別のマップを指し、マップを飛ばす。
+    /// 設定の変更は、次に開始したときから効く。
+    /// </summary>
+    private readonly List<uint> route = [];
+
     private int zoneIndex;
     /// <summary>いまの目的地へ経路を引いたか。乗ってから引くので旗で覚える。</summary>
     private bool moveIssued;
 
     /// <summary>経路を引いたとき飛んでいたか。地面に触れて解けたのを見分ける。</summary>
     private bool flyingWhenIssued;
+
+    /// <summary>
+    /// 飛んで入れなかった FATE。
+    ///
+    /// これを覚えておかないと、地上の経路へ切り替えた次のフレームで
+    /// また飛ぼうとして、失敗を繰り返す。
+    /// </summary>
+    private ushort? groundOnlyFate;
 
     /// <summary>敵へ近づいている最中か。戦闘に入ったら下ろす。</summary>
     private bool approaching;
@@ -418,8 +514,16 @@ public sealed class FateRunner(
     /// <summary>画面に出す短い説明。</summary>
     public string StatusDetail { get; private set; } = string.Empty;
 
-    /// <summary>完了した FATE の数。</summary>
+    /// <summary>達成した FATE の数。達成度 100% を見たものだけ。</summary>
     public int Completed { get; private set; }
+
+    /// <summary>
+    /// 達成しないまま終わった FATE の数。
+    ///
+    /// <b>完了と分けて数える。</b>混ぜると、件数が実績を表さなくなる。
+    /// ここが伸びるなら、戦えていないか、着くのが遅い。
+    /// </summary>
+    public int Abandoned { get; private set; }
 
     /// <summary>動いているか。</summary>
     public bool IsRunning => this.Step is not (FateStep.Idle or FateStep.Done or FateStep.Error);
@@ -509,6 +613,12 @@ public sealed class FateRunner(
         this.RestorePathTolerance();
 
         this.Completed = 0;
+        this.Abandoned = 0;
+        this.retreatTo = null;
+        this.retreatAttempts = 0;
+        this.groundOnlyFate = null;
+        this.teleportRejectedUtc = DateTime.MinValue;
+        this.approach.Cancel("周回を始め直します");
         this.StoppedReason = null;
         this.presetApplied = false;
         this.appliedPresetName = string.Empty;
@@ -542,13 +652,25 @@ public sealed class FateRunner(
             return false;
         }
 
+        // **回る順を、開始した時点で固定する。**
+        //
+        // 以前は生きた設定の添字を進めていた。設定画面は描画のたびに
+        // 並べ替えるので、周回中にマップのチェックを外すと、
+        // 添字が別のマップを指す。A/B/C/D を並べて B を回っている最中に
+        // A を外すと、一覧は B/C/D になるが添字は 1 のまま。
+        // 次に進めると 2 になり、C を飛ばして D へ飛ぶ。
+        //
+        // 固定したルートを持てば、途中で設定が変わっても順番が崩れない。
+        // 変更は次に開始したときから効く。
+        this.route.Clear();
+        this.route.AddRange(cfg.FateZones);
         this.zoneIndex = 0;
 
         // 先頭のマップに居なければ、まずそこへ向かう。
         // 行き先を控えておかないと「一覧のマップに居る」と見なされ、
         // いま居るマップで回り始めてしまう。
         var here = Svc.ClientState.TerritoryType;
-        var first = cfg.FateZones[0];
+        var first = this.route[0];
 
         this.travelTargetTerritory = here == first ? 0 : first;
         this.teleportIssued = false;
@@ -557,9 +679,9 @@ public sealed class FateRunner(
         this.waitingSinceUtc = DateTime.UtcNow;
         // **実際に回る順を残す。**
         // 画面の並びと巡回順が食い違っていないかを、あとから確かめられるようにする。
-        var route = string.Join(" → ", cfg.FateZones.Select(NpcLocationService.GetTerritoryName));
-        this.anomalyLog.Info("Fate", $"FATE 周回を開始しました（巡回順: {route}）");
-        this.trace.Decision("開始した", $"マップ {cfg.FateZones.Count} 件 いまのエリア={Svc.ClientState.TerritoryType}");
+        var describedRoute = string.Join(" → ", this.route.Select(NpcLocationService.GetTerritoryName));
+        this.anomalyLog.Info("Fate", $"FATE 周回を開始しました（巡回順: {describedRoute}）");
+        this.trace.Decision("開始した", $"マップ {this.route.Count} 件 いまのエリア={Svc.ClientState.TerritoryType}");
 
         reason = string.Empty;
         return true;
@@ -630,8 +752,19 @@ public sealed class FateRunner(
             return false;
         }
 
-        // 報酬待ちは足を止めてよい。
-        if (this.pendingRewards.Count > 0)
+        // **報酬待ちを理由に、見張りを丸ごと止めない。**
+        //
+        // 以前は報酬待ちが 1 件でもあれば、どの段階でも見張りを止めていた。
+        // 納品 FATE を 1 つ終えると約 1 分間、次の FATE へ向かう移動中も
+        // 着地中も詰まりに気づけなかった。
+        //
+        // ここへ来ている時点で、段階は「動くはずの段階」に限られている。
+        // 報酬を待つのは足を止めてよいが、それは待っているマップに
+        // 居るあいだの話で、移動中は別。
+        //
+        // 待つなら段階は Waiting になるので、その段階はそもそも
+        // 上の shouldMove で除かれている。ここで止める必要は無い。
+        if (this.pendingRewards.Count > 0 && this.Step is not FateStep.MovingToFate)
         {
             this.watchdogSince = DateTime.MinValue;
             return false;
@@ -772,6 +905,11 @@ public sealed class FateRunner(
         // ReleaseCombat は適用していなければ即座に戻るので、余分な害は無い。
         this.ReleaseCombat();
 
+        // **進入の段取りも止める。**
+        // 世代を進めて、走っている経路探索の結果を捨てさせる。
+        // 止めないと、探索が終わった時点で経路を渡してまた動き出す。
+        this.approach.Cancel($"止めました: {reason}");
+
         // **移動は段階を見ずに必ず止める。**
         //
         // 詰まりからの脱出は vnavmesh へ直接 Path.MoveTo を送っている。
@@ -884,7 +1022,7 @@ public sealed class FateRunner(
         // **行き先も一緒に直す。**
         // Start は「先頭のマップへ向かう」を立てる。添字だけ直しても
         // 行き先は先頭のままなので、いったん先頭へ向かう状態を通ってしまう。
-        var index = Plugin.C.FateZones.IndexOf(territoryId);
+        var index = this.route.IndexOf(territoryId);
         if (index >= 0)
         {
             this.zoneIndex = index;
@@ -1006,7 +1144,7 @@ public sealed class FateRunner(
         // Traveling に入って 18 ミリ秒で Waiting に戻っていた）。
         //
         // 行き先を決めているあいだは、そちらへ着くまで移動を続ける。
-        var inZone = cfg.FateZones.Contains(Svc.ClientState.TerritoryType);
+        var inZone = this.route.Contains(Svc.ClientState.TerritoryType);
         var heading = this.travelTargetTerritory != 0
                    && this.travelTargetTerritory != Svc.ClientState.TerritoryType;
 
@@ -1070,11 +1208,20 @@ public sealed class FateRunner(
             && liveTarget.Id != this.leftFateId
             && (liveTarget.Progress >= 100 || liveTarget.State != FateState.Running))
         {
-            this.trace.Decision(
-                "終わったので離れる",
-                $"{liveTarget.Name} 進捗{liveTarget.Progress}% 段階={this.Step}");
+            // **達成と、失敗・時間切れを分ける。**
+            //
+            // どちらもここへ来るが、同じ扱いにしてはいけない。
+            // 以前は区別せず完了として数え、「100% になりました」と
+            // 書いていた。進捗 40% で失敗しても完了 1 件が増えていた。
+            var outcome = liveTarget.Progress >= 100
+                ? FateOutcome.Success
+                : FateOutcome.Failed;
 
-            this.LeaveFate(cfg, liveTarget);
+            this.trace.Decision(
+                outcome == FateOutcome.Success ? "終わったので離れる" : "達成できなかったので離れる",
+                $"{liveTarget.Name} 進捗{liveTarget.Progress}% 状態={liveTarget.State} 段階={this.Step}");
+
+            this.LeaveFate(cfg, liveTarget, outcome);
             return;
         }
 
@@ -1117,6 +1264,17 @@ public sealed class FateRunner(
                 // 二度と入れなくなる。
                 this.leftFateId = null;
             }
+        }
+
+        // **進入している最中は、横入りさせない。**
+        //
+        // CurrentFate は円の端に触れた時点で埋まる。そのまま TickInFate へ
+        // 入ると、進入の段階が組んだ経路と降車の判断を上書きしてしまう。
+        // 地上に立つ（ReadyForCombat）まではこちらが持ち続ける。
+        if (this.approach.Active && this.Step == FateStep.MovingToFate)
+        {
+            this.TickMoving(cfg);
+            return;
         }
 
         if (current is not null && current.State == FateState.Running)
@@ -1192,14 +1350,14 @@ public sealed class FateRunner(
         // その場合 Count - 1 が -1 になり、Math.Clamp が例外を投げる。
         // 例外は Tick が握って記録するだけなので、利用者からは
         // 「何も起きないまま止まっている」ように見える。
-        if (cfg.FateZones.Count == 0)
+        if (this.route.Count == 0)
         {
             this.StatusDetail = "周回するマップが選ばれていません";
             this.Stop("周回するマップが無くなりました");
             return;
         }
 
-        var destination = cfg.FateZones[Math.Clamp(this.zoneIndex, 0, cfg.FateZones.Count - 1)];
+        var destination = this.route[Math.Clamp(this.zoneIndex, 0, this.route.Count - 1)];
 
         // 納品 FATE の報酬を待っている間はマップを離れない。離れると報酬が消える。
         if (this.pendingRewards.Count > 0)
@@ -1222,10 +1380,39 @@ public sealed class FateRunner(
         // 毎フレーム撃つと、詠唱が始まるたびに撃ち直して一生飛べない。
         if (!this.teleportIssued)
         {
+            // **撃ち直す間隔を空ける。**
+            //
+            // 断られたときに旗を倒して撃ち直すようにしたが、間隔を
+            // 空けていなかったため、断られている間は毎フレーム撃っていた。
+            // ログは 5 秒に間引いていたので、記録の上では
+            // 「5 秒に 1 回試している」ように見えていた。
+            if (this.teleportRejectedUtc != DateTime.MinValue &&
+                DateTime.UtcNow - this.teleportRejectedUtc < TeleportRetryInterval)
+            {
+                this.StatusDetail =
+                    $"{NpcLocationService.GetTerritoryName(destination)} へテレポートできるのを待っています";
+
+                // 待っている間もタイムアウトは進める。
+                if (DateTime.UtcNow - this.teleportStartedUtc > TeleportTimeout)
+                {
+                    this.anomalyLog.Warn(
+                        "Fate",
+                        $"{NpcLocationService.GetTerritoryName(destination)} へテレポートできないため、次のマップへ移ります");
+
+                    this.teleportStartedUtc = DateTime.MinValue;
+                    this.teleportRejectedUtc = DateTime.MinValue;
+                    this.AdvanceZone(cfg);
+                }
+
+                return;
+            }
+
             this.teleportIssued = true;
 
             if (!this.TryTeleportTo(destination))
             {
+                this.teleportRejectedUtc = DateTime.UtcNow;
+
                 // **失敗しても、すぐ次のマップへ送らない。**
                 //
                 // 戦闘中や詠唱中はテレポが弾かれる。そこで次のマップへ送ると、
@@ -1256,12 +1443,14 @@ public sealed class FateRunner(
                         $"{NpcLocationService.GetTerritoryName(destination)} へテレポートできないため、次のマップへ移ります");
 
                     this.teleportStartedUtc = DateTime.MinValue;
+                    this.teleportRejectedUtc = DateTime.MinValue;
                     this.AdvanceZone(cfg);
                 }
 
                 return;
             }
 
+            this.teleportRejectedUtc = DateTime.MinValue;
             this.trace.Decision("テレポを撃った", NpcLocationService.GetTerritoryName(destination));
             return;
         }
@@ -1370,7 +1559,7 @@ public sealed class FateRunner(
         // 利用者がすべきことが変わる。同じ文言では判断できない。
         var reason = this.DescribeNoCandidates(cfg);
 
-        if (!cfg.FateSwapZoneWhenEmpty || cfg.FateZones.Count <= 1)
+        if (!cfg.FateSwapZoneWhenEmpty || this.route.Count <= 1)
         {
             this.StatusDetail = reason;
             return;
@@ -1409,6 +1598,17 @@ public sealed class FateRunner(
         this.watchdogSince = DateTime.MinValue;
         this.RestorePathTolerance();
 
+        // **別の FATE なら、飛べなかった記録は引き継がない。**
+        // ある FATE で飛んで入れなかったからといって、
+        // 次の FATE でも入れないとは限らない。
+        if (this.groundOnlyFate != fate.Id)
+        {
+            this.groundOnlyFate = null;
+        }
+
+        // 前の進入が残っていれば捨てる。
+        this.approach.Cancel("別の FATE へ向かいます");
+
         // **離れた FATE の印は、ここで消さない。**
         //
         // 消していたため、次の FATE へ向かうと決めた瞬間に
@@ -1438,6 +1638,7 @@ public sealed class FateRunner(
         var live = this.scanner.GetById(fate.Id);
         if (live is null || live.State != FateState.Running || live.Progress >= 100)
         {
+            this.approach.Cancel("狙っていた FATE が終わりました");
             this.navigation.Stop();
             this.target = null;
             this.SetStep(FateStep.Waiting, "FATE を探しています");
@@ -1446,6 +1647,64 @@ public sealed class FateRunner(
         }
 
         var range = Math.Max(1f, live.Radius - FateArrivalSlack);
+
+        // **飛んで入る段取りは、専用の状態機械に任せる。**
+        //
+        // 乗る・離陸・外周の上空へ・斜めに降りる・接地の確認・降車を
+        // 段階に分け、段階ごとに経路を引き直す。ここで全部を見ていたため、
+        // 経路の終点と監視する点が食い違い、斜めに降りる保証も無かった。
+        if (this.approach.Active)
+        {
+            this.approach.Tick(live);
+            this.StatusDetail = this.approach.Detail;
+
+            switch (this.approach.Phase)
+            {
+                case ApproachPhase.ReadyForCombat:
+                    // 地上に立った。戦闘へ渡す。
+                    this.trace.Decision("進入できた", $"{live.Name} の地上に降りました");
+                    this.EnterFate(cfg, live, alreadyLanded: true);
+                    return;
+
+                case ApproachPhase.Failed:
+                    // **飛んで入れなかった。地上の経路で向かう。**
+                    //
+                    // 飛べないエリア、風脈未解放、高度が頭打ち、
+                    // 進入できる空間が無い、などがここへ来る。
+                    // 飛べなかったことを、飛べたことにしない。
+                    this.anomalyLog.Warn(
+                        "Fate",
+                        $"{live.Name} へ飛んで入れなかったため、地上の経路で向かいます" +
+                        $"（{this.approach.FailureReason}）");
+
+                    this.approach.Cancel("地上の経路へ切り替えます");
+                    this.groundOnlyFate = live.Id;
+                    this.moveIssued = false;
+                    this.flyingWhenIssued = false;
+                    return;
+            }
+
+            return;
+        }
+
+        // 進入を始められるか。
+        //
+        // 近ければ飛ばない。乗り降りのほうが時間を食う。
+        // 一度飛んで入れなかった FATE には、また飛ぼうとしない。
+        if (Player.Available
+            && this.groundOnlyFate != live.Id
+            && MountService.CanFlyHere
+            && !this.moveIssued
+            && Vector2.Distance(
+                   new Vector2(Player.Position.X, Player.Position.Z),
+                   new Vector2(live.Position.X, live.Position.Z)) > FlyApproachMinMeters)
+        {
+            if (this.approach.Begin(live))
+            {
+                this.StatusDetail = $"{live.Name} への進入を組み立てています";
+                return;
+            }
+        }
 
         // **着いていたら、乗る判断より先に降りる。**
         //
@@ -1577,6 +1836,23 @@ public sealed class FateRunner(
                 // その FATE を候補から外していた（2026-09-25 実測）。
                 if (this.navigation.Busy)
                 {
+                    // **待つあいだも時間制限は進める。**
+                    //
+                    // ここで無条件に return していたため、経路探索が
+                    // ずっと受け付けられない状態では、下にある 90 秒の
+                    // 判定へ一度も届かなかった。
+                    if (DateTime.UtcNow - this.moveStartedUtc > MoveTimeout)
+                    {
+                        this.anomalyLog.Warn(
+                            "Fate",
+                            $"{live.Name} へ向かう経路を {MoveTimeout.TotalSeconds:F0} 秒待ちましたが、受け付けられませんでした");
+
+                        this.navigation.Stop();
+                        this.MarkStuck(live.Id);
+                        this.target = null;
+                        return;
+                    }
+
                     this.StatusDetail = $"{live.Name} へ向かう経路を待っています";
                     return;
                 }
@@ -1644,9 +1920,37 @@ public sealed class FateRunner(
         switch (status)
         {
             case MoveStatus.Arrived:
-            case MoveStatus.ShortOfTarget:
-                // 近くまで来た。圏内に入っていれば戦い始める。
                 this.EnterFate(cfg, live);
+                return;
+
+            case MoveStatus.ShortOfTarget:
+                // **経路が終わっただけで、着いたことにしない。**
+                //
+                // 以前は Arrived と同じ扱いにしていた。vnavmesh が
+                // 「近づけるところまで行って終わった」状態なので、
+                // 円の外でも上空でも、そのまま戦闘へ進んでいた。
+                //
+                // 円の中に入れているなら進む。入れていないなら届いていない。
+                if (Player.Available &&
+                    Vector2.Distance(
+                        new Vector2(Player.Position.X, Player.Position.Z),
+                        new Vector2(live.Position.X, live.Position.Z)) <= live.Radius)
+                {
+                    this.trace.State(
+                        "経路は終わったが円の中",
+                        $"{live.Name} 目的地まで届いていないが、円に入れているので戦い始めます");
+
+                    this.EnterFate(cfg, live);
+                    return;
+                }
+
+                this.anomalyLog.Warn(
+                    "Fate",
+                    $"{live.Name} は経路の終点まで行っても円に入れませんでした");
+
+                this.navigation.Stop();
+                this.MarkStuck(live.Id);
+                this.target = null;
                 return;
 
             case MoveStatus.Stuck:
@@ -1919,8 +2223,8 @@ public sealed class FateRunner(
             // 巡回の先頭を仮の行き先にしておけば、着くまで移動を続ける扱いになり、
             // 詠唱が終わるまで誰も経路を積まない。
             this.SetStep(FateStep.Traveling, "詰まったため帰還しています");
-            this.travelTargetTerritory = Plugin.C.FateZones.Count > 0
-                ? Plugin.C.FateZones[0]
+            this.travelTargetTerritory = this.route.Count > 0
+                ? this.route[0]
                 : Svc.ClientState.TerritoryType;
             this.teleportIssued = true;
             this.teleportStartedUtc = now;
@@ -2005,7 +2309,11 @@ public sealed class FateRunner(
     /// vnavmesh に読まれる。触り続けると経路を積んでは捨てるを
     /// 繰り返し、着地したあとも暴れて降りられない。
     /// </summary>
-    private void EnterFate(Config cfg, FateInfo fate)
+    /// <param name="alreadyLanded">
+    /// 進入の段階で、地上に立ったことまで確認できているか。
+    /// true なら降りる段階を通さず、そのまま戦闘へ入る。
+    /// </param>
+    private void EnterFate(Config cfg, FateInfo fate, bool alreadyLanded = false)
     {
         this.navigation.Stop();
         this.moveIssued = false;
@@ -2017,7 +2325,7 @@ public sealed class FateRunner(
         this.RestorePathTolerance();
 
         // 乗っていなければ降りる必要がない。そのまま戦う。
-        if (!MountService.IsMounted)
+        if (alreadyLanded || !MountService.IsMounted)
         {
             this.ApplyCombat(cfg);
             this.fightingSinceUtc = DateTime.UtcNow;
@@ -2595,7 +2903,10 @@ public sealed class FateRunner(
         this.ResumePresetMovement();
     }
 
-    private void LeaveFate(Config cfg, FateInfo finished)
+    /// <param name="outcome">
+    /// どう終わったか。<b>完了として数えるのは達成したときだけ。</b>
+    /// </param>
+    private void LeaveFate(Config cfg, FateInfo finished, FateOutcome outcome = FateOutcome.Success)
     {
         // **同じ湧きを二度数えない。**
         //
@@ -2608,15 +2919,24 @@ public sealed class FateRunner(
         this.ReleaseCombat();
         this.navigation.Stop();
 
-        if (!alreadyCounted)
+        // **達成したものだけ数える。**
+        // 失敗・時間切れ・消失を完了に混ぜると、件数が実績を表さなくなる。
+        if (!alreadyCounted && outcome == FateOutcome.Success)
         {
             this.countedSpawn = finished.SpawnKey;
             this.Completed++;
         }
+        else if (!alreadyCounted)
+        {
+            this.countedSpawn = finished.SpawnKey;
+            this.Abandoned++;
+        }
 
         // 納品 FATE は 100% の時点ではまだ報酬が入っていない。
         // 1 分後に FATE が消えるときに入る。それまでマップを離れない。
-        if (finished.IsCollect)
+        //
+        // **達成していないなら、報酬は待たない。** 入るものが無い。
+        if (finished.IsCollect && outcome == FateOutcome.Success)
         {
             this.pendingRewards.RemoveAll(x => x.Id == finished.Id && x.Start == finished.StartTimeEpoch);
             this.pendingRewards.Add((
@@ -2626,9 +2946,16 @@ public sealed class FateRunner(
                 DateTime.UtcNow + CollectRewardWindow));
             this.anomalyLog.Info("Fate", $"{finished.Name} が 100% になりました。報酬が入るまでこのマップに留まります");
         }
-        else
+        else if (outcome == FateOutcome.Success)
         {
             this.anomalyLog.Info("Fate", $"{finished.Name} が 100% になりました（完了 {this.Completed} 件）");
+        }
+        else
+        {
+            this.anomalyLog.Warn(
+                "Fate",
+                $"{finished.Name} は達成できませんでした" +
+                $"（進捗 {finished.Progress}% 状態 {finished.State}／未達成 {this.Abandoned} 件）");
         }
 
         // この FATE はもう離れた。円の中に立っていても、二度と拾わない。
@@ -2689,13 +3016,13 @@ public sealed class FateRunner(
             new Vector2(Player.Position.X, Player.Position.Z),
             new Vector2(finished.Position.X, finished.Position.Z));
 
-        var outside = MathF.Max(finished.Radius, 20f) + RetreatMarginMeters;
+        var success = this.RetreatSuccessDistance(finished);
 
-        if (flat >= outside)
+        if (flat >= success)
         {
             this.trace.Decision("円の外へ出た", $"{finished.Name} 中心から {flat:F0}m");
             this.navigation.Stop();
-            this.FinishRetreat();
+            this.FinishRetreat(escaped: true);
             return;
         }
 
@@ -2704,31 +3031,94 @@ public sealed class FateRunner(
         {
             this.trace.Trouble(
                 "円の外へ出られない",
-                $"{finished.Name} 中心から {flat:F0}m（{outside:F0}m まで離れたかった）");
+                $"{finished.Name} 中心から {flat:F0}m（{success:F0}m まで離れたかった）");
 
             this.navigation.Stop();
-            this.FinishRetreat();
+            this.FinishRetreat(escaped: false);
             return;
         }
 
-        // 移動を見届ける。引けていなければ、その場で終わりにする。
-        var status = this.navigation.Tick(finished.Position, outside);
+        // **戦闘が済んだら、乗って出る。**
+        // 戦闘中は乗れないので、そのときは徒歩のまま出る。
+        if (!MountService.IsMounted &&
+            !Svc.Condition[ConditionFlag.InCombat] &&
+            this.retreatTo is { } destination &&
+            Vector2.Distance(
+                new Vector2(Player.Position.X, Player.Position.Z),
+                new Vector2(destination.X, destination.Z)) > 20f)
+        {
+            if (this.mount.TickPrepare(destination))
+            {
+                this.StatusDetail = $"{finished.Name} の範囲外へ出る準備をしています";
+                return;
+            }
+        }
+
+        // **移動を見届ける。渡すのは退避先。**
+        //
+        // 以前は FATE の中心を渡していた。許容距離が「半径 + 余裕」なので
+        // 「中心からその距離以内なら到着」＝<b>円の中に立っていると到着</b>になり、
+        // しかもスタック時の引き直しが中心へ向かう経路になっていた。
+        var watching = this.retreatTo ?? finished.Position;
+        var status = this.navigation.Tick(watching, RetreatArrivalRange);
 
         if (status is MoveStatus.Failed or MoveStatus.Stuck)
         {
-            this.trace.Trouble("退避できない", $"{finished.Name}（{status}）");
+            // **別の向きへ出直す。** 1 回引けなかっただけで諦めない。
+            if (this.retreatAttempts < MaxRetreatAttempts)
+            {
+                this.retreatAttempts++;
+                this.trace.Trouble(
+                    "退避できない",
+                    $"{finished.Name}（{status}）別の向きで {this.retreatAttempts} 回目を試します");
+
+                this.navigation.Stop();
+
+                if (this.RetreatFromCircle(finished, turnDegrees: this.retreatAttempts * 90f))
+                {
+                    this.retreatSinceUtc = DateTime.UtcNow;
+                    return;
+                }
+            }
+
+            this.trace.Trouble("退避を諦めた", $"{finished.Name}（{status}）");
             this.navigation.Stop();
-            this.FinishRetreat();
+            this.FinishRetreat(escaped: false);
             return;
         }
 
         this.StatusDetail = $"{finished.Name} の範囲外へ退避しています（中心から {flat:F0}m）";
     }
 
-    /// <summary>退避を終えて、次を探す段階へ戻す。</summary>
-    private void FinishRetreat()
+    /// <summary>
+    /// 円の外へ出たと認める、中心からの距離。
+    ///
+    /// 出発と到着で別の式を使わないよう、1 箇所にまとめる。
+    /// </summary>
+    private float RetreatSuccessDistance(FateInfo finished)
+        => MathF.Max(finished.Radius, 20f) + RetreatMarginMeters;
+
+    /// <summary>
+    /// 退避を終えて、次を探す段階へ戻す。
+    ///
+    /// <b>出られなかったことを、出られたことにしない。</b>
+    /// どちらでも次を探す段階へ戻るが、記録には残す。
+    /// 残さないと、円の中で次を探し続けていることに気づけない。
+    /// </summary>
+    private void FinishRetreat(bool escaped)
     {
+        if (!escaped)
+        {
+            this.anomalyLog.Warn(
+                "Fate",
+                this.retreatFrom is { } stuck
+                    ? $"{stuck.Name} の円の外へ出られませんでした。円の中から次を探します"
+                    : "円の外へ出られませんでした");
+        }
+
         this.retreatFrom = null;
+        this.retreatTo = null;
+        this.retreatAttempts = 0;
         this.moveIssued = false;
         this.SetStep(FateStep.Waiting, "FATE を探しています");
         this.waitingSinceUtc = DateTime.UtcNow;
@@ -2743,7 +3133,11 @@ public sealed class FateRunner(
     ///
     /// 出る先はメッシュに聞く。聞けなければ、中心から離れる向きへ素直に出る。
     /// </summary>
-    private bool RetreatFromCircle(FateInfo finished)
+    /// <param name="finished">出たい円。</param>
+    /// <param name="turnDegrees">
+    /// 出る向きを回す角度。前の向きで引けなかったときに使う。
+    /// </param>
+    private bool RetreatFromCircle(FateInfo finished, float turnDegrees = 0f)
     {
         if (!Player.Available)
         {
@@ -2761,22 +3155,72 @@ public sealed class FateRunner(
             ? away / length
             : new Vector3(1f, 0f, 0f);
 
-        var margin = MathF.Max(finished.Radius, 20f) + RetreatMarginMeters;
-        var outside = finished.Position + (direction * margin);
+        // 前の向きで出られなかったので回す。
+        if (turnDegrees != 0f)
+        {
+            var radians = turnDegrees * MathF.PI / 180f;
+            var cos = MathF.Cos(radians);
+            var sin = MathF.Sin(radians);
 
-        // 立てる場所へ寄せる。寄せられなければそのまま向かう。
+            direction = new Vector3(
+                (direction.X * cos) - (direction.Z * sin),
+                0f,
+                (direction.X * sin) + (direction.Z * cos));
+        }
+
+        // **成功の基準より、さらに外に目標を置く。**
+        //
+        // 経路は目標から RetreatArrivalRange まで近づいた時点で終わる。
+        // 目標をちょうど基準に置くと、経路が終わった地点がまだ基準の内側で、
+        // 円の外に出ているのに時間切れまで待つことになる
+        // （半径50m → 目標60m、55m で経路が終わり、基準の60mに届かない）。
+        var success = this.RetreatSuccessDistance(finished);
+        var target = success + RetreatArrivalRange + RetreatMarginMeters;
+        var outside = finished.Position + (direction * target);
+
+        // 立てる場所へ寄せる。
+        //
+        // **寄せた先が円の中に戻っていないかを見る。**
+        // 寄せる幅は最大 30m ある。円の外が崖や水の向こうだと、
+        // 「辿り着ける最近傍」は円の内側になる。そのまま目標にすると
+        // 円から出るための移動が、円の中へ向かう移動になる。
         if (this.vnavmesh.TryIsReady(out var ready) && ready &&
             this.vnavmesh.TryNearestPointReachable(outside, 30f, 100f, out var onMesh) &&
             onMesh is { } spot)
         {
-            outside = spot;
+            var snapped = Vector2.Distance(
+                new Vector2(spot.X, spot.Z),
+                new Vector2(finished.Position.X, finished.Position.Z));
+
+            if (snapped >= success + RetreatArrivalRange)
+            {
+                outside = spot;
+            }
+            else
+            {
+                this.trace.Trouble(
+                    "退避先の補正を断った",
+                    $"{finished.Name} メッシュに寄せると中心から {snapped:F0}m で、" +
+                    $"{success:F0}m の外に出られません。補正せずに向かいます");
+            }
         }
+
+        this.retreatTo = outside;
 
         this.trace.Decision(
             "円の外へ出る",
-            $"{finished.Name} 半径{finished.Radius:F0}m → ({outside.X:F0},{outside.Y:F0},{outside.Z:F0})");
+            $"{finished.Name} 半径{finished.Radius:F0}m " +
+            $"目標({outside.X:F0},{outside.Y:F0},{outside.Z:F0}) " +
+            $"成功基準={success:F0}m 目標距離={target:F0}m");
 
-        return this.navigation.BeginMove(outside, 5f, MountService.IsFlying, out _);
+        // **飛んでいなくても、乗って出る。**
+        //
+        // 以前は IsFlying をそのまま fly に渡していた。戦闘のあとは
+        // 地上に立っているので、必ず false になり、徒歩で退避していた。
+        // 退避の距離は半径 + 余裕で、20m を超えることがふつうにある。
+        var fly = MountService.IsMounted && MountService.CanFlyHere;
+
+        return this.navigation.BeginMove(outside, RetreatArrivalRange, fly, out _);
     }
 
     private void FinishCurrentFate()
@@ -2934,9 +3378,28 @@ public sealed class FateRunner(
 
     private void AdvanceZone(Config cfg)
     {
-        if (cfg.FateZones.Count <= 1)
+        // **固定したルートで進める。**
+        // 生きた設定を見ると、周回中にチェックを外されたときに
+        // 添字が別のマップを指し、マップを飛ばす。
+        if (this.route.Count <= 1)
         {
-            this.waitingSinceUtc = DateTime.UtcNow;
+            // **移れるマップが無いことを、黙って待たない。**
+            //
+            // 1 つしか選ばれていないのにそのマップで回れないなら、
+            // 待っても何も変わらない。以前はここで時刻を書き換えるだけで、
+            // 永久に待ち続けていた。
+            if (DateTime.UtcNow - this.waitingSinceUtc > NoAlternativeZonePatience)
+            {
+                this.Stop(
+                    this.route.Count == 0
+                        ? "周回するマップが無くなりました"
+                        : $"{NpcLocationService.GetTerritoryName(this.route[0])} で FATE を狙えず、" +
+                          "移れる別のマップもありません");
+
+                return;
+            }
+
+            this.StatusDetail = "移れる別のマップがありません";
             return;
         }
 
@@ -2947,14 +3410,14 @@ public sealed class FateRunner(
         // もう 1 つ進める（一覧に同じマップが並んでいる場合など）。
         var here = Svc.ClientState.TerritoryType;
 
-        this.zoneIndex = (this.zoneIndex + 1) % cfg.FateZones.Count;
+        this.zoneIndex = (this.zoneIndex + 1) % this.route.Count;
 
-        if (cfg.FateZones[this.zoneIndex] == here)
+        if (this.route[this.zoneIndex] == here)
         {
-            this.zoneIndex = (this.zoneIndex + 1) % cfg.FateZones.Count;
+            this.zoneIndex = (this.zoneIndex + 1) % this.route.Count;
         }
 
-        var next = cfg.FateZones[this.zoneIndex];
+        var next = this.route[this.zoneIndex];
 
         if (next == here)
         {

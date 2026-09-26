@@ -274,6 +274,109 @@ public sealed unsafe class MountService(AnomalyLog anomalyLog, FateTrace trace)
     }
 
     /// <summary>
+    /// 距離を見ずに、必ず乗る。
+    ///
+    /// <b>飛んで入る段取りでは距離で決めない。</b>
+    /// <see cref="TickPrepare"/> は 20m 未満なら乗らない。
+    /// 進入は「外周の上空へ回り込む」ので、円の中心が近くても
+    /// 実際に飛ぶ距離は長い。距離で断られると離陸できない。
+    /// </summary>
+    /// <returns>まだ準備中なら true。</returns>
+    public bool TickPrepareAlways()
+    {
+        if (!Player.Available || Svc.Condition[ConditionFlag.Unconscious])
+        {
+            return false;
+        }
+
+        if (Svc.Condition[ConditionFlag.InCombat])
+        {
+            return false;
+        }
+
+        if (Player.IsCasting || Player.IsAnimationLocked)
+        {
+            return true;
+        }
+
+        if (Svc.Condition[ConditionFlag.Mounting] || Svc.Condition[ConditionFlag.Mounting71])
+        {
+            return true;
+        }
+
+        if (this.dismounting)
+        {
+            this.trace.State("マウント", $"降りています（{FateTrace.Describe()}）");
+            return true;
+        }
+
+        if (!IsMounted)
+        {
+            return this.TryMount();
+        }
+
+        if (!this.reportedFlight)
+        {
+            this.reportedFlight = true;
+            this.trace.Decision(
+                "飛行の可否",
+                $"{DescribeFlightStatus()} / PlayerState.CanFly={CanFlyHere} / 飛行中={IsFlying}");
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// 降下を始めさせる。
+    ///
+    /// <b>降車の操作は、空中では降下の合図になる。</b>
+    /// 上空で撃つとその場から降下が始まり、地面に着くまで数秒かかる。
+    /// 着地の段階では、これを撃って落ちてもらう。
+    ///
+    /// <see cref="TickDismount"/> と違い、降りると決めた旗を立てない。
+    /// 立てると、飛び直したいときに離陸できなくなる。
+    /// </summary>
+    public void RequestDescent()
+    {
+        if (!IsMounted || !IsFlying)
+        {
+            return;
+        }
+
+        if (Player.IsCasting || Player.IsAnimationLocked)
+        {
+            return;
+        }
+
+        if (!EzThrottler.Throttle("AutoCollector.Descend", ActionThrottleMs))
+        {
+            return;
+        }
+
+        try
+        {
+            var am = ActionManager.Instance();
+            if (am is null)
+            {
+                return;
+            }
+
+            // 撃てない状況で送っても弾かれるだけ。次の機会を待つ。
+            if (am->GetActionStatus(ActionType.Mount, 0) != 0)
+            {
+                return;
+            }
+
+            am->UseAction(ActionType.Mount, 0);
+            this.trace.State("降下させる", "空中で降車を撃って降下を始めます");
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Warn("Mount", $"降下を始められませんでした: {ex.Message}");
+        }
+    }
+
+    /// <summary>
     /// 飛行で向かうときの目的地。
     ///
     /// <b>そのままの座標を渡すと地面を擦る。</b>

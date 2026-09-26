@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Numerics;
+using System.Threading;
 using System.Threading.Tasks;
 using AutoCollector.Diagnostics;
 
@@ -118,11 +119,98 @@ public sealed class VnavmeshIpc(AnomalyLog anomalyLog) : IpcGateBase("vnavmesh",
                       .InvokeFunc(from, to, fly, avoidCenter, avoidRadius),
             out waypoints);
 
-    /// <summary>組み上げた経路点をそのまま辿らせる。</summary>
+    /// <summary>
+    /// 経路だけを求める。<b>移動は始まらない。</b>
+    ///
+    /// <c>SimpleMove.PathfindAndMoveCloseTo</c> との違いはここが肝心。
+    /// あちらは vnavmesh 内部の <c>AsyncMoveRequest</c> に積むので、
+    /// 探索が終わった瞬間に <b>vnavmesh 自身が勝手に移動を始める</b>
+    /// （AsyncMoveRequest.cs:44-60 の Update が IsCompleted を見て
+    /// _follow.Move を呼ぶ）。こちらは求めるだけなので、
+    /// 中身を検査してから <see cref="TryMoveAlong"/> で渡せる。
+    ///
+    /// 飛行進入では「引けた経路が本当に斜めに降りているか」を
+    /// 見てから走らせたいので、この形でなければならない。
+    /// </summary>
+    /// <remarks>
+    /// <b>戻り値は Task。</b>List として受け取ると、Task を JSON 化しようとして
+    /// 「Self referencing loop detected」で失敗する（PathfindAvoid で実測）。
+    /// </remarks>
+    public bool TryPathfind(Vector3 from, Vector3 to, bool fly, out Task<List<Vector3>>? waypoints)
+        => this.TryInvoke(
+            "Nav.Pathfind",
+            () => this.Func<Vector3, Vector3, bool, Task<List<Vector3>>>("vnavmesh.Nav.Pathfind")
+                      .InvokeFunc(from, to, fly),
+            out waypoints);
+
+    /// <summary>
+    /// 経路だけを求める。あとから取り消せる。
+    ///
+    /// <b>段階を切り替えるときは、前の探索を取り消す。</b>
+    /// 取り消さないと、遠い目的地の探索が十数秒後に終わり、
+    /// そのときにはもう別の段階へ移っているのに結果が返ってくる。
+    /// 世代番号で捨てることもできるが、探索自体は走り続けて重い。
+    /// </summary>
+    public bool TryPathfindCancelable(
+        Vector3 from,
+        Vector3 to,
+        bool fly,
+        CancellationToken cancel,
+        out Task<List<Vector3>>? waypoints)
+        => this.TryInvoke(
+            "Nav.PathfindCancelable",
+            () => this.Func<Vector3, Vector3, bool, CancellationToken, Task<List<Vector3>>>("vnavmesh.Nav.PathfindCancelable")
+                      .InvokeFunc(from, to, fly, cancel),
+            out waypoints);
+
+    /// <summary>
+    /// 組み上げた経路点をそのまま辿らせる。
+    ///
+    /// <b>ここに渡した経路は、そのとおりに辿る。</b>
+    /// 障害物を避ける計算はしない。だから渡す前に検査する。
+    ///
+    /// fly は vnavmesh 側で反転されて <c>IgnoreDeltaY</c> になる
+    /// （IPCProvider.cs:41）。<c>fly=true</c> で Y 差を見るようになり、
+    /// 「次の点が自分より高い」ときにジャンプで離陸する。
+    /// <c>fly=false</c> では Y を 0 にして測るため、高さの差が消える。
+    /// </summary>
     public bool TryMoveAlong(List<Vector3> waypoints, bool fly)
         => this.TryAction(
             "Path.MoveTo",
             () => this.Func<List<Vector3>, bool, object>("vnavmesh.Path.MoveTo").InvokeAction(waypoints, fly));
+
+    /// <summary>いま辿っている経路点の一覧。残りの形を見るのに使う。</summary>
+    public bool TryListWaypoints(out List<Vector3>? waypoints)
+        => this.TryInvoke(
+            "Path.ListWaypoints",
+            () => this.Func<List<Vector3>>("vnavmesh.Path.ListWaypoints").InvokeFunc(),
+            out waypoints);
+
+    /// <summary>
+    /// 指定の座標がメッシュに乗っているか。
+    ///
+    /// 着地点の候補を検査するのに使う。allowUnreachable=false にすると
+    /// 「乗っているが辿り着けない」点を弾ける。
+    /// </summary>
+    public bool TryIsPointOnMesh(Vector3 position, float halfExtentY, bool allowUnreachable, out bool onMesh)
+        => this.TryInvoke(
+            "Query.Mesh.IsPointOnMesh",
+            () => this.Func<Vector3, float, bool, bool>("vnavmesh.Query.Mesh.IsPointOnMesh")
+                      .InvokeFunc(position, halfExtentY, allowUnreachable),
+            out onMesh);
+
+    /// <summary>
+    /// 真下の床を、探索の幅を指定して求める。
+    ///
+    /// <see cref="TryPointOnFloor"/> は幅 5m の決め打ちで聞く。
+    /// 着地点を探すときは広く見たいことがあるので、こちらを使う。
+    /// </summary>
+    public bool TryPointOnFloorWide(Vector3 position, bool allowUnlandable, float halfExtentXZ, out Vector3? onFloor)
+        => this.TryInvoke(
+            "Query.Mesh.PointOnFloor",
+            () => this.Func<Vector3, bool, float, Vector3?>("vnavmesh.Query.Mesh.PointOnFloor")
+                      .InvokeFunc(position, allowUnlandable, halfExtentXZ),
+            out onFloor);
 
     /// <summary>
     /// ナビメッシュを読み込み直す（キャッシュから）。

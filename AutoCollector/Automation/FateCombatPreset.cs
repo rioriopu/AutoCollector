@@ -70,8 +70,7 @@ public static class FateCombatPreset
           { "Track": "FATE",       "Option": "Enabled" },
           { "Track": "Everything", "Option": "Disabled" },
           { "Track": "Hunt",       "Option": "Disabled" },
-          { "Track": "Treasure",   "Option": "Disabled" },
-          { "Track": "CollectFATE", "Option": "Enabled" }
+          { "Track": "Treasure",   "Option": "Disabled" }
         ],
         "BossMod.Autorotation.MiscAI.FateUtils": [
           { "Track": "Handin",  "Option": "Enabled" },

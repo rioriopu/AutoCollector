@@ -168,6 +168,15 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
         this.lastPosition = Player.Available ? Player.Position : default;
         this.lastMovementUtc = DateTime.UtcNow;
 
+        // **入口で Busy を倒す。**
+        //
+        // 倒していなかったため、一度 Busy になったあとで vnavmesh が
+        // 落ちた・未導入になったときに、古い Busy を引き継いでいた。
+        // 呼び出し側は Busy を「失敗ではない、待とう」と読むので、
+        // 本当の失敗を待ち続けることになる。しかも待っている間は
+        // 移動の時間制限の判定にも届かない（FateRunner の TickMoving）。
+        this.Busy = false;
+
         if (!this.vnavmesh.IsLoaded)
         {
             failureReason = "vnavmesh が導入されていないため移動できません";
