@@ -565,14 +565,21 @@ public sealed class PresetTab(Plugin plugin)
         }
 
         // --- 交換エリア・交換先（バイカラージェムのように交易商が各地に居る通貨だけ） ---
-        this.DrawFateAreaPicker(preset, ref changed);
+        //
+        // **こちらが引き受けたら、下の一覧は出さない。**
+        // 同じ品の一覧が 2 つ並ぶと、どちらを触ればよいのか分からなくなる。
+        // エリアと交換先を選んでから品を出す、という順序も崩れる。
+        var handledByArea = this.DrawFateAreaPicker(preset, ref changed);
 
-        // --- 交換対象 ---
-        this.DrawRewardPicker(preset, ref changed);
-
-        if (this.plugin.CurrencyCatalog.TryResolve(preset, out var pickerCurrency))
+        if (!handledByArea)
         {
-            this.DrawNpcPicker(preset, pickerCurrency, ref changed);
+            // --- 交換対象 ---
+            this.DrawRewardPicker(preset, ref changed);
+
+            if (this.plugin.CurrencyCatalog.TryResolve(preset, out var pickerCurrency))
+            {
+                this.DrawNpcPicker(preset, pickerCurrency, ref changed);
+            }
         }
 
         // --- 閾値 ---
@@ -1510,11 +1517,15 @@ public sealed class PresetTab(Plugin plugin)
     /// 選べないものは薄く出し、押したときに理由を出す。
     /// 隠してしまうと「なぜ無いのか」が分からなくなる。
     /// </summary>
-    private void DrawFateAreaPicker(ExchangePreset preset, ref bool changed)
+    /// <returns>
+    /// この画面が品の選択まで引き受けたら true。
+    /// false のときは、呼び出し元がこれまでどおりの一覧を出す。
+    /// </returns>
+    private bool DrawFateAreaPicker(ExchangePreset preset, ref bool changed)
     {
         if (!this.plugin.CurrencyCatalog.TryResolve(preset, out var currencyItemId))
         {
-            return;
+            return false;
         }
 
         var resolver = this.plugin.ExchangeResolver;
@@ -1523,7 +1534,7 @@ public sealed class PresetTab(Plugin plugin)
         // この通貨に、地域ごとの交易商が居るか。居なければ何も出さない。
         if (!resolver.IsBuiltFor(currencyItemId))
         {
-            return;
+            return false;
         }
 
         resolver.BeginBuild(currencyItemId);
@@ -1552,10 +1563,16 @@ public sealed class PresetTab(Plugin plugin)
                     $"いる場所=[{string.Join(",", vendors.Select(v => v.TerritoryId).Distinct().OrderBy(x => x))}]");
             }
 
-            return;
+            return false;
         }
 
         ImGui.Separator();
+
+        // **選んだ品は、エリアを選ぶ前から見えるようにしておく。**
+        // 一覧はエリアと交換先を選ぶまで出さないが、
+        // すでに選んだものまで隠れると、何を交換する設定なのか
+        // 画面から読み取れなくなる。
+        this.DrawRewardList(preset, ref changed);
 
         // --- 交換エリア ---
         var areaLabels = new List<string> { AreaPlaceholder };
@@ -1584,7 +1601,7 @@ public sealed class PresetTab(Plugin plugin)
         if (areaIndex == 0)
         {
             ImGui.TextColored(ImGuiColors.DalamudGrey, "  エリアを選ぶと、その地方の交換先が出ます");
-            return;
+            return true;
         }
 
         var area = areas[areaIndex - 1];
@@ -1649,12 +1666,13 @@ public sealed class PresetTab(Plugin plugin)
         if (shopIndex == 0)
         {
             ImGui.TextColored(ImGuiColors.DalamudGrey, "  交換先を選ぶと、交換できる品が出ます");
-            return;
+            return true;
         }
 
         // --- 交換できる品 ---
         this.DrawVendorGoods(preset, currencyItemId, area.Vendors[shopIndex - 1], ref changed);
         this.DrawLockedMessage();
+        return true;
     }
 
     /// <summary>
