@@ -84,8 +84,14 @@ public sealed unsafe class VentureBellRunner(
     /// <summary>話しかけられる距離。</summary>
     private const float InteractRange = 4.5f;
 
-    /// <summary>操作を送る間隔。</summary>
-    private const int ActionThrottleMs = 500;
+    /// <summary>
+    /// 画面を閉じる操作を送る間隔。
+    ///
+    /// 呼び鈴の画面は何枚か重なっていて、1 枚ずつ閉じる。
+    /// 間隔が長いと、そのぶん開いたまま残る。
+    /// ゲームが次の画面を出す時間だけあればよいので、短くてよい。
+    /// </summary>
+    private const int ActionThrottleMs = 150;
 
     /// <summary>
     /// 呼び鈴の画面。
@@ -119,6 +125,15 @@ public sealed unsafe class VentureBellRunner(
     private DateTime openedUtc = DateTime.MinValue;
     private bool moveIssued;
 
+    /// <summary>
+    /// AutoRetainer が一度でも動き出したか。
+    ///
+    /// <b>動き出したあとは、開始の猶予を待たない。</b>
+    /// 猶予は「まだ動き出していないだけかもしれない」ための保険なので、
+    /// 動き終わったあとまで待つと、画面を開いたまま無駄に居座る。
+    /// </summary>
+    private bool retainerStarted;
+
     /// <summary>覚えている呼び鈴の場所（エリアごと）。</summary>
     private readonly System.Collections.Generic.Dictionary<uint, Vector3> remembered = [];
 
@@ -130,6 +145,7 @@ public sealed unsafe class VentureBellRunner(
         this.FailureReason = string.Empty;
         this.stepSinceUtc = DateTime.UtcNow;
         this.openedUtc = DateTime.MinValue;
+        this.retainerStarted = false;
         this.moveIssued = false;
 
         // **AutoRetainer の抑制を外す。**
@@ -397,6 +413,11 @@ public sealed unsafe class VentureBellRunner(
         // 読めなかった一瞬のせいで回収を途中で打ち切ってしまう。
         if (state == AutoRetainerIpc.VentureState.Collectable || busy)
         {
+            // **動き出したことを覚える。**
+            // 一度でも動いたなら、止まった時点で終わったと判断してよい。
+            // 開いた時刻からの猶予を待ち続ける必要が無くなる。
+            this.retainerStarted = true;
+
             this.Detail = busy
                 ? "ベンチャーを回収しています"
                 : "まだ回収できるベンチャーがあります";
@@ -412,15 +433,27 @@ public sealed unsafe class VentureBellRunner(
 
         // 回収するものが無くなった。
         //
-        // ただし、開いた直後で AutoRetainer がまだ動き出していないだけの
-        // 可能性がある。少し待ってから閉じる。
-        if (DateTime.UtcNow - this.openedUtc <= StartupGrace)
+        // **動き出したあとなら、すぐ閉じる。**
+        //
+        // 以前は「開いてから 20 秒」を無条件で待っていた。
+        // 猶予は「AutoRetainer がまだ動き出していないだけかもしれない」
+        // ための保険なのに、動き終わったあとにも効いていたため、
+        // 回収が済んでいるのに画面を開いたまま残りの秒数を待っていた
+        // （2026-09-26 の報告「閉じるのが遅い」）。
+        //
+        // 一度でも動いたなら、止まった＝終わったと判断してよい。
+        if (!this.retainerStarted && DateTime.UtcNow - this.openedUtc <= StartupGrace)
         {
             this.Detail = "AutoRetainer の開始を待っています";
             return;
         }
 
-        this.trace.Decision("回収が終わった", "回収できるベンチャーが無くなりました");
+        this.trace.Decision(
+            "回収が終わった",
+            this.retainerStarted
+                ? "回収できるベンチャーが無くなりました。画面を閉じます"
+                : $"{StartupGrace.TotalSeconds:F0} 秒待っても AutoRetainer が動き出しませんでした");
+
         this.BeginClosing();
     }
 
@@ -433,6 +466,11 @@ public sealed unsafe class VentureBellRunner(
         // **閉じる前に AutoRetainer を止める。**
         // 止めずに閉じると、相手が動いたまま画面だけ消える。
         this.retainer.TryAbort();
+
+        // **その場で 1 枚目を閉じる。**
+        // 次のフレームを待つと、間引きの分だけ開いたまま残る。
+        EzThrottler.Reset("AutoCollector.VentureBellClose");
+        this.SendCancel();
     }
 
     /// <summary>画面を閉じる。</summary>
