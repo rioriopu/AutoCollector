@@ -1,4 +1,6 @@
 ﻿using System;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using AutoCollector.Diagnostics;
 using AutoCollector.Ipc;
 
@@ -132,28 +134,61 @@ public static class FateCombatPreset
     /// 既定値のトラックは、正しい設定なら JSON に現れない。
     /// 現れているということは、明示的に既定と違う値が保存されている。
     /// </summary>
-    private static readonly (string Track, string Option)[] Forbidden =
+    private const string ModuleAutoTarget = "BossMod.Autorotation.MiscAI.AutoTarget";
+    private const string ModuleFateUtils = "BossMod.Autorotation.MiscAI.FateUtils";
+    private const string ModuleNormalMovement = "BossMod.Autorotation.MiscAI.NormalMovement";
+
+    private static readonly (string Module, string Track, string Option)[] Forbidden =
     [
-        ("Handin", "Disabled"),
+        (ModuleFateUtils, "Handin", "Disabled"),
+
+        // **的を勝手に変えさせない。**
+        // NoTarget（既定・0 番）以外が書かれていたら直す。
+        // 既定値は書き出されないため、「入っていない」＝正しい。
+        (ModuleAutoTarget, "Retarget", "Hostiles"),
+        (ModuleAutoTarget, "Retarget", "Always"),
+
+        // **納品前から討伐を止めさせない。**
+        //
+        // CollectFATE=Enabled は、納品 FATE で targetFateMobs を
+        // 無条件に false にする（AutoTarget.cs:167-168）。所持数は見ない。
+        // 0 個の段階から自分では敵を拾わなくなるため、集まらない。
+        //
+        // Disabled（既定・0 番）が正しい。162 行で
+        // targetFateMobs = Progress < 100 となり、171 行は |= なので
+        // false へ落とす力が無い。つまり討伐は止まらない。
+        // 10 個たまったあとの納品は、こちらの TickHandIn が面倒を見る。
+        (ModuleAutoTarget, "CollectFATE", "Enabled"),
     ];
 
-    private static readonly (string Track, string Option)[] Required =
+    private static readonly (string Module, string Track, string Option)[] Required =
     [
-        ("Sync", "Enable"),
-        ("Collect", "Disabled"),
+        (ModuleFateUtils, "Sync", "Enable"),
+        (ModuleFateUtils, "Collect", "Disabled"),
+
+        // 敵を自分から狙いに行く。Passive では反撃もしない。
+        (ModuleAutoTarget, "General", "Aggressive"),
+
+        // FATE の敵は自分から狙う。
+        (ModuleAutoTarget, "FATE", "Enabled"),
+
+        // FATE 以外の敵には自分から絡まない。
+        (ModuleAutoTarget, "Everything", "Disabled"),
+
+        // 移動はプリセットに任せる。これが無いと敵へ近づかない。
+        (ModuleNormalMovement, "Destination", "Pathfind"),
 
         // **撃破するまで的を変えない。**
         // Hostiles は「味方を狙っていなければ切り替えてよい」なので、
         // 生きている敵と戦っている最中でも、より優先度の高い敵が現れると
         // そちらへ移る。NoTarget は「的が無いときだけ選び直す」。
         // AutoTarget.cs の changeTarget を参照。
-        ("Retarget", "NoTarget"),
-
-        // **納品 FATE では敵を狙わない。**
-        // CollectFATE=Enabled は targetFateMobs を無条件に false にする
-        // （AutoTarget.cs:167-168）。10 個溜めたあとも敵を拾い続けて
-        // 納品へ行かない、という噛み合わせを断つ。
-        ("CollectFATE", "Enabled"),
+        //
+        // <b>NoTarget は enum の 0 番なので、必須に入れられない。</b>
+        // 既定値のトラックは JSON に書き出されないため、
+        // 正しく NoTarget になっていても「入っていない」と読めてしまう。
+        // そのため Required からは外し、Forbidden 側で
+        // 「Hostiles や Always になっていないか」を見る。
     ];
 
     /// <summary>
@@ -220,62 +255,115 @@ public static class FateCombatPreset
     /// <summary>
     /// 欠けている設定を 1 つ返す。すべて揃っていれば null。
     ///
-    /// 文字列として含まれるかだけを見る。BMR が返すのは JSON なので、
-    /// 解析せずとも「そのトラックがその値になっているか」は判る。
+    /// <b>JSON として解析する。</b>
+    /// 以前は文字列として含まれるかだけを見ていた。そのため
+    /// <list type="bullet">
+    /// <item>どのモジュールのトラックなのかを区別できない
+    ///       （AutoTarget の Collect と FateUtils の Collect が同じに見える）</item>
+    /// <item>"Track" の次の "Track" までを 1 件と数えるため、
+    ///       モジュールの境目をまたいで照合してしまう</item>
+    /// </list>
+    /// という穴があった。
+    ///
+    /// <b>既定値は書き出されないことを前提にする。</b>
+    /// BMR のプリセット編集画面は、既定値に戻したトラックを
+    /// 設定一覧から外す（UIPresetEditor.cs:269-271）。
+    /// そのため「書かれていない」＝「既定値」であり、不備ではない。
+    /// 必須に入れてよいのは、既定値と違う値だけ。
     /// </summary>
     private static string? FindMissing(string serialized)
     {
-        if (!serialized.Contains(RequiredModule, StringComparison.Ordinal))
+        JsonNode? root;
+
+        try
+        {
+            root = JsonNode.Parse(serialized);
+        }
+        catch (JsonException)
+        {
+            // 読めないものは直しようがない。作り直す。
+            return "読める形をしていません";
+        }
+
+        if (root?["Modules"] is not JsonObject modules)
+        {
+            return "モジュールの一覧";
+        }
+
+        // ジョブのローテーションが無いと、狙うだけで技を撃たない。
+        if (!modules.ContainsKey(RequiredModule))
         {
             return "ジョブのローテーション";
         }
 
+        foreach (var (module, track, option) in Required)
+        {
+            if (!modules.TryGetPropertyValue(module, out var node) || node is not JsonArray settings)
+            {
+                return $"{Short(module)}";
+            }
+
+            if (FindOption(settings, track) != option)
+            {
+                return $"{Short(module)} の {track} = {option}";
+            }
+        }
+
         // **「入っていてはいけない値」も見る。**
         //
-        // Handin は既定値（Enabled）なので、正しい設定では JSON に現れない。
-        // そのため Required に入れても照合できない。
-        // ところが明示的に Disabled で保存されたプリセットは
-        // JSON に現れるため、こちらで拾える。
+        // FateUtils の Flag は { Enabled, Disabled } で Enabled が 0 番、
+        // つまり既定値。正しい設定では Handin は JSON に現れない。
+        // そのため必須に入れても照合できない。
+        // ところが明示的に Disabled で保存されていれば現れるので、こちらで拾う。
         //
         // 拾えないと、納品 FATE で BMR が納品へ向かわないまま
         // 「プリセットは正しい」と判断してしまう。
-        foreach (var (track, option) in Forbidden)
+        foreach (var (module, track, option) in Forbidden)
         {
-            var trackAt = serialized.IndexOf($"\"{track}\"", StringComparison.Ordinal);
-            if (trackAt < 0)
+            if (!modules.TryGetPropertyValue(module, out var node) || node is not JsonArray settings)
             {
                 continue;
             }
 
-            var optionAt = serialized.IndexOf($"\"{option}\"", trackAt, StringComparison.Ordinal);
-            var nextTrackAt = serialized.IndexOf("\"Track\"", trackAt + 1, StringComparison.Ordinal);
-
-            if (optionAt >= 0 && (nextTrackAt < 0 || optionAt < nextTrackAt))
+            if (FindOption(settings, track) == option)
             {
-                return $"{track} が {option} になっています";
-            }
-        }
-
-        foreach (var (track, option) in Required)
-        {
-            // "Track": "Sync" のすぐ後ろに "Option": "Enable" が来る形。
-            // 間の空白は BMR の書き方次第なので、両方が含まれることと、
-            // 並びが逆転していないことだけを見る。
-            var trackAt = serialized.IndexOf($"\"{track}\"", StringComparison.Ordinal);
-            if (trackAt < 0)
-            {
-                return $"{track}";
-            }
-
-            var optionAt = serialized.IndexOf($"\"{option}\"", trackAt, StringComparison.Ordinal);
-            var nextTrackAt = serialized.IndexOf("\"Track\"", trackAt + 1, StringComparison.Ordinal);
-
-            if (optionAt < 0 || (nextTrackAt >= 0 && optionAt > nextTrackAt))
-            {
-                return $"{track} = {option}";
+                return $"{Short(module)} の {track} が {option} になっています";
             }
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// そのモジュールの設定一覧から、トラックの値を取り出す。
+    ///
+    /// 書かれていなければ null。<b>null は「既定値」を意味する。</b>
+    /// 不備とは限らない。
+    /// </summary>
+    private static string? FindOption(JsonArray settings, string track)
+    {
+        foreach (var setting in settings)
+        {
+            if (setting is not JsonObject entry)
+            {
+                continue;
+            }
+
+            if (entry["Track"]?.GetValue<string>() != track)
+            {
+                continue;
+            }
+
+            return entry["Option"]?.GetValue<string>();
+        }
+
+        return null;
+    }
+
+    /// <summary>モジュールの型名から、末尾の短い名前だけを取る。</summary>
+    private static string Short(string module)
+    {
+        var at = module.LastIndexOf('.');
+        return at >= 0 && at < module.Length - 1 ? module[(at + 1)..] : module;
     }
 }

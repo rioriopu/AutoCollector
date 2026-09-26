@@ -246,22 +246,40 @@ public sealed unsafe class FateScanner(AnomalyLog anomalyLog)
     /// 集めた品は鞄ではなくキーアイテム欄に入る。
     /// </summary>
     public bool HasHandInItems(ushort fateId, int required = 10)
+        => this.CountHandInItems(fateId) is { } held && held >= required;
+
+    /// <summary>
+    /// 納品 FATE で集めた品の数。
+    ///
+    /// <b>読めなかったときは 0 ではなく null を返す。</b>
+    /// 0 として扱うと「まだ集まっていない」と誤って判断し、
+    /// 納品の途中で討伐へ戻ってしまう。読めないことと
+    /// 持っていないことは別の話。
+    /// </summary>
+    /// <returns>個数。読めなければ null。</returns>
+    public int? CountHandInItems(ushort fateId)
     {
         try
         {
             var item = Svc.Data.GetExcelSheet<Lumina.Excel.Sheets.Fate>()?.GetRowOrDefault(fateId)?.EventItem.RowId ?? 0;
             if (item == 0)
             {
-                return false;
+                // 納品 FATE ではない。集める品がそもそも無い。
+                return 0;
             }
 
             var inventory = FFXIVClientStructs.FFXIV.Client.Game.InventoryManager.Instance();
-            return inventory is not null && inventory->GetInventoryItemCount(item) >= required;
+            if (inventory is null)
+            {
+                return null;
+            }
+
+            return inventory->GetInventoryItemCount(item);
         }
         catch (Exception ex)
         {
             this.LastError = ex.Message;
-            return false;
+            return null;
         }
     }
 

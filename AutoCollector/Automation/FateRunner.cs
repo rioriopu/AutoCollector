@@ -121,6 +121,20 @@ public sealed class FateRunner(
     private const int MaxStuckPerFate = 2;
 
     /// <summary>
+    /// 納品に必要な個数。
+    ///
+    /// BMR の <c>FateUtils.TurnInGoldReq</c> と同じ 10。
+    /// これを下回ると FateUtils は納品へ向かわない。
+    /// </summary>
+    private const int HandInRequired = 10;
+
+    /// <summary>納品が進まないと判断するまでの猶予。</summary>
+    private static readonly TimeSpan HandInPatience = TimeSpan.FromSeconds(30);
+
+    /// <summary>納品をやり直す上限。超えたら討伐へ戻る。</summary>
+    private const int MaxHandInAttempts = 3;
+
+    /// <summary>
     /// これより近い FATE へは、飛んで入る段取りを組まない。
     ///
     /// 乗って離陸して降りるほうが、走るより時間を食う。
@@ -484,6 +498,23 @@ public sealed class FateRunner(
     /// <summary>敵へ近づいている最中か。戦闘に入ったら下ろす。</summary>
     private bool approaching;
 
+    /// <summary>納品の段階にいるか。この間は敵へ近づかない。</summary>
+    private bool handingIn;
+
+    /// <summary>納品の段階に入った時刻。進まないときに打ち切るのに使う。</summary>
+    private DateTime handInSinceUtc = DateTime.MinValue;
+
+    /// <summary>
+    /// 納品の段階に入ったときの所持数。
+    ///
+    /// <b>これが減ったことを成立の証拠にする。</b>
+    /// 進捗の上昇では判断できない。他の人が納品したのかもしれない。
+    /// </summary>
+    private int handInHeldAtStart;
+
+    /// <summary>納品をやり直した回数。</summary>
+    private int handInAttempts;
+
     /// <summary>戦闘の段階へ入った時刻。参加扱いになるのを待つのに使う。</summary>
     private DateTime fightingSinceUtc = DateTime.MinValue;
 
@@ -564,6 +595,18 @@ public sealed class FateRunner(
         if (!this.navigation.IsAvailable)
         {
             reason = "vnavmesh が導入されていません";
+            this.trace.Trouble("開始できない", reason);
+            return false;
+        }
+
+        // **テレポの手段を、始める前に確かめる。**
+        //
+        // 以前は何も見ずに始め、最初のマップへ移ろうとして初めて
+        // 「テレポできない」と分かっていた。60 秒待ってから次のマップへ、
+        // それも駄目でまた 60 秒、と静かに時間を捨てることになる。
+        if (!this.lifestream.IsLoaded)
+        {
+            reason = "Lifestream が導入されていません（マップの移動に必要です）";
             this.trace.Trouble("開始できない", reason);
             return false;
         }
@@ -665,6 +708,31 @@ public sealed class FateRunner(
         this.route.Clear();
         this.route.AddRange(cfg.FateZones);
         this.zoneIndex = 0;
+
+        // **テレポ先が見つかるかを、始める前に確かめる。**
+        //
+        // 見つからないマップは、行こうとして 60 秒待ってから諦めることになる。
+        // 事前に分かるなら伝える。1 つも行けないなら始めない。
+        var unreachable = this.route
+            .Where(t => !this.aetherytes.TryFindTarget(t, out var found) || found is null)
+            .ToList();
+
+        if (unreachable.Count > 0)
+        {
+            var names = string.Join("、", unreachable.Select(NpcLocationService.GetTerritoryName));
+
+            if (unreachable.Count == this.route.Count)
+            {
+                reason = $"選んだマップへのテレポ先が見つかりません（{names}）。エーテライトを解放してください";
+                this.trace.Trouble("開始できない", reason);
+                return false;
+            }
+
+            this.anomalyLog.Warn(
+                "Fate",
+                $"テレポ先が見つからないマップがあります（{names}）。" +
+                "そのマップは飛ばして回ります");
+        }
 
         // 先頭のマップに居なければ、まずそこへ向かう。
         // 行き先を控えておかないと「一覧のマップに居る」と見なされ、
@@ -2562,6 +2630,15 @@ public sealed class FateRunner(
             this.prefetched = this.PickNext(cfg, exclude: current.Id);
         }
 
+        // **納品の段階に入っていれば、敵へ近づかない。**
+        //
+        // 10 個たまると BMR の FateUtils が納品 NPC を狙って移動を強制する。
+        // そこへこちらから敵への経路を積むと引っ張り合いになる。
+        if (this.TickHandIn(cfg, current))
+        {
+            return;
+        }
+
         // **敵が遠ければ歩いて近づく。**
         //
         // BMR は見えている敵と戦うだけで、遠くの敵を探しには行かない。
@@ -2574,6 +2651,132 @@ public sealed class FateRunner(
             $"{current.Name} {current.Progress}% " +
             $"シンク={(this.scanner.IsPlayerSyncedToFate() ? "済" : "未")} " +
             $"プリセット={(this.bossMod.TryGetActivePreset(out var nowActive) ? nowActive ?? "なし" : "読めず")}");
+    }
+
+    /// <summary>
+    /// 納品 FATE の納品を進める。
+    ///
+    /// <b>討伐と納品を切り替える。</b>
+    /// 0〜9 個のあいだは討伐。10 個たまったら納品へ移り、
+    /// 納品が成立したら討伐へ戻る。
+    ///
+    /// 納品そのものは BMR の FateUtils に任せる。10 個持っていれば
+    /// 納品 NPC を <c>Hints.InteractWithTarget</c> に立て、必要なら
+    /// 移動も強制する（FateUtils.cs:47-55）。主ターゲットは要らない。
+    ///
+    /// <b>こちらの役目は「邪魔をしないこと」と「成立を見届けること」。</b>
+    /// 納品のあいだ敵への経路を積まない。そして
+    /// 個数が減ったことを見て、初めて成立とみなす。
+    /// </summary>
+    /// <returns>納品の段階を進めたら true。呼び出し側は戦闘の処理へ進まない。</returns>
+    private bool TickHandIn(Config cfg, FateInfo current)
+    {
+        if (!current.IsCollect)
+        {
+            return false;
+        }
+
+        var held = this.scanner.CountHandInItems(current.Id);
+
+        // **読めなかったら、何も決めない。**
+        //
+        // 0 として扱うと「まだ集まっていない」と誤り、納品の途中で
+        // 討伐へ戻って会話を中断する。読めないことは持っていないことと違う。
+        if (held is not { } count)
+        {
+            if (this.handingIn)
+            {
+                this.StatusDetail = $"{current.Name} 納品中（所持数を読めません）";
+                return true;
+            }
+
+            return false;
+        }
+
+        // 納品の段階に入っていない。10 個たまったら入る。
+        if (!this.handingIn)
+        {
+            if (count < HandInRequired)
+            {
+                return false;
+            }
+
+            this.handingIn = true;
+            this.handInSinceUtc = DateTime.UtcNow;
+            this.handInHeldAtStart = count;
+            this.handInAttempts = 0;
+
+            // **敵への経路を畳む。**
+            // 残すと、FateUtils の移動強制と引っ張り合いになる。
+            this.StopApproach();
+
+            this.anomalyLog.Info(
+                "Fate",
+                $"{current.Name} で納品の品が {count} 個たまりました。納品へ向かいます");
+
+            this.trace.Decision("納品へ移る", $"{current.Name} 所持 {count} 個");
+
+            this.StatusDetail = $"{current.Name} 納品へ向かっています（{count} 個）";
+            return true;
+        }
+
+        // 納品の段階にいる。
+
+        // **減ったら成立。** 進捗の上昇だけでは判断しない。他人の納品かもしれない。
+        if (count < this.handInHeldAtStart)
+        {
+            this.anomalyLog.Info(
+                "Fate",
+                $"{current.Name} へ納品できました（{this.handInHeldAtStart} → {count} 個／進捗 {current.Progress}%）");
+
+            this.trace.Decision("納品できた", $"{current.Name} {this.handInHeldAtStart} → {count} 個");
+
+            this.handingIn = false;
+
+            // まだ 10 個あるなら、続けて納品する。
+            // 足りなければ討伐へ戻る。次のフレームで判断させる。
+            return true;
+        }
+
+        // 減っていない。まだ向かっている、あるいは会話の途中。
+        if (DateTime.UtcNow - this.handInSinceUtc <= HandInPatience)
+        {
+            var npc = this.bossMod.TryGetInteractTarget(out var target) && target != 0
+                ? "NPC を狙っています"
+                : "NPC を探しています";
+
+            this.StatusDetail = $"{current.Name} 納品中（{count} 個・{npc}）";
+
+            this.trace.State(
+                "納品中",
+                $"{current.Name} 所持 {count} 個 進捗 {current.Progress}% " +
+                $"BMRの対象={(target == 0 ? "なし" : target.ToString())} " +
+                $"{(DateTime.UtcNow - this.handInSinceUtc).TotalSeconds:F0}秒経過");
+
+            return true;
+        }
+
+        // **有限回で諦める。** 納品できないまま留まり続けない。
+        this.handInAttempts++;
+
+        if (this.handInAttempts < MaxHandInAttempts)
+        {
+            this.anomalyLog.Warn(
+                "Fate",
+                $"{current.Name} の納品が {HandInPatience.TotalSeconds:F0} 秒進みません。" +
+                $"やり直します（{this.handInAttempts} 回目）");
+
+            this.handInSinceUtc = DateTime.UtcNow;
+            return true;
+        }
+
+        this.anomalyLog.Warn(
+            "Fate",
+            $"{current.Name} へ納品できませんでした（所持 {count} 個）。討伐へ戻ります");
+
+        this.handingIn = false;
+        this.handInAttempts = 0;
+        return false;
     }
 
     /// <summary>
@@ -3772,6 +3975,12 @@ public sealed class FateRunner(
         this.appliedPresetName = string.Empty;
         this.movementParked = false;
         this.approaching = false;
+
+        // 納品の段階も畳む。次の FATE へ持ち込むと、
+        // 所持数の比較の起点が前の FATE のものになってしまう。
+        this.handingIn = false;
+        this.handInAttempts = 0;
+        this.handInHeldAtStart = 0;
     }
 
     /// <summary>

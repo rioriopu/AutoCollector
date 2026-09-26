@@ -106,6 +106,27 @@ public sealed class BossModIpc(AnomalyLog anomalyLog) : IpcGateBase("BossModRebo
         => this.TryInvoke("AI.IsNavigating", () => this.Func<bool>(Prefix + "AI.IsNavigating").InvokeFunc(), out navigating);
 
     /// <summary>
+    /// BMR がいま「話しかけよう」としている相手。
+    ///
+    /// 納品 FATE では、FateUtils がここへ納品 NPC を立てる
+    /// （FateUtils.cs:50 <c>Hints.InteractWithTarget = target</c>）。
+    /// 納品が動き出しているかを外から確かめるのに使う。
+    ///
+    /// <b>名前は OID だが、返るのは InstanceID。</b>
+    /// BMR 側は <c>hints.InteractWithTarget?.InstanceID ?? 0</c> を返している
+    /// （Framework/IPCProvider.cs:195）。OID と読み替えて突き合わせると必ず外れる。
+    ///
+    /// <b>これが立っただけで納品できたことにしない。</b>
+    /// 狙っているだけで、渡せたかどうかは別の話。
+    /// 成立は所持数が減ったことで見る。
+    /// </summary>
+    public bool TryGetInteractTarget(out ulong instanceId)
+        => this.TryInvoke(
+            "Hints.InteractWithTargetOID",
+            () => this.Func<ulong>(Prefix + "Hints.InteractWithTargetOID").InvokeFunc(),
+            out instanceId);
+
+    /// <summary>
     /// AI の移動を止める／再開する。
     ///
     /// true を渡すと BMR は移動しなくなる（戦闘は続ける）。
