@@ -303,6 +303,22 @@ public sealed class FateRunner(
     /// <summary>退避の向きを変えて試す上限。</summary>
     private const int MaxRetreatAttempts = 3;
 
+    /// <summary>
+    /// 退避でマウントに乗れるのを待つ上限。
+    ///
+    /// 過ぎたら諦めて歩いて円の外へ出る。
+    /// 飛べるエリアでも、戦闘が切れないなどで乗れないことがある。
+    /// </summary>
+    private static readonly TimeSpan RetreatMountPatience = TimeSpan.FromSeconds(8);
+
+    /// <summary>
+    /// 退避のとき、真上へどれだけ上がるか。
+    ///
+    /// 離陸の合図になればよいので、わずかで足りる
+    /// （vnavmesh は「次の点が自分より高い」だけを見る）。
+    /// </summary>
+    private const float RetreatLiftMeters = 8f;
+
     /// <summary>円の外へ出るのを待つ上限。出られなくても周回は続ける。</summary>
     private static readonly TimeSpan RetreatTimeout = TimeSpan.FromSeconds(15);
 
@@ -423,6 +439,9 @@ public sealed class FateRunner(
 
     /// <summary>退避の向きを変えて試した回数。</summary>
     private int retreatAttempts;
+
+    /// <summary>退避で離陸の合図を送ったか。毎フレーム送り直さないために持つ。</summary>
+    private bool retreatLiftIssued;
 
     /// <summary>
     /// 報酬待ちの納品 FATE。着地するまでマップを離れない。
@@ -691,6 +710,7 @@ public sealed class FateRunner(
         this.Abandoned = 0;
         this.retreatTo = null;
         this.retreatAttempts = 0;
+        this.retreatLiftIssued = false;
         this.groundOnlyFate = null;
         this.teleportRejectedUtc = DateTime.MinValue;
         this.ventureReturnTo = null;
@@ -3612,17 +3632,31 @@ public sealed class FateRunner(
         // 以前はその場で待っていた。終わった FATE の円の中に立ったままなので、
         // 利用者からは「終わったのに動かない」に見える。
         // 納品 FATE の報酬を待つ場合も、待つ場所は円の外でよい。
-        // 退避の経路を積み、Leaving のまま見届ける。
-        // ここで Waiting にすると、積んだ経路を誰も監視しない。
+        this.retreatFrom = finished;
+        this.retreatSinceUtc = DateTime.UtcNow;
+        this.retreatLiftIssued = false;
+        this.retreatTo = null;
+        this.SetStep(FateStep.Leaving, $"{finished.Name} の範囲外へ退避しています");
+
+        // **飛べるなら、地上の経路は積まない。**
+        //
+        // 以前はここで必ず経路を積んでいた。そのため飛ぶ前に歩き出し、
+        // 円の外の何もない地点へ走って行く動きが出ていた。
+        // 飛べるなら TickLeaving が乗せて飛ばすので、経路は要らない。
+        if (MountService.CanFlyHere)
+        {
+            return;
+        }
+
+        // 飛べないエリアだけ、歩いて出る経路を積む。
+        // Leaving のまま見届ける。ここで Waiting にすると誰も監視しない。
         if (this.RetreatFromCircle(finished))
         {
-            this.retreatFrom = finished;
-            this.retreatSinceUtc = DateTime.UtcNow;
-            this.SetStep(FateStep.Leaving, $"{finished.Name} の範囲外へ退避しています");
             return;
         }
 
         // 経路を積めなかった。退避は諦めて探索へ戻る。
+        this.retreatFrom = null;
         this.SetStep(FateStep.Waiting, "FATE を探しています");
         this.waitingSinceUtc = DateTime.UtcNow;
     }
@@ -3672,11 +3706,11 @@ public sealed class FateRunner(
             return;
         }
 
-        // **戦闘を切って、乗って飛んで出る。**
+        // **戦闘を切って、乗って飛ぶ。**
         //
         // 100% になったら敵は無視してよい。ターゲットを外し、
         // オートアタックを止めないと戦闘が切れず、戦闘中はマウントに
-        // 乗れないので飛んで離れられない。
+        // 乗れないので飛べない。
         //
         // ターゲットは LeaveFate の ReleaseCombat で外しているが、
         // 退避の最中に絡まれて狙い直すことがあるため、ここでも見る。
@@ -3686,8 +3720,37 @@ public sealed class FateRunner(
             this.targets.StopAutoAttack();
         }
 
-        // **戦闘が済んだら、乗って出る。**
-        // 戦闘中は乗れないので、そのときは徒歩のまま出る。
+        // **まず乗って飛ぶ。地面を走らせない。**
+        //
+        // 以前は円の外の地上の点（中心から 75m ほど）へ歩かせていた。
+        // そこは「円の外」という条件だけで選んだ点で、何もない場所になる。
+        // 利用者からは「FATE が終わったあと、何もない所へ走って行く」
+        // 不審な動きに見えていた（2026-09-26 の報告）。
+        //
+        // 飛べるなら、その場で真上へ上がれば円から出られる。
+        // 次の FATE が決まればそこへ飛ぶので、地上を走る意味が無い。
+        if (MountService.CanFlyHere)
+        {
+            if (this.TickFlyOutOfCircle(finished))
+            {
+                return;
+            }
+        }
+
+        // **飛べないので歩いて出る。**
+        //
+        // 風脈を未解放のエリア、あるいは待っても乗れなかった場合。
+        // 経路をまだ積んでいなければ、ここで積む。
+        if (this.retreatTo is null)
+        {
+            if (!this.RetreatFromCircle(finished))
+            {
+                this.trace.Trouble("退避の経路を積めない", $"{finished.Name}");
+                this.FinishRetreat(escaped: false);
+                return;
+            }
+        }
+
         if (!MountService.IsMounted &&
             !Svc.Condition[ConditionFlag.InCombat] &&
             this.retreatTo is { } destination &&
@@ -3725,6 +3788,7 @@ public sealed class FateRunner(
                 if (this.RetreatFromCircle(finished, turnDegrees: this.retreatAttempts * 90f))
                 {
                     this.retreatSinceUtc = DateTime.UtcNow;
+                    this.retreatLiftIssued = false;
                     return;
                 }
             }
@@ -3747,6 +3811,95 @@ public sealed class FateRunner(
         => MathF.Max(finished.Radius, 20f) + RetreatMarginMeters;
 
     /// <summary>
+    /// 乗って飛んで、その場から離れる。
+    ///
+    /// <b>地面を走らせない。</b>
+    /// 以前は円の外の地上の点へ歩かせていたが、そこは「円の外」という
+    /// 条件だけで選んだ点で、何もない場所になる。利用者からは
+    /// 「FATE が終わったあと、何もない所へ走って行く」動きに見えていた。
+    ///
+    /// <b>飛び上がれば、それで退避は済んだものとする。</b>
+    /// 次の FATE が決まればそこへ飛ぶので、水平に離れておく意味が無い。
+    /// 空中に居れば、終わった FATE の敵にも絡まれない。
+    /// </summary>
+    /// <returns>この段階で処理を終えたら true。</returns>
+    private bool TickFlyOutOfCircle(FateInfo finished)
+    {
+        // **飛べた。退避はここで終わり。**
+        //
+        // 円の中の上空でも構わない。地上に居ないので敵に絡まれず、
+        // 次の行き先が決まれば、そのまま飛んで向かえる。
+        if (MountService.IsFlying)
+        {
+            this.trace.Decision(
+                "飛んで離れた",
+                $"{finished.Name} 高さ {Player.Position.Y:F0}。次の FATE へはここから飛びます");
+
+            this.navigation.Stop();
+            this.FinishRetreat(escaped: true);
+            return true;
+        }
+
+        // 戦闘中は乗れない。切れるのを待つ。
+        // 上で狙いを外しているので、じきに切れる。
+        if (Svc.Condition[ConditionFlag.InCombat])
+        {
+            this.StatusDetail = $"{finished.Name} 戦闘が切れるのを待っています";
+            return true;
+        }
+
+        // 乗る。距離では決めさせない（その場で飛ぶので目的地が無い）。
+        //
+        // **降りる途中の記録を消しておく。**
+        // 着地して降りた直後なので、これが残っていると二度と乗らない。
+        this.mount.ClearDismounting();
+
+        if (!MountService.IsMounted)
+        {
+            if (this.mount.TickPrepareAlways())
+            {
+                this.StatusDetail = $"{finished.Name} から離れる準備をしています";
+                return true;
+            }
+
+            // 乗れない。時間切れまでは待ち、それでも駄目なら
+            // 下の徒歩の経路へ落ちる（TickLeaving の続き）。
+            if (DateTime.UtcNow - this.retreatSinceUtc < RetreatMountPatience)
+            {
+                this.StatusDetail =
+                    $"{finished.Name} マウントに乗れるのを待っています（{MountService.DescribeMountBlocker()}）";
+
+                return true;
+            }
+
+            this.trace.Trouble(
+                "乗れないので歩いて出る",
+                $"{finished.Name} {MountService.DescribeMountBlocker()}");
+
+            return false;
+        }
+
+        // 乗れた。真上へ上がって離陸する。
+        //
+        // vnavmesh は「次の経路点が自分より高い」「騎乗中」「まだ飛んでいない」
+        // が揃うとジャンプを連打して離陸する（FollowPath.cs:142-154）。
+        // 少し上の点を 1 度だけ渡せばよい。
+        if (!this.retreatLiftIssued)
+        {
+            var up = Player.Position with { Y = Player.Position.Y + RetreatLiftMeters };
+
+            if (this.vnavmesh.TryMoveAlong([up], fly: true))
+            {
+                this.retreatLiftIssued = true;
+                this.trace.State("離陸させる", $"{finished.Name} 真上 {up.Y:F0} へ");
+            }
+        }
+
+        this.StatusDetail = $"{finished.Name} から飛んで離れています";
+        return true;
+    }
+
+    /// <summary>
     /// 退避を終えて、次を探す段階へ戻す。
     ///
     /// <b>出られなかったことを、出られたことにしない。</b>
@@ -3767,6 +3920,7 @@ public sealed class FateRunner(
         this.retreatFrom = null;
         this.retreatTo = null;
         this.retreatAttempts = 0;
+        this.retreatLiftIssued = false;
         this.moveIssued = false;
         this.SetStep(FateStep.Waiting, "FATE を探しています");
         this.waitingSinceUtc = DateTime.UtcNow;
