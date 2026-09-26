@@ -66,11 +66,12 @@ public static class FateCombatPreset
       "Modules": {
         "BossMod.Autorotation.MiscAI.AutoTarget": [
           { "Track": "General",    "Option": "Aggressive" },
-          { "Track": "Retarget",   "Option": "Hostiles" },
+          { "Track": "Retarget",   "Option": "NoTarget" },
           { "Track": "FATE",       "Option": "Enabled" },
           { "Track": "Everything", "Option": "Disabled" },
           { "Track": "Hunt",       "Option": "Disabled" },
-          { "Track": "Treasure",   "Option": "Disabled" }
+          { "Track": "Treasure",   "Option": "Disabled" },
+          { "Track": "CollectFATE", "Option": "Enabled" }
         ],
         "BossMod.Autorotation.MiscAI.FateUtils": [
           { "Track": "Handin",  "Option": "Enabled" },
@@ -141,6 +142,19 @@ public static class FateCombatPreset
     [
         ("Sync", "Enable"),
         ("Collect", "Disabled"),
+
+        // **撃破するまで的を変えない。**
+        // Hostiles は「味方を狙っていなければ切り替えてよい」なので、
+        // 生きている敵と戦っている最中でも、より優先度の高い敵が現れると
+        // そちらへ移る。NoTarget は「的が無いときだけ選び直す」。
+        // AutoTarget.cs の changeTarget を参照。
+        ("Retarget", "NoTarget"),
+
+        // **納品 FATE では敵を狙わない。**
+        // CollectFATE=Enabled は targetFateMobs を無条件に false にする
+        // （AutoTarget.cs:167-168）。10 個溜めたあとも敵を拾い続けて
+        // 納品へ行かない、という噛み合わせを断つ。
+        ("CollectFATE", "Enabled"),
     ];
 
     /// <summary>
