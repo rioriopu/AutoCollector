@@ -487,9 +487,16 @@ public sealed class FateRunner(
     private bool TickStuckWatchdog()
     {
         // 動くはずの段階かどうか。
+        // **テレポ中は見張らない。**
+        //
+        // テレポには詠唱があり、そのあいだ足は止まる。
+        // 動いていないからと引っ張ると詠唱が中断され、
+        // 撃ち直してはまた中断される、を繰り返して永久に飛べない
+        // （2026-09-26 実測。Zard が同じ場所で 4 回引っ張られていた）。
+        //
+        // テレポが終わらない場合は、TickTraveling のタイムアウトが面倒を見る。
         var shouldMove = this.Step is FateStep.MovingToFate
                                    or FateStep.Landing
-                                   or FateStep.Traveling
                       || (this.Step == FateStep.Fighting && this.approaching);
 
         if (!shouldMove || !Player.Available)
