@@ -240,6 +240,14 @@ public sealed class FateRunner(
     /// </summary>
     private const float LandFromHeightMeters = 8f;
 
+    /// <summary>
+    /// 降りる判定と、降りるのをやめる判定の差。
+    ///
+    /// 同じ値で往復させないために置く。敵は動くので、
+    /// これが無いと Landing と MovingToFate を行き来し続ける。
+    /// </summary>
+    private const float LandHysteresisMeters = 5f;
+
     /// <summary>テレポートが終わるのを待つ上限。</summary>
     private static readonly TimeSpan TeleportTimeout = TimeSpan.FromSeconds(60);
 
@@ -451,6 +459,27 @@ public sealed class FateRunner(
         this.landingRefuge = null;
         this.travelTargetTerritory = 0;
         this.teleportIssued = false;
+
+        // **止めたあとの見張りを解く。**
+        //
+        // Stop が 20 秒の見張りを立てる。解かずに再開すると、
+        // その間ずっと「止めたあとに積まれた経路」とみなして捨て続け、
+        // 動き出せない。交換から戻るときは 2 秒後に再開するため、
+        // 毎回 18 秒ほど棒立ちになっていた。
+        this.stopGuardUntil = DateTime.MinValue;
+
+        // 移動まわりの状態も、前回の周回から引き継がない。
+        this.flyingWhenIssued = false;
+        this.moveIssued = false;
+        this.approaching = false;
+        this.approachIssues = 0;
+        this.escapeAttempts = 0;
+        this.blockDetours = 0;
+        this.detourTask = null;
+        this.blockCheckedUtc = DateTime.MinValue;
+        this.watchdogSince = DateTime.MinValue;
+        this.RestorePathTolerance();
+
         this.Completed = 0;
         this.StoppedReason = null;
         this.presetApplied = false;
@@ -615,6 +644,12 @@ public sealed class FateRunner(
         this.navigation.Stop();
         this.vnavmesh.TryStop();
         this.moveIssued = false;
+
+        // **止めたあとの見張りを解く。**
+        // 解かないと、これから積む脱出の経路を見張りが即座に捨ててしまい、
+        // ボタンを押しても動かない。このボタンは「止めた直後」に
+        // 使われることが多いので、必ずここで解く。
+        this.stopGuardUntil = DateTime.MinValue;
 
         if (!Player.Available)
         {
@@ -1698,8 +1733,20 @@ public sealed class FateRunner(
             this.target = null;
 
             // 帰還は詠唱がある。終わるまで周回を進めない。
+            // **行き先を「いまのマップ以外」にしておく。**
+            //
+            // 0 にすると TickCore の heading が false になり、
+            // まだ FATE のマップに居るので「移動は要らない」と畳まれる。
+            // その直後に次の FATE を選んで経路を積むため、
+            // 帰還の詠唱を自分で中断していた。
+            //
+            // 帰るのは街なので、いまのマップとは必ず違う。
+            // 巡回の先頭を仮の行き先にしておけば、着くまで移動を続ける扱いになり、
+            // 詠唱が終わるまで誰も経路を積まない。
             this.SetStep(FateStep.Traveling, "詰まったため帰還しています");
-            this.travelTargetTerritory = 0;
+            this.travelTargetTerritory = Plugin.C.FateZones.Count > 0
+                ? Plugin.C.FateZones[0]
+                : Svc.ClientState.TerritoryType;
             this.teleportIssued = true;
             this.teleportStartedUtc = now;
             this.escapeAttempts = 0;
@@ -1788,6 +1835,11 @@ public sealed class FateRunner(
         this.navigation.Stop();
         this.moveIssued = false;
         this.target = fate;
+
+        // 詰めていた経路追従の許容値を戻す。
+        // この設定は vnavmesh 全体のものなので、詰めたままにすると
+        // 他のプラグインの移動にも効いてしまう。
+        this.RestorePathTolerance();
 
         // 乗っていなければ降りる必要がない。そのまま戦う。
         if (!MountService.IsMounted)
@@ -1975,7 +2027,11 @@ public sealed class FateRunner(
 
                 // 真上に来て、下りきるまでは移動を続ける。
                 // ここで降りると、残った高さぶん垂直に落ちることになる。
-                if (flat > LandOnSpotMeters || height > LandFromHeightMeters)
+                // **戻る側は緩くする。**
+                // 降りる判定と同じ値で戻すと、敵が少し動いただけで
+                // Landing と MovingToFate を往復し、いつまでも降りられない。
+                if (flat > LandOnSpotMeters + LandHysteresisMeters
+                    || height > LandFromHeightMeters + LandHysteresisMeters)
                 {
                     if (this.Step != FateStep.MovingToFate)
                     {
@@ -2485,6 +2541,9 @@ public sealed class FateRunner(
         // （2026-09-25 実測。諦めてから 6 秒間に 111m 進んでいた）。
         this.navigation.Stop();
         this.moveIssued = false;
+
+        // 詰めていた許容値を戻す。諦めるときも必ず通す。
+        this.RestorePathTolerance();
 
         this.stuckCounts.TryGetValue(fateId, out var count);
         count++;

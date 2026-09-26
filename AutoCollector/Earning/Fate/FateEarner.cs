@@ -85,8 +85,20 @@ public sealed class FateEarner(
     /// クラフターの <c>CraftToEarn</c> と同じ位置づけで、
     /// 周回を使う設定になっていれば true。
     /// </summary>
+    /// <remarks>
+    /// <b>FateEnabled は見ない。</b>
+    ///
+    /// この設定には書き手が一度も存在せず（画面にも項目が無い）、
+    /// 常に false のままだった。そのため
+    /// <see cref="GoalRunner"/> がバイカラージェムのプリセットを
+    /// 「増やす手段が無い」と判断し、自動交換の対象から外し続けていた。
+    /// FATE 周回は手で始められるので、気づきにくい形で効いていた。
+    ///
+    /// 代わりに「周回するマップを選んでいるか」で判断する。
+    /// 選んでいれば、FATE で稼ぐつもりがあるということ。
+    /// </remarks>
     public bool SuppliesCurrencyFor(ExchangePreset preset)
-        => Plugin.C.FateEnabled && this.IsAvailable && this.CanEarn(preset.CurrencyItemId);
+        => Plugin.C.FateZones.Count > 0 && this.IsAvailable && this.CanEarn(preset.CurrencyItemId);
 
     /// <summary>
     /// この通貨は FATE で増えるか。
