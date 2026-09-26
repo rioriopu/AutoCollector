@@ -495,6 +495,26 @@ public sealed class PresetTab(Plugin plugin)
                             clickLog.Info("Ui", $"通貨の行を押しました: {choices[i].Name}");
                         }
 
+                        // **その行にマウスが乗っているか、ImGui に聞く。**
+                        //
+                        // 押した記録が一度も出ないので、ImGui が行を
+                        // 「押せるもの」として扱えていない疑いがある。
+                        // 乗っているのに押せないのか、乗ってすらいないのかで
+                        // 原因がまったく変わる。
+                        if (ImGui.IsItemHovered()
+                            && ECommons.Throttlers.EzThrottler.Throttle("AutoCollector.ComboHover", 1000))
+                        {
+                            var min = ImGui.GetItemRectMin();
+                            var max = ImGui.GetItemRectMax();
+
+                            this.plugin.AnomalyLog.Info(
+                                "Ui",
+                                $"行にマウスが乗っています: {choices[i].Name} " +
+                                $"大きさ=({max.X - min.X:F0}×{max.Y - min.Y:F0}) " +
+                                $"押し込み={ImGui.IsMouseDown(ImGuiMouseButton.Left)} " +
+                                $"この項目を掴んでいる={ImGui.IsItemActive()}");
+                        }
+
                         if (rowClicked)
                         {
                             CurrencyCatalog.Apply(preset, choices[i]);
