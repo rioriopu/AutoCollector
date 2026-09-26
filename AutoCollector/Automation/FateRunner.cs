@@ -351,6 +351,14 @@ public sealed class FateRunner(
     private const int MaxRetreatLiftAttempts = 1;
 
     /// <summary>
+    /// 納品 FATE の報酬を待つとき、どれだけ上がるか。
+    ///
+    /// 敵の攻撃が届かない高さで待つのが目的。
+    /// 高すぎると飛行の上限に頭を打つので、ほどほどにする。
+    /// </summary>
+    private const float HoverHeightMeters = 30f;
+
+    /// <summary>
     /// 退避で「飛べた」と認めるまでに、続けて確認する回数。
     ///
     /// ジャンプ直後の一瞬だけ InFlight が立つことがある。1 回で信じると、
@@ -499,6 +507,9 @@ public sealed class FateRunner(
 
     /// <summary>退避で飛行を続けて確認した回数。1 フレームでは信じない。</summary>
     private int retreatFlyingFrames;
+
+    /// <summary>報酬待ちで上昇の合図を送ったか。</summary>
+    private bool hoverLiftIssued;
 
     /// <summary>
     /// 報酬待ちの納品 FATE。着地するまでマップを離れない。
@@ -1803,9 +1814,14 @@ public sealed class FateRunner(
         }
 
         // 報酬待ちの間はマップを離れない。
+        //
+        // **敵に届かない高さで待つ。**
+        // 地上で待つと、終わった FATE の敵や野良に絡まれる。
+        // ここへ来るのは「他に狙える FATE が無い」ときだけなので
+        // （TickSeek が先に次の FATE を選ぶ）、待つ場所は空の上でよい。
         if (this.pendingRewards.Count > 0)
         {
-            this.StatusDetail = "納品 FATE の報酬を待っています";
+            this.TickHoverForReward();
             return;
         }
 
@@ -1831,6 +1847,96 @@ public sealed class FateRunner(
         }
 
         this.AdvanceZone(cfg);
+    }
+
+    /// <summary>
+    /// 納品 FATE の報酬が入るまで、敵に届かない高さで待つ。
+    ///
+    /// <b>納品 FATE でしか起きない。</b>
+    /// 報酬は 100% の時点では入らず、FATE が消えるとき（最大 90 秒後）に入る。
+    /// その間マップを離れられないので、どこかで待つしかない。
+    ///
+    /// <b>地上で待たない。</b>
+    /// 終わった FATE の敵や野良に絡まれる。空の上なら絡まれない。
+    ///
+    /// <b>他に狙える FATE があればそちらへ行く。</b>
+    /// ここへ来るのは TickSeek が次の候補を見つけられなかったときだけなので、
+    /// この段階では「待つしかない」ことが確定している。
+    /// </summary>
+    private void TickHoverForReward()
+    {
+        var waiting = "納品 FATE の報酬を待っています";
+
+        if (!Player.Available)
+        {
+            this.StatusDetail = waiting;
+            return;
+        }
+
+        // 飛べないエリアでは、その場で待つしかない。
+        if (!MountService.CanFlyHere)
+        {
+            this.StatusDetail = $"{waiting}（このエリアでは飛べないので、その場で待ちます）";
+            return;
+        }
+
+        // 飛んでいる。これでよい。経路は積まない。
+        //
+        // **高さを保つために何かを送り続けない。**
+        // ゲームは飛行中に高度を落とさない。触らないのがいちばん静か。
+        if (MountService.IsFlying)
+        {
+            this.StatusDetail = $"{waiting}（上空で待機中・高さ {Player.Position.Y:F0}）";
+
+            // 上がりきったら合図を止める。積んだままだと上昇し続ける。
+            if (this.hoverLiftIssued && this.vnavmesh.TryNumWaypoints(out var left) && left == 0)
+            {
+                this.hoverLiftIssued = false;
+            }
+
+            return;
+        }
+
+        // 戦闘中は乗れない。狙いを外して切れるのを待つ。
+        if (Svc.Condition[ConditionFlag.InCombat])
+        {
+            this.targets.ReleaseTarget();
+            this.targets.StopAutoAttack();
+            this.StatusDetail = $"{waiting}（戦闘が切れるのを待っています）";
+            return;
+        }
+
+        this.mount.ClearDismounting();
+
+        // 乗る。
+        if (!MountService.IsMounted)
+        {
+            if (this.mount.TickPrepareAlways())
+            {
+                this.StatusDetail = $"{waiting}（上空へ上がる準備をしています）";
+            }
+            else
+            {
+                // 乗れない。報酬待ちは長いので、急がずに次の機会を待つ。
+                this.StatusDetail = $"{waiting}（{MountService.DescribeMountBlocker()}）";
+            }
+
+            return;
+        }
+
+        // 乗れた。敵に届かない高さまで上がる。
+        if (!this.hoverLiftIssued)
+        {
+            var up = Player.Position with { Y = Player.Position.Y + HoverHeightMeters };
+
+            if (this.vnavmesh.TryMoveAlong([up], fly: true))
+            {
+                this.hoverLiftIssued = true;
+                this.trace.State("報酬待ちで上がる", $"真上 {up.Y:F0} へ（敵に届かない高さで待ちます）");
+            }
+        }
+
+        this.StatusDetail = $"{waiting}（上空へ上がっています）";
     }
 
     /// <summary>
@@ -4413,6 +4519,9 @@ public sealed class FateRunner(
     {
         if (this.pendingRewards.Count == 0)
         {
+            // 待ちが無くなった。上昇の合図の記録も捨てる。
+            // 残すと、次に報酬を待つとき上がらなくなる。
+            this.hoverLiftIssued = false;
             return;
         }
 
