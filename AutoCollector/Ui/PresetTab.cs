@@ -422,19 +422,31 @@ public sealed class PresetTab(Plugin plugin)
                             ImGui.TextColored(ImGuiColors.DalamudViolet, kind);
                         }
 
-                        // **行ごとに違う名前を付ける。**
+                        // **行ごとに違う名前を付け、行の幅いっぱいを押せるようにする。**
                         //
-                        // 以前は全行を "##row" にして PushId で分けていたが、
-                        // 幅がゼロの項目になるため当たり判定が潰れ、
-                        // 押しても反応しない行ができていた。
-                        // 名前を隠したいだけなら "##" の後ろに番号を足せばよい。
+                        // 名札が "##..." だけだと、項目の幅がゼロになる。
+                        // 当たり判定もゼロ幅になり、名前（このあと SameLine で
+                        // 描いている色付きの文字）の上を押しても反応しない。
+                        // 以前「数理しか選べない」と報告されたのがこれ。
+                        // 名札を一意にしただけでは直らない。幅も要る。
+                        //
+                        // SelectableFlags.SpanAllColumns と、行の高さぶんの
+                        // 大きさを渡して、行全体を押せるようにする。
+                        //
                         // 番号は名前ではなく通貨で作る。並びが変わっても、
                         // 同じ通貨には同じ id が付く。
                         var rowId = choices[i].TomestonesRowId != 0
                             ? $"##cur_slot{choices[i].TomestonesRowId}"
                             : $"##cur_item{choices[i].ItemId}";
 
-                        if (ImGui.Selectable(rowId, i == index))
+                        // 行の先頭位置を控える。名前はこの上に重ねて描く。
+                        var rowStart = ImGui.GetCursorPos();
+
+                        if (ImGui.Selectable(
+                                rowId,
+                                i == index,
+                                ImGuiSelectableFlags.None,
+                                new Vector2(0f, ImGui.GetTextLineHeight())))
                         {
                             CurrencyCatalog.Apply(preset, choices[i]);
 
@@ -459,8 +471,15 @@ public sealed class PresetTab(Plugin plugin)
                             changed = true;
                         }
 
-                        ImGui.SameLine(0f, 0f);
+                        // **名前は項目の上に重ねて描く。**
+                        //
+                        // SameLine で横に並べると、名前の部分は項目の外になり
+                        // 押しても反応しない。位置を戻して重ねれば、
+                        // 見えている文字の上を押せる。
+                        var afterRow = ImGui.GetCursorPos();
+                        ImGui.SetCursorPos(rowStart);
                         DrawCurrencyName(choices[i].Name);
+                        ImGui.SetCursorPos(afterRow);
                     }
                 }
             }

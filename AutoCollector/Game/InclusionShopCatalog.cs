@@ -137,8 +137,20 @@ public sealed class InclusionShopCatalog(
 
             if (shops is null || categorySheet is null || seriesSheet is null || specialShops is null)
             {
+                // **空を控えない。**
+                //
+                // ここは「まだシートを読めない」だけで、「交換できるものが
+                // 無い」と分かったわけではない。ログイン直後やエリア移動の
+                // 直後は Svc.Data が答えられないことがある。
+                //
+                // 画面は毎フレーム呼ぶので、間に合わなかった一発目で
+                // 空が確定してしまう。やり直す口が無いため、
+                // プラグインを入れ直すまで直らない。
+                //
+                // 覚えずに返せば、下の「何も作れなかった場合は覚えない」と
+                // 同じ扱いになり、次のフレームでやり直せる。
                 this.anomalyLog.Error("Inclusion", "シートを読めないため交換の一覧を作れません");
-                return this.categories = result;
+                return result;
             }
 
             // 系統は都市ごとに別の行として用意されている。

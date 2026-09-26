@@ -55,9 +55,31 @@ public sealed class CurrencyCatalog(
         return this.tomestones.TryResolveItemId(preset.TomestonesRowId, out itemId);
     }
 
+    /// <summary>
+    /// 直前に作った一覧と、作った時刻。
+    ///
+    /// <b>画面は毎フレーム呼ぶ。</b>
+    /// この中では特殊通貨の一覧（Distinct → シート引き → 並べ替え）を
+    /// 2 回作り、交換の一覧を総なめし、記録用の長い文字列まで組み立てている。
+    /// 毎フレームやる意味は無い。
+    ///
+    /// <b>ただし長く持たない。</b>
+    /// ログイン直後は中身が育っていく。長く持つと、育ったことに
+    /// 気づくのが遅れる。人が操作する速さから見れば 1 秒で十分。
+    /// </summary>
+    private IReadOnlyList<CurrencyChoice>? choiceCache;
+    private DateTime choiceCacheUntil = DateTime.MinValue;
+
+    private static readonly TimeSpan ChoiceCacheDuration = TimeSpan.FromSeconds(1);
+
     /// <summary>選べる通貨の一覧。</summary>
     public IReadOnlyList<CurrencyChoice> ListChoices()
     {
+        if (this.choiceCache is { } cached && DateTime.UtcNow < this.choiceCacheUntil)
+        {
+            return cached;
+        }
+
         var list = new List<CurrencyChoice>();
 
         foreach (var slot in this.tomestones.ListSlots())
@@ -102,6 +124,17 @@ public sealed class CurrencyCatalog(
         {
             this.lastLogged = summary;
             this.anomalyLog.Info("Currency", summary);
+        }
+
+        // **空は控えない。**
+        //
+        // ログイン直後はシートを読めず、一覧が 0 件になることがある。
+        // 控えると、その 1 秒のあいだ「通貨が 1 つも無い」画面になる。
+        // 空でなければ控えて、毎フレームの作り直しをやめる。
+        if (list.Count > 0)
+        {
+            this.choiceCache = list;
+            this.choiceCacheUntil = DateTime.UtcNow + ChoiceCacheDuration;
         }
 
         return list;
