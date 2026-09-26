@@ -182,6 +182,13 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
 
         if (!ready)
         {
+            // **これも「まだ受け取れない」。**
+            //
+            // エリアを移った直後はメッシュの読み込みが終わっていない。
+            // 待てば使えるようになるので、呼び出し側が「辿り着けない」と
+            // 数えてはいけない。数えていたため、テレポ直後に 2 回失敗しただけで
+            // その FATE を候補から外していた。
+            this.Busy = true;
             failureReason = "このエリアのナビメッシュがまだ利用できません";
             return false;
         }

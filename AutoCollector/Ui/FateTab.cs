@@ -157,6 +157,17 @@ public sealed class FateTab(Plugin plugin)
 
         var here = Svc.ClientState.TerritoryType;
 
+        // **実際に回る順を出す。**
+        // 画面のチェックの並びと巡回順が同じであることを、目で確かめられるようにする。
+        if (cfg.FateZones.Count > 0)
+        {
+            var route = string.Join(
+                " → ",
+                cfg.FateZones.Select(id => this.plugin.FateZoneCatalog.NameOf(id)));
+
+            ImGui.TextColored(ImGuiColors.DalamudGrey, $"  巡回順: {route} → （先頭へ戻る）");
+        }
+
         foreach (var ex in this.plugin.FateZoneCatalog.ListExpansions())
         {
             var selectedInEx = ex.Zones.Count(z => cfg.FateZones.Contains(z.TerritoryId));

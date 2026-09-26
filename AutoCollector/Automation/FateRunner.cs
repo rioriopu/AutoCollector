@@ -331,8 +331,20 @@ public sealed class FateRunner(
     /// <summary>次に狙う FATE。達成度が閾値を超えた時点で決めておく。</summary>
     private FateInfo? prefetched;
 
-    /// <summary>報酬待ちの納品 FATE。着地するまでマップを離れない。</summary>
-    private (ushort Id, int Start, DateTime DeadlineUtc)? pendingReward;
+    /// <summary>完了として数えた湧き。同じものを二度数えないために覚える。</summary>
+    private (ushort Id, int Start)? countedSpawn;
+
+    /// <summary>
+    /// 報酬待ちの納品 FATE。着地するまでマップを離れない。
+    ///
+    /// <b>1 件だけでは足りない。</b>
+    /// 90 秒のうちに納品 FATE を 2 つ終えることがある。
+    /// 単一の値だと、後の 1 件が前の 1 件を上書きし、
+    /// 前の報酬を待たずにマップを離れてしまう。
+    ///
+    /// 鍵はエリア・FATE 番号・開始時刻。同じ番号が湧き直しても区別できる。
+    /// </summary>
+    private readonly List<(uint Territory, ushort Id, int Start, DateTime DeadlineUtc)> pendingRewards = [];
 
     /// <summary>
     /// もう離脱を済ませた FATE。
@@ -458,7 +470,8 @@ public sealed class FateRunner(
         this.stuckCounts.Clear();
         this.target = null;
         this.prefetched = null;
-        this.pendingReward = null;
+        this.pendingRewards.Clear();
+        this.countedSpawn = null;
         this.leftFateId = null;
         this.landable = null;
         this.landingRefuge = null;
@@ -532,7 +545,10 @@ public sealed class FateRunner(
 
         this.SetStep(FateStep.Waiting, "FATE を探しています");
         this.waitingSinceUtc = DateTime.UtcNow;
-        this.anomalyLog.Info("Fate", $"FATE 周回を開始しました（マップ {cfg.FateZones.Count} 件）");
+        // **実際に回る順を残す。**
+        // 画面の並びと巡回順が食い違っていないかを、あとから確かめられるようにする。
+        var route = string.Join(" → ", cfg.FateZones.Select(NpcLocationService.GetTerritoryName));
+        this.anomalyLog.Info("Fate", $"FATE 周回を開始しました（巡回順: {route}）");
         this.trace.Decision("開始した", $"マップ {cfg.FateZones.Count} 件 いまのエリア={Svc.ClientState.TerritoryType}");
 
         reason = string.Empty;
@@ -605,7 +621,7 @@ public sealed class FateRunner(
         }
 
         // 報酬待ちは足を止めてよい。
-        if (this.pendingReward is not null)
+        if (this.pendingRewards.Count > 0)
         {
             this.watchdogSince = DateTime.MinValue;
             return false;
@@ -815,7 +831,7 @@ public sealed class FateRunner(
     /// 待っている間にエリアを離れると報酬が消える。
     /// 交換のための中断もこの間は見送る。
     /// </summary>
-    public bool HasPendingReward => this.pendingReward is not null;
+    public bool HasPendingReward => this.pendingRewards.Count > 0;
 
     /// <summary>
     /// 交換のために一時的に止める。
@@ -1144,10 +1160,22 @@ public sealed class FateRunner(
 
     private void TickTraveling(Config cfg)
     {
+        // **周回中にマップの選択を全部外されることがある。**
+        //
+        // その場合 Count - 1 が -1 になり、Math.Clamp が例外を投げる。
+        // 例外は Tick が握って記録するだけなので、利用者からは
+        // 「何も起きないまま止まっている」ように見える。
+        if (cfg.FateZones.Count == 0)
+        {
+            this.StatusDetail = "周回するマップが選ばれていません";
+            this.Stop("周回するマップが無くなりました");
+            return;
+        }
+
         var destination = cfg.FateZones[Math.Clamp(this.zoneIndex, 0, cfg.FateZones.Count - 1)];
 
         // 納品 FATE の報酬を待っている間はマップを離れない。離れると報酬が消える。
-        if (this.pendingReward is not null)
+        if (this.pendingRewards.Count > 0)
         {
             this.StatusDetail = "納品 FATE の報酬を待っています";
             return;
@@ -1303,7 +1331,7 @@ public sealed class FateRunner(
         }
 
         // 報酬待ちの間はマップを離れない。
-        if (this.pendingReward is not null)
+        if (this.pendingRewards.Count > 0)
         {
             this.StatusDetail = "納品 FATE の報酬を待っています";
             return;
@@ -2542,17 +2570,33 @@ public sealed class FateRunner(
 
     private void LeaveFate(Config cfg, FateInfo finished)
     {
+        // **同じ湧きを二度数えない。**
+        //
+        // 100% は毎フレーム見えるので、離脱の処理が続けて呼ばれうる。
+        // 数えた湧きを覚えておき、二度目は数だけ飛ばす
+        // （離脱そのものは、呼ばれたぶんだけやり直してよい）。
+        var alreadyCounted = this.countedSpawn == finished.SpawnKey;
+
         // 戦闘 AI を先に解除する。これを呼ばないと敵を追い続けて離れられない。
         this.ReleaseCombat();
         this.navigation.Stop();
 
-        this.Completed++;
+        if (!alreadyCounted)
+        {
+            this.countedSpawn = finished.SpawnKey;
+            this.Completed++;
+        }
 
         // 納品 FATE は 100% の時点ではまだ報酬が入っていない。
         // 1 分後に FATE が消えるときに入る。それまでマップを離れない。
         if (finished.IsCollect)
         {
-            this.pendingReward = (finished.Id, finished.StartTimeEpoch, DateTime.UtcNow + CollectRewardWindow);
+            this.pendingRewards.RemoveAll(x => x.Id == finished.Id && x.Start == finished.StartTimeEpoch);
+            this.pendingRewards.Add((
+                Svc.ClientState.TerritoryType,
+                finished.Id,
+                finished.StartTimeEpoch,
+                DateTime.UtcNow + CollectRewardWindow));
             this.anomalyLog.Info("Fate", $"{finished.Name} が 100% になりました。報酬が入るまでこのマップに留まります");
         }
         else
@@ -2843,36 +2887,61 @@ public sealed class FateRunner(
         return this.lifestream.TryTeleport(teleport.AetheryteId, teleport.SubIndex, out var accepted) && accepted;
     }
 
-    /// <summary>納品 FATE の報酬が着地したかを見る。</summary>
+    /// <summary>
+    /// 納品 FATE の報酬待ちを見直す。
+    ///
+    /// <b>FATE が消えたことを「報酬が入った」と書かない。</b>
+    /// 消えたのは終わったからで、受け取れたかどうかは別の話。
+    /// こちらから受領を直接確かめる手段が無いので、
+    /// 「終わったのを見た（受領は未確認）」と正直に記録する。
+    ///
+    /// 待ちは複数持つ。90 秒のうちに 2 つ終えることがあるため。
+    /// </summary>
     private void RefreshPendingReward()
     {
-        if (this.pendingReward is not { } pending)
+        if (this.pendingRewards.Count == 0)
         {
             return;
         }
 
-        var live = this.scanner.GetById(pending.Id);
+        var here = Svc.ClientState.TerritoryType;
+        var now = DateTime.UtcNow;
 
-        // FATE が消えた = 報酬が入った。
-        if (live is null || live.StartTimeEpoch != pending.Start)
+        for (var i = this.pendingRewards.Count - 1; i >= 0; i--)
         {
-            this.anomalyLog.Info("Fate", "納品 FATE の報酬が入りました");
-            this.pendingReward = null;
-            return;
-        }
+            var pending = this.pendingRewards[i];
 
-        // マップを離れてしまった。報酬は失われる。
-        if (!C.FateZones.Contains(Svc.ClientState.TerritoryType) && this.Step == FateStep.Traveling)
-        {
-            this.anomalyLog.Warn("Fate", "報酬が入る前にマップを離れました。この納品 FATE の報酬は失われます");
-            this.pendingReward = null;
-            return;
-        }
+            // 覚えたときとは別のマップにいる。そのマップの報酬はもう待てない。
+            if (pending.Territory != here)
+            {
+                this.anomalyLog.Warn(
+                    "Fate",
+                    $"{NpcLocationService.GetTerritoryName(pending.Territory)} を離れたため、" +
+                    "納品 FATE の報酬を待てなくなりました");
 
-        if (DateTime.UtcNow > pending.DeadlineUtc)
-        {
-            this.anomalyLog.Warn("Fate", "納品 FATE の報酬を待ちましたが、確認できませんでした");
-            this.pendingReward = null;
+                this.pendingRewards.RemoveAt(i);
+                continue;
+            }
+
+            var live = this.scanner.GetById(pending.Id);
+
+            // 消えた、または別の湧きに入れ替わった。終わったことは確かめられたが、
+            // 受け取れたかどうかは、こちらからは分からない。
+            if (live is null || live.StartTimeEpoch != pending.Start)
+            {
+                this.anomalyLog.Info("Fate", "納品 FATE が終了しました（報酬の受領は未確認）");
+                this.pendingRewards.RemoveAt(i);
+                continue;
+            }
+
+            if (now > pending.DeadlineUtc)
+            {
+                this.anomalyLog.Warn(
+                    "Fate",
+                    $"納品 FATE の終了を {CollectRewardWindow.TotalSeconds:F0} 秒待ちましたが、確認できませんでした");
+
+                this.pendingRewards.RemoveAt(i);
+            }
         }
     }
 
