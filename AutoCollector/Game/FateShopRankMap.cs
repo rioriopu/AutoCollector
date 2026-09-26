@@ -140,6 +140,65 @@ public sealed class FateShopRankMap(AnomalyLog anomalyLog)
         }
     }
 
+    /// <summary>アチーブメント番号 → そこに書かれているランク。無ければ 0。</summary>
+    private static readonly Dictionary<uint, uint> RankByAchievement = [];
+
+    /// <summary>
+    /// アチーブメントの説明文からランクを読む。
+    ///
+    /// 実データ（ver 2026.09.15）の書き方：
+    ///   「サベネア島のF.A.T.E.達成度をRANK3にする」
+    ///
+    /// <c>RANK</c> の直後の数字を取る。書き方が変わったら 0 を返し、
+    /// 呼び出し側の「枠の位置」による判定に任せる。
+    /// 数字はシートから読むので、コードには埋め込まない。
+    /// </summary>
+    private static uint RankFromAchievement(uint achievementId)
+    {
+        if (achievementId == 0)
+        {
+            return 0;
+        }
+
+        if (RankByAchievement.TryGetValue(achievementId, out var cached))
+        {
+            return cached;
+        }
+
+        uint rank = 0;
+
+        try
+        {
+            var sheet = Svc.Data.GetExcelSheet<Achievement>();
+            if (sheet is not null && sheet.TryGetRow(achievementId, out var row))
+            {
+                var text = row.Description.ExtractText();
+                var marker = text.IndexOf("RANK", StringComparison.OrdinalIgnoreCase);
+
+                if (marker >= 0)
+                {
+                    var digits = string.Empty;
+                    for (var i = marker + 4; i < text.Length && char.IsDigit(text[i]); i++)
+                    {
+                        digits += text[i];
+                    }
+
+                    if (digits.Length > 0 && uint.TryParse(digits, out var parsed))
+                    {
+                        rank = parsed;
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // 読めなければ 0。枠の位置で決める。
+        }
+
+        RankByAchievement[achievementId] = rank;
+        return rank;
+    }
+
     private void EnsureBuilt()
     {
         if (this.rankByEntry is not null)
@@ -190,8 +249,21 @@ public sealed class FateShopRankMap(AnomalyLog anomalyLog)
                 continue;
             }
 
-            // その交易商が持つショップを、列の並び順に集める。
-            // 同じ番号が続けて入っていることがあるので、重複は落とす。
+            // **列の位置がそのままランク。**
+            //
+            // FateShop の先頭 3 列が ランク1 / ランク2 / ランク3 の枠で、
+            // それぞれに、そのランクで開く SpecialShop が入っている。
+            //
+            //   ラルルック（ヤクテル樹海）… 1770743 | 1770744 | 1770745
+            //   マヴェーダ（サベネア島）  … 1770460 | 1770461 | 1770461
+            //   ベリル（都市）            … 1770746 |    0    |    0
+            //
+            // <b>同じ番号が続くのは、そのランクで品が増えないという意味。</b>
+            // 以前ここで重複を落としていたため、暁月が「2 段階しかない」
+            // ように見え、ランクが 1 つずつずれていた。落としてはいけない。
+            //
+            // 4 列目以降は DefaultTalk（セリフ）なので、
+            // ショップの種類（上位 16 bit）で見分ける。
             var ordered = new List<uint>();
             for (var column = 0; column < sheet.Columns.Count; column++)
             {
@@ -207,13 +279,11 @@ public sealed class FateShopRankMap(AnomalyLog anomalyLog)
 
                 if ((value >> 16) != SpecialShopHandlerType)
                 {
-                    continue;
+                    // ショップでない列（セリフ）が出たら、そこから先は枠ではない。
+                    break;
                 }
 
-                if (!ordered.Contains(value))
-                {
-                    ordered.Add(value);
-                }
+                ordered.Add(value);
             }
 
             if (ordered.Count <= 1)
@@ -228,26 +298,10 @@ public sealed class FateShopRankMap(AnomalyLog anomalyLog)
             {
                 var shopId = ordered[stage];
 
-                // **段階の番号がそのままランク。**
+                // 枠の位置がそのままランク（列0=ランク1、列1=ランク2…）。
                 //
-                // ショップの数が最大ランクより少ないことがある
-                // （暁月は 2 ショップだが画面は RANK3 まで）。
-                // そのため「ショップ数＝ランク数」ではない。
-                //
-                // 実データで確かめると、<b>後ろのショップが複数ランクぶんを
-                // まとめて持っている</b>。サベネア島（暁月）の例：
-                //
-                //   1770460 … 素材 4 件（各 2 ジェム）                → ランク1
-                //   1770461 … 上記 + 詳細地図(70) + 譜(350) など      → ランク2 と 3 が同居
-                //
-                // 交換サイト（itumononeko.com）の一覧とも一致する。
-                // ランク 1 から素材が買えるので、最初の段階に条件は要らない。
-                //
-                // 後ろのショップに混ざったランク 2 と 3 を分ける手がかりは
-                // シートに無い。分けられない以上、まとめて
-                // 「最初にそのショップが現れる段階」を要求ランクとする。
-                // 実際より低く出る品があるが、<b>高く出して買えるものを
-                // 隠すよりは害が小さい</b>（買えなければゲーム側が拒む）。
+                // 同じショップ番号が続く枠は、そのランクで品が増えないという意味。
+                // 下の seen で差分を取るので、重複して記録されることはない。
                 var requiredRank = (uint)(stage + 1);
 
                 this.stageByShop![shopId] = requiredRank;
@@ -262,6 +316,27 @@ public sealed class FateShopRankMap(AnomalyLog anomalyLog)
                     var reward = entry.ReceiveItems.FirstOrDefault().Item.RowId;
                     if (reward == 0)
                     {
+                        continue;
+                    }
+
+                    // **アチーブメントがランクを直接教えてくれる。**
+                    //
+                    // 同じショップが 2 つの枠に入っていると（暁月は
+                    // 列1 と列2 がどちらも同じショップ）、枠の位置だけでは
+                    // ランク 2 と 3 を分けられない。
+                    //
+                    // ところが一部のエントリには AchievementUnlock が付いていて、
+                    // その説明文にランクが書かれている。実データ（ver 2026.09.15）：
+                    //
+                    //   3023「広域交易商の味方：サベネア島」
+                    //        → サベネア島のF.A.T.E.達成度をRANK3にする
+                    //
+                    // 説明文から数字を取れば、枠の位置より確かな値になる。
+                    var fromAchievement = RankFromAchievement(entry.AchievementUnlock.RowId);
+                    if (fromAchievement > 0)
+                    {
+                        this.rankByEntry![(shopId, reward)] = fromAchievement;
+                        seen.Add(reward);
                         continue;
                     }
 
