@@ -334,6 +334,31 @@ public sealed class FateRunner(
     private const float RetreatLiftMeters = 8f;
 
     /// <summary>
+    /// 離陸の合図を送り直す間隔。
+    ///
+    /// 乗れているのに飛べない（屋根の下、高度上限、ジャンプが弾かれた、
+    /// 渡した点に着いて経路が終わった）ことがある。送ったきりにすると
+    /// 何も操作しないまま時間切れまで固まる。
+    ///
+    /// <b>全体の上限に収める。</b>
+    /// 間隔 × 回数が長いと、歩いて出る余地を食い潰す。
+    /// 納品 FATE は上限が 15 秒しかないので、そこに収まる長さにする
+    /// （乗る待ち 8 秒 + 離陸 2 秒 × 2 回 = 12 秒、歩きに 3 秒残る）。
+    /// </summary>
+    private static readonly TimeSpan RetreatLiftRetry = TimeSpan.FromSeconds(2);
+
+    /// <summary>離陸の合図を送り直す上限。超えたら歩いて出る。</summary>
+    private const int MaxRetreatLiftAttempts = 1;
+
+    /// <summary>
+    /// 退避で「飛べた」と認めるまでに、続けて確認する回数。
+    ///
+    /// ジャンプ直後の一瞬だけ InFlight が立つことがある。1 回で信じると、
+    /// 実際には浮いていないのに成功として記録され、あとから気づけない。
+    /// </summary>
+    private const int RetreatFlyingStableFrames = 3;
+
+    /// <summary>
     /// 円の外へ出るのを待つ上限。出られなくても周回は続ける。
     ///
     /// <b>乗るのを待つ時間より長くする。</b>
@@ -465,6 +490,15 @@ public sealed class FateRunner(
 
     /// <summary>退避で離陸の合図を送ったか。毎フレーム送り直さないために持つ。</summary>
     private bool retreatLiftIssued;
+
+    /// <summary>離陸の合図を送った時刻。飛べないまま固まらないよう、送り直すのに使う。</summary>
+    private DateTime retreatLiftUtc = DateTime.MinValue;
+
+    /// <summary>離陸の合図を送り直した回数。</summary>
+    private int retreatLiftAttempts;
+
+    /// <summary>退避で飛行を続けて確認した回数。1 フレームでは信じない。</summary>
+    private int retreatFlyingFrames;
 
     /// <summary>
     /// 報酬待ちの納品 FATE。着地するまでマップを離れない。
@@ -734,6 +768,8 @@ public sealed class FateRunner(
         this.retreatTo = null;
         this.retreatAttempts = 0;
         this.retreatLiftIssued = false;
+        this.retreatLiftAttempts = 0;
+        this.retreatFlyingFrames = 0;
         this.groundOnlyFate = null;
         this.teleportRejectedUtc = DateTime.MinValue;
         this.ventureReturnTo = null;
@@ -3658,6 +3694,8 @@ public sealed class FateRunner(
         this.retreatFrom = finished;
         this.retreatSinceUtc = DateTime.UtcNow;
         this.retreatLiftIssued = false;
+        this.retreatLiftAttempts = 0;
+        this.retreatFlyingFrames = 0;
         this.retreatTo = null;
         this.SetStep(FateStep.Leaving, $"{finished.Name} の範囲外へ退避しています");
 
@@ -3802,7 +3840,12 @@ public sealed class FateRunner(
         var watching = this.retreatTo ?? finished.Position;
         var status = this.navigation.Tick(watching, RetreatArrivalRange);
 
-        if (status is MoveStatus.Failed or MoveStatus.Stuck)
+        // **ShortOfTarget も拾う。**
+        //
+        // 「近づけるところまで行って終わった」状態で、放置しても二度と動かない
+        // （NavigationService の MoveStatus の説明）。拾っていなかったため、
+        // 画面の文字を書き換えるだけで時間切れまで棒立ちになっていた。
+        if (status is MoveStatus.Failed or MoveStatus.Stuck or MoveStatus.ShortOfTarget)
         {
             // **別の向きへ出直す。** 1 回引けなかっただけで諦めない。
             if (this.retreatAttempts < MaxRetreatAttempts)
@@ -3818,6 +3861,8 @@ public sealed class FateRunner(
                 {
                     this.retreatSinceUtc = DateTime.UtcNow;
                     this.retreatLiftIssued = false;
+                    this.retreatLiftAttempts = 0;
+                    this.retreatFlyingFrames = 0;
                     return;
                 }
             }
@@ -3858,16 +3903,40 @@ public sealed class FateRunner(
         //
         // 円の中の上空でも構わない。地上に居ないので敵に絡まれず、
         // 次の行き先が決まれば、そのまま飛んで向かえる。
+        //
+        // **1 フレームで信じない。**
+        // ジャンプした直後の一瞬だけ InFlight が立つことがある。
+        // それを拾うと、実際には浮いていないのに「飛んで離れた」ことにして
+        // 円の中に立ったまま次へ進む。しかも記録には成功と残るので、
+        // あとから気づけない。進入側も同じ理由で 3 回続けて確かめている
+        // （FateApproach の FlyingStableFrames）。
         if (MountService.IsFlying)
         {
-            this.trace.Decision(
-                "飛んで離れた",
-                $"{finished.Name} 高さ {Player.Position.Y:F0}。次の FATE へはここから飛びます");
+            this.retreatFlyingFrames++;
 
-            this.navigation.Stop();
-            this.FinishRetreat(escaped: true);
+            if (this.retreatFlyingFrames >= RetreatFlyingStableFrames)
+            {
+                this.trace.Decision(
+                    "飛んで離れた",
+                    $"{finished.Name} 高さ {Player.Position.Y:F0}。次の FATE へはここから飛びます");
+
+                // **vnavmesh を直接止める。**
+                // 離陸の合図は NavigationService を通さず TryMoveAlong で
+                // 送っているため、navigation.Stop() は moveIssued が false で
+                // 素通りする（NavigationService.Stop の冒頭）。
+                this.vnavmesh.TryStop();
+                this.navigation.Stop();
+                this.FinishRetreat(escaped: true);
+            }
+            else
+            {
+                this.StatusDetail = $"{finished.Name} から飛んで離れています";
+            }
+
             return true;
         }
+
+        this.retreatFlyingFrames = 0;
 
         // 戦闘中は乗れない。切れるのを待つ。
         // 上で狙いを外しているので、じきに切れる。
@@ -3922,7 +3991,39 @@ public sealed class FateRunner(
         //
         // vnavmesh は「次の経路点が自分より高い」「騎乗中」「まだ飛んでいない」
         // が揃うとジャンプを連打して離陸する（FollowPath.cs:142-154）。
-        // 少し上の点を 1 度だけ渡せばよい。
+        // 少し上の点を渡して、その条件を作る。
+
+        // **合図を送ったきりにしない。**
+        //
+        // 屋根の下、飛行の高度上限、ジャンプが弾かれた、渡した点に着いて
+        // 経路が終わった——などで、乗れているのに飛べないことがある。
+        // 以前は旗を立てたきり送り直さなかったため、その状態になると
+        // 毎フレーム画面に文字を書くだけで何も操作せず、
+        // 時間切れまで完全に固まっていた。
+        //
+        // 送り直しても飛べないなら、歩いて出るほうへ落とす。
+        if (this.retreatLiftIssued &&
+            DateTime.UtcNow - this.retreatLiftUtc > RetreatLiftRetry)
+        {
+            this.retreatLiftIssued = false;
+            this.retreatLiftAttempts++;
+
+            this.trace.Trouble(
+                "離陸できない",
+                $"{finished.Name} 合図を送り直します（{this.retreatLiftAttempts} 回目・" +
+                $"{MountService.DescribeFlightStatus()}）");
+        }
+
+        if (this.retreatLiftAttempts > MaxRetreatLiftAttempts)
+        {
+            this.trace.Trouble(
+                "飛べないので歩いて出る",
+                $"{finished.Name} {MaxRetreatLiftAttempts} 回試しても飛べませんでした" +
+                $"（{MountService.DescribeFlightStatus()}）");
+
+            return false;
+        }
+
         if (!this.retreatLiftIssued)
         {
             var up = Player.Position with { Y = Player.Position.Y + RetreatLiftMeters };
@@ -3930,6 +4031,7 @@ public sealed class FateRunner(
             if (this.vnavmesh.TryMoveAlong([up], fly: true))
             {
                 this.retreatLiftIssued = true;
+                this.retreatLiftUtc = DateTime.UtcNow;
                 this.trace.State("離陸させる", $"{finished.Name} 真上 {up.Y:F0} へ");
             }
         }
@@ -3960,6 +4062,8 @@ public sealed class FateRunner(
         this.retreatTo = null;
         this.retreatAttempts = 0;
         this.retreatLiftIssued = false;
+        this.retreatLiftAttempts = 0;
+        this.retreatFlyingFrames = 0;
         this.moveIssued = false;
         this.SetStep(FateStep.Waiting, "FATE を探しています");
         this.waitingSinceUtc = DateTime.UtcNow;
