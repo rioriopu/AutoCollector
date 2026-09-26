@@ -109,13 +109,40 @@ public sealed class PresetTab(Plugin plugin)
     private bool DrawNumber(string key, string label, ref int value, float width = 160f)
     {
         var editing = this.numberEditKey == key;
-        var text = editing ? this.numberEditText : value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+        // **控えが空なら、実際の値から始める。**
+        //
+        // 以前は editing だけを見て控えを使っていた。控えは打ったときしか
+        // 更新されないのに、編集中の印は「欄に触れた」だけで立つ。
+        // そのため<b>欄をクリックした次のフレームで中身が空になっていた</b>。
+        // 打とうとすると消える、という形で現れる。
+        var text = editing && this.numberEditText.Length > 0
+            ? this.numberEditText
+            : value.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
         ImGui.SetNextItemWidth(width);
-        var edited = ImGui.InputText(label, ref text, 12);
+
+        // **ImGui へ渡す名札に key を混ぜる。**
+        //
+        // 以前は label だけを渡していた。key は C# 側の照合にしか使って
+        // おらず、ImGui から見ると同じ名前の欄が複数あることになる。
+        //
+        // さらに閾値の欄（522 行）は、条件のモードによって label の文字列が
+        // 変わる。ImGui は名札で欄を見分けるので、<b>モードを変えた瞬間に
+        // 別の欄と見なされ、打ちかけの内容が捨てられていた</b>。
+        //
+        // key はプリセットごとに作ってあるので、これで一意になる。
+        var edited = ImGui.InputText($"{label}##num_{key}", ref text, 12);
 
         if (ImGui.IsItemActive())
         {
+            // **触れた時点で、いまの中身を控える。**
+            // 控えないと、次のフレームで空になる。
+            if (!editing)
+            {
+                this.numberEditText = text;
+            }
+
             this.numberEditKey = key;
         }
         else if (editing)
@@ -1222,6 +1249,24 @@ public sealed class PresetTab(Plugin plugin)
             }
         }
 
+        // **画面と実際の値を食い違わせない。**
+        //
+        // 指定した窓口が一覧に無いと index は 0 に丸まり、画面には
+        // 「自動（最寄り）で選ぶ」と出る。ところが PreferredNpcDataId は
+        // 残ったままなので、実行時はその窓口を最優先で探しに行く。
+        // 見ているものと動くものが違う、いちばん困る形になる。
+        //
+        // 一覧に無いなら、指定も消す。消したことは画面にも出す。
+        if (index == 0 && preset.PreferredNpcDataId != 0)
+        {
+            preset.PreferredNpcDataId = 0;
+            changed = true;
+
+            ImGui.TextColored(
+                ImGuiColors.DalamudYellow,
+                "  指定していた交換所がこの品を扱わなくなったため、自動選択に戻しました");
+        }
+
         ImGui.SetNextItemWidth(360f);
         if (ImGui.Combo("交換所", ref index, labels.ToArray(), labels.Count))
         {
@@ -2248,7 +2293,15 @@ public sealed class PresetTab(Plugin plugin)
                 for (var i = 0; i < preset.Rewards.Count; i++)
                 {
                     var entry = preset.Rewards[i];
-                    using var id = ImRaii.PushId($"entry{i}");
+
+                    // **行の番号ではなく、品で区別する。**
+                    //
+                    // 番号で分けていたため、1 行消すと後ろの行の id が
+                    // 1 つずつ繰り上がった。ImGui は id でホバーや押下の
+                    // 状態を追うので、消した直後に同じ場所へマウスがあると、
+                    // 繰り上がってきた次の行がその状態を引き継ぐ。
+                    // 続けて押すと、消すつもりのない行を消すことになる。
+                    using var id = ImRaii.PushId($"entry{entry.RewardItemId}");
 
                     if (ImGui.SmallButton("×"))
                     {
@@ -2287,7 +2340,7 @@ public sealed class PresetTab(Plugin plugin)
                     if (showsBatch)
                     {
                         var quantity = entry.Quantity;
-                        if (this.DrawNumber($"eq{i}{entry.RewardItemId}", "一括交換する個数##qty", ref quantity, 90f))
+                        if (this.DrawNumber($"eq{entry.RewardItemId}", "一括交換する個数", ref quantity, 90f))
                         {
                             entry.Quantity = Math.Max(0, quantity);
                             changed = true;
@@ -2322,7 +2375,7 @@ public sealed class PresetTab(Plugin plugin)
                     }
 
                     var limit = entry.OwnedLimit;
-                    if (this.DrawNumber($"el{i}{entry.RewardItemId}", "所持の上限##own", ref limit, 90f))
+                    if (this.DrawNumber($"el{entry.RewardItemId}", "所持の上限", ref limit, 90f))
                     {
                         entry.OwnedLimit = Math.Max(0, limit);
                         changed = true;

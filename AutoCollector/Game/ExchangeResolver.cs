@@ -173,6 +173,26 @@ public sealed class ExchangeResolver(
             return;
         }
 
+        // **同じ通貨で作っている最中なら、何もしない。**
+        //
+        // これが無かったため、キャッシュに無い通貨で毎フレーム呼ぶと
+        // 毎フレームここへ落ちて、作りかけを捨てて最初からやり直していた。
+        // 進むのは次のフレームの TickBuild で 1 段だけなので、
+        // <b>索引が永久に完成しない</b>。画面は毎フレーム呼ぶので、
+        // プリセットタブを開いているあいだずっとこの状態になる。
+        //
+        // 上の早期 return は Stage == Completed のときしか効かず、
+        // 構築中（ScanningShops / ScanningNpcs）は素通りしていた。
+        if (!forceRebuild
+            && currencyItemId != 0
+            && this.targetCurrencyItemId == currencyItemId
+            && this.Stage is ResolverBuildStage.ScanningShops
+                          or ResolverBuildStage.ScanningNpcs
+                          or ResolverBuildStage.ResolvingLocations)
+        {
+            return;
+        }
+
         this.shopEntries.Clear();
         this.shopToNpcs.Clear();
         this.shopNames.Clear();

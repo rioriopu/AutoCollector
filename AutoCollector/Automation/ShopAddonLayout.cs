@@ -39,8 +39,20 @@ public sealed class ShopAddonLayout
     /// <summary>並列配列の要素間隔。</summary>
     public int EntryStride { get; set; } = 1;
 
-    /// <summary>読み取るエントリ数の上限。異常値で暴走しないための歯止め。</summary>
-    public int MaxEntries { get; set; } = 240;
+    /// <summary>
+    /// 読み取るエントリ数の上限。異常値で暴走しないための歯止め。
+    ///
+    /// <b>配列の間隔より十分小さくする。</b>
+    /// 3 本の並列配列は間隔をあけて並んでおり、既定値では
+    /// ItemId(1066) と Index(1310) の間隔が 244 しかない。
+    /// ここを 240 にしていたため、余裕が 4 しか無かった。
+    /// パッチで間隔が少しでも縮むと既定値そのものが不正になり、
+    /// 読み込みに失敗したときのフォールバック（＝同じ既定値）も
+    /// 不正なままになる。
+    ///
+    /// 交換所に 200 件も並ぶことは無いので、余裕を取って下げる。
+    /// </summary>
+    public int MaxEntries { get; set; } = 200;
 
     /// <summary>3 本の並列配列のうち最も手前の位置。エントリ読み取りの基点にする。</summary>
     [JsonIgnore]
@@ -196,7 +208,33 @@ public static class DataFileLoader
             anomalyLog.Error("Data", $"atkvalue_layout.json の読み込みに失敗しました。既定値を使用します: {ex.Message}");
         }
 
-        return new ShopAddonLayout();
+        // **フォールバック先も確かめる。**
+        //
+        // 以前は既定値をそのまま返していた。パッチで配列の間隔が縮むと
+        // 既定値自体が Validate を通らなくなるが、そのときも同じ既定値へ
+        // 落ちるため、不正な設定のまま動き続けることになる。
+        //
+        // 通らないなら、読み取り件数を間隔に収まるところまで下げる。
+        // 件数が減るだけで、読み取りが隣の配列へ食い込むよりはるかに安全。
+        var fallback = new ShopAddonLayout();
+
+        if (fallback.Validate(out var fallbackReason))
+        {
+            return fallback;
+        }
+
+        anomalyLog.Error(
+            "Data",
+            $"既定の読み取り位置も不正です（{fallbackReason}）。読み取り件数を下げて続けます");
+
+        var bases = new[] { fallback.EntryCost, fallback.EntryItemId, fallback.EntryIndex };
+        Array.Sort(bases);
+        var minGap = Math.Min(bases[1] - bases[0], bases[2] - bases[1]);
+
+        fallback.MaxEntries = Math.Max(1, (minGap / Math.Max(1, fallback.EntryStride)) - 1);
+
+        anomalyLog.Error("Data", $"読み取り件数を {fallback.MaxEntries} 件に下げました");
+        return fallback;
     }
 
     private static string? ReadEmbedded(string fileName)
