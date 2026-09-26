@@ -120,6 +120,22 @@ public sealed class FateRunner(
     /// </summary>
     private const float ApproachRepathMeters = 5f;
 
+    /// <summary>
+    /// 近づくのをやめる距離と、始める距離の差。
+    ///
+    /// 同じ距離で判定すると、境目で「やめる」「始める」を往復して
+    /// ガクガク動く。始めるほうを遠くに置いて、行き来を防ぐ。
+    /// </summary>
+    private const float ApproachHysteresisMeters = 5f;
+
+    /// <summary>
+    /// FATE に入ってから、参加扱いになるのを待つ猶予。
+    ///
+    /// CurrentFate は円に入っただけでは埋まらない。レベルシンクが
+    /// 入るまでの短い間、参加していないように見える。
+    /// </summary>
+    private static readonly TimeSpan FateJoinGrace = TimeSpan.FromSeconds(5);
+
     /// <summary>近づく経路を引き直す間隔。経路探索は重いので続けて投げない。</summary>
     private static readonly TimeSpan ApproachRepathInterval = TimeSpan.FromSeconds(1);
 
@@ -309,6 +325,9 @@ public sealed class FateRunner(
 
     /// <summary>敵へ近づいている最中か。戦闘に入ったら下ろす。</summary>
     private bool approaching;
+
+    /// <summary>戦闘の段階へ入った時刻。参加扱いになるのを待つのに使う。</summary>
+    private DateTime fightingSinceUtc = DateTime.MinValue;
 
     /// <summary>いま経路を引いている先。敵が動いても、ここから離れるまでは引き直さない。</summary>
     private Vector3 approachTarget;
@@ -883,8 +902,22 @@ public sealed class FateRunner(
         }
 
         // 参加していないのに Fighting のままなら、FATE が終わったか離れた。
+        //
+        // **ただし、入った直後は待つ。**
+        //
+        // CurrentFate は、円に入っただけでは埋まらない。レベルシンクが
+        // 入って参加扱いになるまで、少しのあいだ null のままになる。
+        // そこで畳んでしまうと、入った 17 ミリ秒後に「参加していない」と
+        // 見て離脱し、同じ FATE をまた狙って乗り直す、を繰り返す
+        // （2026-09-26 実測。Zard が同じ FATE で乗り降りを繰り返していた）。
         if (this.Step is FateStep.Fighting or FateStep.Leaving)
         {
+            if (DateTime.UtcNow - this.fightingSinceUtc < FateJoinGrace)
+            {
+                this.StatusDetail = "FATE に参加するのを待っています";
+                return;
+            }
+
             this.FinishCurrentFate();
         }
 
@@ -1447,7 +1480,12 @@ public sealed class FateRunner(
             this.moveIssued = false;
 
             // 跳ねてみる。段差に引っかかっているだけなら、これで外れる。
-            TryJump();
+            // 乗っているときは跳ばない。跳躍中は降車が弾かれ、
+            // 降りようとしては跳ぶ、を繰り返すことになる（2026-09-26 実測）。
+            if (!MountService.IsMounted)
+            {
+                TryJump();
+            }
 
             this.blockCheckedUtc = now;
             this.blockCheckPosition = here;
@@ -1633,6 +1671,7 @@ public sealed class FateRunner(
         if (!MountService.IsMounted)
         {
             this.ApplyCombat(cfg);
+            this.fightingSinceUtc = DateTime.UtcNow;
             this.SetStep(FateStep.Fighting, $"{fate.Name} と戦っています");
             return;
         }
@@ -1663,6 +1702,7 @@ public sealed class FateRunner(
         {
             this.mount.ClearDismounting();
             this.ApplyCombat(cfg);
+            this.fightingSinceUtc = DateTime.UtcNow;
             this.SetStep(FateStep.Fighting, $"{fate.Name} と戦っています");
             return;
         }
@@ -1679,6 +1719,7 @@ public sealed class FateRunner(
             this.trace.Decision("降りるのを待たない", "戦闘が始まったので先に戦う");
             this.mount.ClearDismounting();
             this.ApplyCombat(cfg);
+            this.fightingSinceUtc = DateTime.UtcNow;
             this.SetStep(FateStep.Fighting, $"{fate.Name} と戦っています");
             return;
         }
@@ -1866,6 +1907,7 @@ public sealed class FateRunner(
         {
             this.ApplyCombat(cfg);
             this.target = current;
+            this.fightingSinceUtc = DateTime.UtcNow;
             this.SetStep(FateStep.Fighting, $"{current.Name} と戦っています");
         }
 
@@ -1956,13 +1998,32 @@ public sealed class FateRunner(
         }
 
         // 十分近い。BMR が拾うはずなので任せる。
-        if (mob.Distance <= MobReachMeters)
+        //
+        // **やめる距離と、始める距離を変える。**
+        //
+        // 同じ 15m で判定すると、その境目で「近いからやめる」と
+        // 「遠いから始める」を毎フレーム往復する。やめるたびに
+        // approaching が下りるので、引き直しの間隔も効かなくなり、
+        // 150 ミリ秒ごとに経路を引き直してガクガク動く
+        // （2026-09-26 実測。距離 15m のまま「経路 1 回目」を繰り返していた）。
+        //
+        // いったん近づいたら、少し離れるまでは近づき直さない。
+        var stopWithin = MobReachMeters;
+        var startBeyond = MobReachMeters + ApproachHysteresisMeters;
+
+        if (mob.Distance <= stopWithin)
         {
             if (this.approaching)
             {
                 this.StopApproach();
             }
 
+            return;
+        }
+
+        // 追いかけている最中でなければ、少し離れるまで始めない。
+        if (!this.approaching && mob.Distance <= startBeyond)
+        {
             return;
         }
 
