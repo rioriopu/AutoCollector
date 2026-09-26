@@ -23,6 +23,12 @@ public sealed record SharedFateZoneRank(uint TerritoryId, byte CurrentRank, byte
     /// CurrentRank は正しく読めていたので、MaxRank 側が
     /// 埋まっていなかったことになる。
     ///
+    /// <b>構造体の定義は正しい。</b>
+    /// 本家 FFXIVClientStructs（2026-09-27 時点）と手元の定義が
+    /// 完全に一致することを確認した。MaxRank のオフセット 0x71 も同じ。
+    /// つまりオフセットの誤りではなく、エージェントが埋めていない。
+    /// 調べた内容は C:\ソース\dalamud-docs-ja\シェアFATE_達成度の取得.md に置いた。
+    ///
     /// <b>上限はシートからも取れない。</b>
     /// FateProgressUI の列 1 はどのマップも 6 だが、
     /// 実際の上限は 漆黒 3 / 暁月 3 / 黄金 4 で一致しない。
@@ -200,12 +206,20 @@ public sealed class SharedFateRankService(AnomalyLog anomalyLog)
                 // **読めた値をそのまま記録に残す。**
                 // 画面の表示と食い違ったとき、どの値がどう違うのかが
                 // 分からないと直しようがない。
+                //
+                // AddonId も一緒に出す。AgentInterface.AddonId は
+                // 対応するアドオンが開いていなければ 0 になるので、
+                // 「画面を一度も開いていない」のか
+                // 「開いたのに MaxRank だけ埋まらない」のかを区別できる。
                 if (result.Count > 0
                     && ECommons.Throttlers.EzThrottler.Throttle("AutoCollector.RankDump", 10000))
                 {
+                    var missingMax = result.Values.Count(x => !x.HasMaxRank);
+
                     this.anomalyLog.Info(
                         "SharedFate",
-                        "読み取った達成度: " + string.Join(
+                        $"読み取った達成度（AddonId={agent->AddonId} 上限が空={missingMax}/{result.Count}）: " +
+                        string.Join(
                             " / ",
                             result.Values.Select(x => $"{x.TerritoryId}:{x.CurrentRank}/{x.MaxRank}")));
                 }
