@@ -215,6 +215,22 @@ public sealed class FateRunner(
     /// </summary>
     private const float LandNearCentreMeters = 15f;
 
+    /// <summary>
+    /// 着地したい地点の真上と認める水平距離。
+    ///
+    /// 狭くすると、狙った場所にきちんと降りる。
+    /// 広いと手前で降りてしまい、外周に降りるのと変わらなくなる。
+    /// </summary>
+    private const float LandOnSpotMeters = 5f;
+
+    /// <summary>
+    /// この高さまで下りてから降りる。
+    ///
+    /// <b>高いうちに降りると垂直落下になる。</b>
+    /// 斜めに下りきってから降りることで、落下する距離を短くする。
+    /// </summary>
+    private const float LandFromHeightMeters = 8f;
+
     /// <summary>テレポートが終わるのを待つ上限。</summary>
     private static readonly TimeSpan TeleportTimeout = TimeSpan.FromSeconds(60);
 
@@ -1279,25 +1295,32 @@ public sealed class FateRunner(
             this.moveStartedUtc = DateTime.UtcNow;
         }
 
-        // **敵の近くまで来たら降りる。**
+        // **外周では降りない。中心の地上へ斜めに降りる。**
         //
-        // 敵が見えていれば、そこを目安にする。降りた先がそのまま戦う場所になり、
-        // 降りてから走る距離も無くなる。
+        // 円に入った端で降りると、敵から遠く、高低差にも阻まれて
+        // 詰まりやすい（2026-09-26 の報告）。
         //
-        // 見えていなければ中心を目安にする。円に入った端で降りると、
-        // そこが低い場所だと高所の敵へ近づけなくなるため
-        // （2026-09-25 実測。高低差のあるマップで棒立ちになった）。
+        // また、中心の真上まで飛んでから垂直に落ちるのも不自然で、
+        // 落ちている間は何もできない。
+        //
+        // そこで、着地したい地点を「持ち上げずに」目的地として渡す。
+        // vnavmesh は空中の現在地から地上の目的地へ経路を引くので、
+        // 斜めに高度を下げながら近づく形になる。
+        var landing = this.flyingWhenIssued && Player.Available
+            ? this.ResolveLandingTarget(live)
+            : live.Position;
+
         if (this.flyingWhenIssued && Player.Available)
         {
-            var landAt = this.scanner.FindNearestMob(live.Id, Player.Position) is { } near
-                ? near.Position
-                : live.Position;
-
             var flat = Vector2.Distance(
                 new Vector2(Player.Position.X, Player.Position.Z),
-                new Vector2(landAt.X, landAt.Z));
+                new Vector2(landing.X, landing.Z));
 
-            if (flat <= LandNearCentreMeters)
+            // 真上に来て、かつ十分下りていたら降りる。
+            // 高いうちに降りると、そこから垂直落下になってしまう。
+            var height = Player.Position.Y - landing.Y;
+
+            if (flat <= LandOnSpotMeters && height <= LandFromHeightMeters)
             {
                 this.navigation.Stop();
                 this.EnterFate(cfg, live);
@@ -1306,8 +1329,8 @@ public sealed class FateRunner(
         }
 
         var status = this.navigation.Tick(
-            this.flyingWhenIssued ? MountService.LiftForFlight(live.Position) : live.Position,
-            this.flyingWhenIssued ? MountService.FlightLift : range);
+            landing,
+            this.flyingWhenIssued ? LandOnSpotMeters : range);
 
         switch (status)
         {
@@ -1843,11 +1866,17 @@ public sealed class FateRunner(
             // 近づけない。移動の段階に戻して、中心まで飛ばせる。
             if (MountService.IsFlying && Player.Available)
             {
+                var landing = this.ResolveLandingTarget(current);
+
                 var flat = Vector2.Distance(
                     new Vector2(Player.Position.X, Player.Position.Z),
-                    new Vector2(current.Position.X, current.Position.Z));
+                    new Vector2(landing.X, landing.Z));
 
-                if (flat > LandNearCentreMeters)
+                var height = Player.Position.Y - landing.Y;
+
+                // 真上に来て、下りきるまでは移動を続ける。
+                // ここで降りると、残った高さぶん垂直に落ちることになる。
+                if (flat > LandOnSpotMeters || height > LandFromHeightMeters)
                 {
                     if (this.Step != FateStep.MovingToFate)
                     {
@@ -1859,38 +1888,13 @@ public sealed class FateRunner(
                 }
             }
 
-            // **敵が見えているなら、その高さまで降りる。**
+            // **「敵の上空へ飛ぶ」はやめた。**
             //
-            // 中心に降りても、敵が崖の上にいれば近づけない。
-            // 飛んでいるうちに敵の真上まで行けば、その高さに降りられる。
-            if (MountService.IsFlying
-                && this.scanner.FindNearestMob(current.Id, Player.Position) is { } mob
-                && mob.Distance > MobReachMeters)
-            {
-                // 持ち上げは LiftForFlight に通す。自分で足すと、
-                // 飛べる高さの上限を超えた点を目指してしまう。
-                var above = MountService.LiftForFlight(mob.Position);
-
-                // 引いた経路は積み直さない。積むたびに探索が走り、
-                // そのあいだ進まない。
-                if (this.Step != FateStep.MovingToFate)
-                {
-                    this.SetStep(FateStep.MovingToFate, $"{current.Name} の敵の上へ向かっています");
-
-                    if (this.navigation.BeginMove(above, MobReachMeters, true, out _))
-                    {
-                        this.trace.Decision("敵の上へ飛ぶ", $"最寄りの敵まで {mob.Distance:F0}m");
-                        this.moveIssued = true;
-                        this.flyingWhenIssued = true;
-                    }
-                }
-                else
-                {
-                    this.navigation.Tick(above, MobReachMeters);
-                }
-
-                return;
-            }
+            // 敵の真上へ持ち上げた点を目指していたため、
+            // 敵の頭上まで飛んでから垂直に落ちる形になっていた。
+            // いまは上の判定が、持ち上げていない着地点（敵か中心の地上）を
+            // そのまま目指す。空中から地上へ経路が引かれるので、
+            // 斜めに高度を下げながら近づく。
 
             if (this.Step != FateStep.Landing)
             {
@@ -2172,6 +2176,27 @@ public sealed class FateRunner(
 
         // 辿り着ける点が 1 つも無い。せめてメッシュ上の点を返す。
         return this.vnavmesh.TryNearestPoint(centre, radius, 100f, out var any) ? any : null;
+    }
+
+    /// <summary>
+    /// 着地したい地点を決める。
+    ///
+    /// <b>外周ではなく、中心の地上を狙う。</b>
+    /// 敵が見えていればそちらを優先する。降りた先がそのまま戦う場所になり、
+    /// 敵まで走る距離も無くなる。
+    ///
+    /// 見えていなければ中心。どちらも「立てる場所」に寄せてから返す。
+    /// </summary>
+    private Vector3 ResolveLandingTarget(FateInfo fate)
+    {
+        // 敵が見えているなら、そこへ。敵が立っている場所は必ず立てる。
+        if (this.scanner.FindNearestMob(fate.Id, Player.Position) is { } mob)
+        {
+            return mob.Position;
+        }
+
+        // 見えていなければ中心。湖や崖の上なら、立てる場所へ寄せる。
+        return this.ResolveLandablePoint(fate);
     }
 
     private Vector3 ResolveLandablePoint(FateInfo fate)
