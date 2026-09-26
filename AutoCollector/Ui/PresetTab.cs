@@ -8,6 +8,7 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Colors;
 using Dalamud.Interface.Utility.Raii;
 using ECommons.Configuration;
+using ECommons.DalamudServices;
 using ECommons.GameHelpers;
 
 namespace AutoCollector.Ui;
@@ -1314,6 +1315,27 @@ public sealed class PresetTab(Plugin plugin)
         {
             preset.PreferredNpcDataId = index == 0 ? 0 : npcs[index - 1].NpcDataId;
             changed = true;
+        }
+
+        // **自動のときは、実際にどこが選ばれるかを見せる。**
+        // バイカラージェムのように 24 人の交易商が同じ品を扱う通貨だと、
+        // 「自動」だけでは、どこへ連れて行かれるのか分からない。
+        // 実行時と同じ Resolve を呼んで、その結果を出す。
+        if (preset.PreferredNpcDataId == 0)
+        {
+            var auto = resolver.Resolve(currencyItemId, firstReward, 0);
+            if (auto is not null)
+            {
+                var here = Svc.ClientState.TerritoryType != 0
+                    && auto.TerritoryId == Svc.ClientState.TerritoryType;
+
+                ImGui.TextColored(
+                    ImGuiColors.DalamudGrey,
+                    $"  いまなら {auto.NpcName} — " +
+                    $"{NpcLocationService.GetTerritoryName(auto.TerritoryId)}" +
+                    (here ? "（このエリア内）" : string.Empty) +
+                    $" / {auto.CurrencyCost} 必要");
+            }
         }
 
         this.DrawExtraCostStock(usable);

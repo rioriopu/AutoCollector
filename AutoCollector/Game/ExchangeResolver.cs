@@ -860,6 +860,19 @@ public sealed class ExchangeResolver(
     /// <summary>
     /// 通貨と報酬アイテムから 1 件へ絞る。
     /// preferredNpcDataId が指定されていればそれを最優先する。
+    ///
+    /// <b>指定が無いときの選び方（アイテムから交換先を自動で決める）。</b>
+    /// バイカラージェムのように、同じ品を 24 人の交易商が別々のエリアで扱う通貨がある。
+    /// このとき「行ける場所ならどこでもよい」と選ぶと、目の前に交易商が居るのに
+    /// 別大陸へ飛ばすことがある。F.A.T.E 周回中は特に困る。
+    /// そこで次の順に見る。
+    ///
+    ///   1. いま居るエリアの NPC（移動もテレポも要らないので、これが最善）
+    ///   2. アクセス済みエーテライトのあるエリア（テレポで行ける）
+    ///   3. 経路の単純さ（画面の操作数が少ないほうが失敗しにくい）
+    ///   4. 必要な通貨の少なさ
+    ///
+    /// 1 を足したのがこの版の変更点。2 以降は元のまま。
     /// </summary>
     public ExchangeDefinition? Resolve(uint currencyItemId, uint rewardItemId, uint preferredNpcDataId)
     {
@@ -883,6 +896,9 @@ public sealed class ExchangeResolver(
             }
         }
 
+        // いま居るエリア。取れなければ 0 で、その場合この条件は効かない。
+        var currentTerritory = Svc.ClientState.TerritoryType;
+
         // アクセス済みエーテライトのあるエリアを優先し、次に経路の単純さで選ぶ。
         var reachable = new HashSet<uint>();
         try
@@ -898,7 +914,8 @@ public sealed class ExchangeResolver(
         }
 
         return candidates
-            .OrderByDescending(x => reachable.Contains(x.TerritoryId))
+            .OrderByDescending(x => currentTerritory != 0 && x.TerritoryId == currentTerritory)
+            .ThenByDescending(x => reachable.Contains(x.TerritoryId))
             .ThenBy(x => x.Path)
             .ThenBy(x => x.CurrencyCost)
             .First();
