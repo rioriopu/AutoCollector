@@ -435,6 +435,19 @@ public sealed class PresetTab(Plugin plugin)
             {
                 if (combo)
                 {
+                    // **開いているのに押せない、を記録から追えるようにする。**
+                    //
+                    // プルダウンが開くのに選べない、という報告を推測で追わない。
+                    // 開いていること自体と、押されたかどうかを分けて残す。
+                    if (ECommons.Throttlers.EzThrottler.Throttle("AutoCollector.ComboOpen", 2000))
+                    {
+                        this.plugin.AnomalyLog.Info(
+                            "Ui",
+                            $"通貨の一覧を開いています（{choices.Count} 件・" +
+                            $"どこかの窓にマウス={ImGui.IsWindowHovered(ImGuiHoveredFlags.AnyWindow)}・" +
+                            $"何か掴んでいる={ImGui.IsAnyItemActive()}）");
+                    }
+
                     // **稼ぎ方ごとに見出しを入れる。**
                     // トームストーンとスクリップが混ざって並ぶと、
                     // その通貨で何ができるのかが名前からしか読めない。
@@ -469,11 +482,20 @@ public sealed class PresetTab(Plugin plugin)
                         // 行の先頭位置を控える。名前はこの上に重ねて描く。
                         var rowStart = ImGui.GetCursorPos();
 
-                        if (ImGui.Selectable(
-                                rowId,
-                                i == index,
-                                ImGuiSelectableFlags.None,
-                                new Vector2(0f, ImGui.GetTextLineHeight())))
+                        var rowClicked = ImGui.Selectable(
+                            rowId,
+                            i == index,
+                            ImGuiSelectableFlags.None,
+                            new Vector2(0f, ImGui.GetTextLineHeight()));
+
+                        // 押されたことだけは必ず残す。押せているのに
+                        // 反映されないのか、そもそも押せていないのかを分ける。
+                        if (rowClicked && this.plugin.AnomalyLog is { } clickLog)
+                        {
+                            clickLog.Info("Ui", $"通貨の行を押しました: {choices[i].Name}");
+                        }
+
+                        if (rowClicked)
                         {
                             CurrencyCatalog.Apply(preset, choices[i]);
 
