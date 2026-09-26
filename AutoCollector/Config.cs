@@ -406,6 +406,25 @@ public sealed class Config
 
     /// <summary>レイズを待つ上限（秒）。</summary>
     public int FateRaiseWaitSeconds { get; set; } = 15;
+
+    /// <summary>
+    /// 周回中にベンチャーを見張り、回収できるようになったら街へ戻って回収するか。
+    ///
+    /// 回収が済んだら、離れたマップへ戻って周回を続ける。
+    /// </summary>
+    public bool FateVentureCollectEnabled { get; set; } = true;
+
+    /// <summary>
+    /// ベンチャー回収で行く街のエリア番号。
+    ///
+    /// <b>0 なら未設定。</b>起動後にエーテライトの一覧が読めた時点で
+    /// リムサ・ロミンサ（129）を当てはめる。
+    /// ここに固定値を最初から書かないのは、リムサへアクセスしていない
+    /// キャラクターでは飛べない値になってしまうため。
+    ///
+    /// この街がホームタウンと一致すればデジョン、違えばテレポで行く。
+    /// </summary>
+    public uint FateVentureTownTerritory { get; set; }
 }
 
 /// <summary>FATE 周回中に戦闘不能になったときの動き。</summary>

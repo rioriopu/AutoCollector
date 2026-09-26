@@ -60,6 +60,73 @@ public sealed class AutoRetainerIpc(AnomalyLog anomalyLog) : IpcGateBase("AutoRe
     public bool TryGetMultiModeStatus(out bool enabled)
         => this.TryInvoke("PluginState.GetMultiModeStatus", () => this.Func<bool>("AutoRetainer.PluginState.GetMultiModeStatus").InvokeFunc(), out enabled);
 
+    /// <summary>ベンチャーを回収できるかの判定結果。</summary>
+    public enum VentureState
+    {
+        /// <summary>まだ判断できない。時間を置いてもう一度聞く。</summary>
+        Unknown,
+
+        /// <summary>回収できるベンチャーがある。</summary>
+        Collectable,
+
+        /// <summary>回収できるベンチャーは無い。</summary>
+        None,
+    }
+
+    /// <summary>
+    /// このキャラクターに、いま回収できるベンチャーを持つリテイナーが居るか。
+    ///
+    /// <b>残り秒数を聞く方（GetClosestRetainerVentureSecondsRemaining）は使わない。</b>
+    /// GbrVentureRelay で実機確認した結果、こちらを選ぶ理由が3つある。
+    /// <list type="bullet">
+    /// <item>戻り値が素の bool。<c>long?</c> のような Nullable を跨がないので、
+    ///       値の受け渡しで失敗する余地が無い。秒数を聞く方は実機で
+    ///       「取得に失敗しました」になった</item>
+    /// <item>キャラクターの判定を AutoRetainer 側が行う。こちらが ContentId を
+    ///       読める状態かに左右されない（エリア移動中は 0 になる）</item>
+    /// <item>「回収できる」の線引きが AutoRetainer 本体と完全に同じになる
+    ///       （内部は UnsyncCompensation を使った判定。既定 -5 秒）。
+    ///       自分で「残り0秒」と線を引くと本体とずれる</item>
+    /// </list>
+    /// </summary>
+    public bool TryAnyRetainersAvailable(out bool available)
+        => this.TryInvoke(
+            "PluginState.AreAnyRetainersAvailableForCurrentChara",
+            () => this.Func<bool>("AutoRetainer.PluginState.AreAnyRetainersAvailableForCurrentChara").InvokeFunc(),
+            out available);
+
+    /// <summary>
+    /// 回収できるベンチャーがあるか。
+    ///
+    /// <b>「無い」と「まだ分からない」を区別して返す。</b>
+    /// 一緒にすると、読めなかった一瞬のせいで
+    /// 実際は回収できるのに「ベンチャーがありません」と誤判定する
+    /// （GbrVentureRelay の知見 2-3）。
+    /// </summary>
+    public VentureState CheckCollectableVenture()
+    {
+        if (!this.IsLoaded)
+        {
+            return VentureState.Unknown;
+        }
+
+        if (!this.TryAnyRetainersAvailable(out var available))
+        {
+            return VentureState.Unknown;
+        }
+
+        return available ? VentureState.Collectable : VentureState.None;
+    }
+
+    /// <summary>
+    /// AutoRetainer の処理を中断させる。
+    /// こちらから呼び鈴を閉じる前に呼び、AutoRetainer が動いたままにならないようにする。
+    /// </summary>
+    public bool TryAbort()
+        => this.TryAction(
+            "PluginState.AbortAllTasks",
+            () => this.Func<object>("AutoRetainer.PluginState.AbortAllTasks").InvokeAction());
+
     public bool TryGetSuppressed(out bool suppressed)
         => this.TryInvoke("GetSuppressed", () => this.Func<bool>("AutoRetainer.GetSuppressed").InvokeFunc(), out suppressed);
 

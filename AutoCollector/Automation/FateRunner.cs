@@ -99,7 +99,8 @@ public sealed class FateRunner(
     LifestreamIpc lifestream,
     AetheryteService aetherytes,
     VnavmeshIpc vnavmesh,
-    FateZoneCatalog zoneCatalog)
+    FateZoneCatalog zoneCatalog,
+    VentureWatcher ventures)
 {
     /// <summary>FATE の円へ入ったとみなす距離の余裕。</summary>
     private const float FateArrivalSlack = 5f;
@@ -455,6 +456,13 @@ public sealed class FateRunner(
 
     /// <summary>テレポを断られた時刻。撃ち直す間隔を空けるのに使う。</summary>
     private DateTime teleportRejectedUtc = DateTime.MinValue;
+
+    /// <summary>
+    /// ベンチャー回収から戻る先のマップ。
+    ///
+    /// 回収のために街へ行く前に控える。済んだらここへ戻って周回を続ける。
+    /// </summary>
+    private uint? ventureReturnTo;
     private DateTime waitingSinceUtc = DateTime.MinValue;
     private DateTime deadSinceUtc = DateTime.MinValue;
 
@@ -685,6 +693,7 @@ public sealed class FateRunner(
         this.retreatAttempts = 0;
         this.groundOnlyFate = null;
         this.teleportRejectedUtc = DateTime.MinValue;
+        this.ventureReturnTo = null;
         this.handingIn = false;
         this.handInParked = false;
         this.handInAttempts = 0;
@@ -796,6 +805,10 @@ public sealed class FateRunner(
 
         this.SetStep(FateStep.Waiting, "FATE を探しています");
         this.waitingSinceUtc = DateTime.UtcNow;
+        // **ベンチャーの見張りも一緒に始める。**
+        // 周回と生死を揃える。止めたのに回収へ行き続けるのは制御を失っている。
+        ventures.Start(cfg);
+
         // **実際に回る順を残す。**
         // 画面の並びと巡回順が食い違っていないかを、あとから確かめられるようにする。
         var describedRoute = string.Join(" → ", this.route.Select(NpcLocationService.GetTerritoryName));
@@ -1024,6 +1037,11 @@ public sealed class FateRunner(
         // ReleaseCombat は適用していなければ即座に戻るので、余分な害は無い。
         this.ReleaseCombat();
 
+        // **ベンチャーの見張りも止める。**
+        // 止めたのに回収へ行き続けるのは、利用者から見て制御を失っている。
+        // 回収の途中なら呼び鈴の画面も閉じる。
+        ventures.Stop(reason);
+
         // **進入の段取りも止める。**
         // 世代を進めて、走っている経路探索の結果を捨てさせる。
         // 止めないと、探索が終わった時点で経路を渡してまた動き出す。
@@ -1240,6 +1258,16 @@ public sealed class FateRunner(
             this.deadSinceUtc = DateTime.MinValue;
             this.SetStep(FateStep.Waiting, "FATE を探しています");
             this.waitingSinceUtc = DateTime.UtcNow;
+        }
+
+        // 2.5 ベンチャーの回収。
+        //
+        // **回収へ行っている最中は、周回の処理をどれも走らせない。**
+        // 走らせると、こちらは街へ向かい、周回は FATE へ向かうことになって
+        // 経路を取り合う。
+        if (this.TickVentures(cfg))
+        {
+            return;
         }
 
         // 3. バディの面倒を見る。戦闘外でだけ動く。
@@ -2750,6 +2778,98 @@ public sealed class FateRunner(
             $"{current.Name} {current.Progress}% " +
             $"シンク={(this.scanner.IsPlayerSyncedToFate() ? "済" : "未")} " +
             $"プリセット={(this.bossMod.TryGetActivePreset(out var nowActive) ? nowActive ?? "なし" : "読めず")}");
+    }
+
+    /// <summary>
+    /// ベンチャーの回収を進める。
+    ///
+    /// <b>回収へ行くと決めたら、周回の処理は止める。</b>
+    /// 両方が動くと、こちらは街へ、周回は FATE へ向かって経路を取り合う。
+    ///
+    /// <b>戻る先を控えておく。</b>
+    /// 回収が済んだら、離れたマップへ戻って周回を続ける。
+    /// 交換のための中断（FateEarner）と同じ考え方。
+    /// </summary>
+    /// <returns>回収の処理を進めたら true。呼び出し側は周回の処理へ進まない。</returns>
+    private bool TickVentures(Config cfg)
+    {
+        if (!ventures.Active)
+        {
+            return false;
+        }
+
+        // 回収が済んだ。離れたマップへ戻る。
+        if (ventures.ReadyToResume)
+        {
+            ventures.ResumeWatching();
+
+            if (this.ventureReturnTo is { } back && back != Svc.ClientState.TerritoryType)
+            {
+                this.anomalyLog.Info(
+                    "Venture",
+                    $"回収が済んだので {NpcLocationService.GetTerritoryName(back)} へ戻って周回を続けます");
+
+                // 戻り先を行き先に立てる。テレポは TickTraveling が撃つ。
+                var index = this.route.IndexOf(back);
+                if (index >= 0)
+                {
+                    this.zoneIndex = index;
+                }
+
+                this.travelTargetTerritory = back;
+                this.teleportStartedUtc = DateTime.UtcNow;
+                this.teleportIssued = false;
+                this.teleportRejectedUtc = DateTime.MinValue;
+                this.SetStep(FateStep.Traveling, $"{NpcLocationService.GetTerritoryName(back)} へ戻っています");
+            }
+            else
+            {
+                this.SetStep(FateStep.Waiting, "FATE を探しています");
+                this.waitingSinceUtc = DateTime.UtcNow;
+            }
+
+            this.ventureReturnTo = null;
+            return true;
+        }
+
+        // **いま抜けてよいか。**
+        //
+        // 戦闘中と納品中は抜けない。抜けると参加していた FATE の報酬を落とす。
+        // 「動くはずの段階」で足が止まっているだけなら抜けてよい。
+        var atBreak = !Svc.Condition[ConditionFlag.InCombat]
+                   && !this.handingIn
+                   && this.Step is not (FateStep.Landing or FateStep.Dead or FateStep.Traveling);
+
+        ventures.Tick(cfg, atBreak);
+
+        if (!ventures.Interrupting)
+        {
+            // 見張っているだけ。周回はふつうに続ける。
+            return false;
+        }
+
+        // ここから回収へ向かう。周回は畳む。
+        if (this.ventureReturnTo is null)
+        {
+            // **戻る先を控える。** いま周回しているマップ。
+            this.ventureReturnTo = Svc.ClientState.TerritoryType;
+
+            this.anomalyLog.Info(
+                "Venture",
+                $"ベンチャー回収のため周回を中断します。" +
+                $"戻る先として {NpcLocationService.GetTerritoryName(this.ventureReturnTo.Value)} を控えました");
+
+            // 戦闘とターゲットを畳む。畳まないとマウントに乗れず、街へ行けない。
+            this.ReleaseCombat();
+            this.approach.Cancel("ベンチャー回収へ向かいます");
+            this.navigation.Stop();
+            this.target = null;
+            this.prefetched = null;
+            this.moveIssued = false;
+        }
+
+        this.StatusDetail = ventures.Detail;
+        return true;
     }
 
     /// <summary>

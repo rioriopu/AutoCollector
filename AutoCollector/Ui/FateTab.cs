@@ -50,7 +50,7 @@ public sealed class FateTab(Plugin plugin)
         DrawBuddy(cfg);
         ImGui.Separator();
 
-        DrawMisc(cfg);
+        this.DrawMisc(cfg);
 
         this.DrawTestTools();
     }
@@ -520,7 +520,7 @@ public sealed class FateTab(Plugin plugin)
 
     // ---- その他 ----
 
-    private static void DrawMisc(Config cfg)
+    private void DrawMisc(Config cfg)
     {
         ImGui.Text("その他");
 
@@ -563,6 +563,12 @@ public sealed class FateTab(Plugin plugin)
         }
 
         ImGui.Spacing();
+        ImGui.TextColored(ImGuiColors.DalamudGrey, "ベンチャー回収");
+        ImGui.Indent();
+        this.DrawVentureSettings(cfg);
+        ImGui.Unindent();
+
+        ImGui.Spacing();
         ImGui.TextColored(ImGuiColors.DalamudGrey, "交換との関係");
         ImGui.Indent();
         ImGui.TextWrapped(
@@ -577,6 +583,117 @@ public sealed class FateTab(Plugin plugin)
     /// <summary>
     /// 検証のための仕掛け。
     ///
+    /// <summary>
+    /// ベンチャー回収の設定。
+    ///
+    /// <b>行き先はアクセス済みの一覧から選ばせる。</b>
+    /// エーテライトの ID を直接入れさせると、アクセスしていない街も選べてしまい、
+    /// 実行時に「飛べません」で止まる。一覧から選べた時点で飛べる。
+    /// </summary>
+    private void DrawVentureSettings(Config cfg)
+    {
+        var enabled = cfg.FateVentureCollectEnabled;
+        if (ImGui.Checkbox("ベンチャーが回収できたら街へ戻って回収する", ref enabled))
+        {
+            cfg.FateVentureCollectEnabled = enabled;
+            EzConfig.Save();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(
+                "周回を始めるとベンチャーを見張り、回収できるようになったら\n"
+                + "街へ戻って回収し、元のマップへ戻って周回を続けます。\n"
+                + "\n"
+                + "中断するのは FATE の切れ目です。戦っている最中や、\n"
+                + "納品している間は中断しません。\n"
+                + "\n"
+                + "周回を止めると、見張りも止まります。\n"
+                + "回収そのものは AutoRetainer が行います。");
+        }
+
+        if (!cfg.FateVentureCollectEnabled)
+        {
+            return;
+        }
+
+        var towns = this.plugin.HomeTownService;
+
+        if (!towns.IsListReady())
+        {
+            // **一覧が空でも「未アクセス」と決めつけない。**
+            // コンテンツの中では空になる。
+            ImGui.TextColored(
+                ImGuiColors.DalamudGrey,
+                "エーテライトの一覧を読めません（コンテンツの中かもしれません）");
+
+            return;
+        }
+
+        var list = towns.List();
+
+        if (list.Count == 0)
+        {
+            ImGui.TextColored(
+                ImGuiColors.DalamudOrange,
+                "回収に行ける街がありません。エーテライトを解放してください");
+
+            return;
+        }
+
+        var home = towns.HomeTerritory();
+        var current = cfg.FateVentureTownTerritory;
+        var currentName = towns.Resolve(current)?.Name ?? "（未設定）";
+
+        ImGui.SetNextItemWidth(220f);
+
+        if (ImGui.BeginCombo("回収に行く街", currentName))
+        {
+            for (var i = 0; i < list.Count; i++)
+            {
+                var town = list[i];
+
+                // **一意な名札を付ける。**
+                // 同じ名札を使い回すと、当たり判定がまとまって
+                // 先頭しか選べなくなる（通貨の一覧で実際に起きた）。
+                var label = home != 0 && town.TerritoryId == home
+                    ? $"{town.Name}（ホームタウン・デジョン）##venture_town{i}"
+                    : $"{town.Name}##venture_town{i}";
+
+                if (ImGui.Selectable(label, town.TerritoryId == current))
+                {
+                    cfg.FateVentureTownTerritory = town.TerritoryId;
+                    EzConfig.Save();
+                }
+            }
+
+            ImGui.EndCombo();
+        }
+
+        // どちらで行くかを見せる。料金がかかるかが分かる。
+        if (current != 0)
+        {
+            var method = towns.ChooseMethod(current);
+
+            var describe = method switch
+            {
+                HomeTownService.TravelMethod.Return => "デジョンで行きます（ホームタウンと同じなので無料）",
+                HomeTownService.TravelMethod.Teleport => "テレポで行きます（ホームタウンと違うので料金がかかります）",
+                _ => "いまその街にいます",
+            };
+
+            ImGui.TextColored(ImGuiColors.DalamudGrey, $"  {describe}");
+        }
+
+        if (home == 0)
+        {
+            ImGui.TextColored(
+                ImGuiColors.DalamudGrey,
+                "  ホームタウンを読めないため、テレポで行きます");
+        }
+    }
+
+    /// <summary>
     /// <b>マップの FATE が枯れる状況は、待っていても滅多に起きない。</b>
     /// 次のマップへ移る動きを確かめられないので、
     /// 「見つからない」と思い込ませる口を用意する。

@@ -137,6 +137,15 @@ public sealed class Plugin : IDalamudPlugin
 
     internal MountService MountService { get; private set; } = null!;
 
+    /// <summary>ベンチャー回収で行く街を決める。</summary>
+    internal HomeTownService HomeTownService { get; private set; } = null!;
+
+    /// <summary>呼び鈴まで行って開き、回収を待って閉じる。</summary>
+    internal VentureBellRunner VentureBellRunner { get; private set; } = null!;
+
+    /// <summary>周回中にベンチャーを見張り、回収へ行く。</summary>
+    internal VentureWatcher VentureWatcher { get; private set; } = null!;
+
     /// <summary>FATE 周回の動きを追うための記録。</summary>
     internal FateTrace FateTrace { get; private set; } = null!;
 
@@ -484,6 +493,24 @@ public sealed class Plugin : IDalamudPlugin
         this.FateTokens = new FateTokenService(this.AnomalyLog);
         this.BuddyService = new BuddyService(this.AnomalyLog);
         this.MountService = new MountService(this.AnomalyLog, this.FateTrace);
+        // ベンチャー回収。周回中に見張り、回収できるようになったら街へ戻る。
+        //
+        // **移動の入れ物は専用に持たせる。** 周回側と同じものを渡すと、
+        // 呼び鈴へ歩く経路と FATE へ向かう経路が同じ入れ物を取り合う。
+        this.HomeTownService = new HomeTownService(this.AnomalyLog);
+        this.VentureBellRunner = new VentureBellRunner(
+            this.AnomalyLog,
+            this.FateTrace,
+            new NavigationService(this.AnomalyLog, this.Vnavmesh),
+            this.AutoRetainer);
+        this.VentureWatcher = new VentureWatcher(
+            this.AnomalyLog,
+            this.FateTrace,
+            this.AutoRetainer,
+            this.Lifestream,
+            this.HomeTownService,
+            this.VentureBellRunner);
+
         this.FateRunner = new FateRunner(
             this.AnomalyLog,
             this.FateScanner,
@@ -495,7 +522,8 @@ public sealed class Plugin : IDalamudPlugin
             this.Lifestream,
             this.AetheryteService,
             this.Vnavmesh,
-            this.FateZoneCatalog);
+            this.FateZoneCatalog,
+            this.VentureWatcher);
         this.Fate = new FateEarner(this.FateRunner, this.FateTokens, this.AnomalyLog);
 
         this.Earners.Register(this.Combat);
