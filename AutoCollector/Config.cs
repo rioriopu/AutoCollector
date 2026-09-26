@@ -329,6 +329,18 @@ public sealed class Config
     public bool FateFollowParty { get; set; } = true;
 
     /// <summary>
+    /// 最寄りの FATE を最優先で狙うか。
+    ///
+    /// <b>入れると距離だけで決める。</b>
+    /// ボーナス・達成度・残り時間では割り込ませない。
+    /// 仲間と同じ FATE を狙う設定も、こちらが優先される。
+    ///
+    /// 「近いものから順に潰していく」遊び方のための設定。
+    /// 切ると、従来どおり ボーナス → 達成度 → 残り時間 → 距離 の順で選ぶ。
+    /// </summary>
+    public bool FateNearestFirst { get; set; }
+
+    /// <summary>
     /// マップを移るまでに待つ秒数。
     ///
     /// <b>既定は 0＝待たない。</b>

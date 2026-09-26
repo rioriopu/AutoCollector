@@ -67,6 +67,9 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
     public bool Busy { get; private set; }
 
     private bool moveIssued;
+
+    /// <summary>直前の移動を飛行で頼んだか。引き直すときに同じ条件を使う。</summary>
+    private bool issuedWithFly;
     private int stableFrames;
     private int idleShortFrames;
     private uint startTerritory;
@@ -206,6 +209,7 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
         this.Busy = false;
 
         this.moveIssued = true;
+        this.issuedWithFly = fly;
         failureReason = string.Empty;
         return true;
     }
@@ -298,7 +302,11 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
             this.lastMovementUtc = DateTime.UtcNow;
 
             this.vnavmesh.TryStop();
-            if (!this.vnavmesh.TryMoveCloseTo(destination, false, range, out var accepted) || !accepted)
+
+            // **元の移動のしかたを引き継ぐ。**
+            // ここで fly=false に固定していたため、飛んで向かっていたのに
+            // 引き直した途端、地上の経路になっていた。
+            if (!this.vnavmesh.TryMoveCloseTo(destination, this.issuedWithFly, range, out var accepted) || !accepted)
             {
                 return MoveStatus.Stuck;
             }

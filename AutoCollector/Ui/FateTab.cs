@@ -224,6 +224,25 @@ public sealed class FateTab(Plugin plugin)
             ImGui.Unindent();
         }
 
+        var nearest = cfg.FateNearestFirst;
+        if (ImGui.Checkbox("最寄りの FATE を最優先で狙う", ref nearest))
+        {
+            cfg.FateNearestFirst = nearest;
+            EzConfig.Save();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(
+                "距離だけで決めます。近いものから順に潰していく遊び方向けです。\n"
+                + "\n"
+                + "ボーナス・達成度・残り時間では割り込みません。\n"
+                + "仲間と同じ FATE を狙う設定より、こちらが優先されます。\n"
+                + "\n"
+                + "切ると ボーナス → 達成度 → 残り時間 → 距離 の順で選びます。\n"
+                + "距離はプレイヤーと FATE 中心の水平距離です。");
+        }
+
         var follow = cfg.FateFollowParty;
         if (ImGui.Checkbox("パーティの仲間と同じ FATE を狙う", ref follow))
         {

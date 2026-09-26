@@ -551,6 +551,21 @@ public sealed unsafe class FateScanner(AnomalyLog anomalyLog)
     }
 
     /// <summary>既定の並べ替え。</summary>
+    /// <summary>
+    /// 最寄りを第一にする並べ替え。
+    ///
+    /// <b>距離だけで決める。</b>ボーナス・達成度・残り時間で割り込ませない。
+    /// 「近いものから順に潰していく」という遊び方のための並び。
+    ///
+    /// 距離はプレイヤーと FATE 中心の<b>水平距離</b>で測る。
+    /// 飛行の経路長ではないので、高低差の大きい地形では
+    /// 実際の移動距離と一致しないことがある。
+    /// </summary>
+    public static readonly IReadOnlyList<FateSortKey> NearestFirstSortOrder =
+    [
+        FateSortKey.Distance,
+    ];
+
     public static readonly IReadOnlyList<FateSortKey> DefaultSortOrder =
     [
         FateSortKey.Bonus,
@@ -590,7 +605,12 @@ public sealed unsafe class FateScanner(AnomalyLog anomalyLog)
             // 次の基準（距離など）で並ぶようにする。
             FateSortKey.TimeRemaining => (f => f.RemainingSeconds < UrgentSeconds ? f.RemainingSeconds : UrgentSeconds, false),
 
-            FateSortKey.Distance => (f => Vector3.DistanceSquared(f.Position, playerPos), false),
+            // **水平距離で測る。**
+            // 高さを混ぜると、真下や真上の FATE が実際より遠く見える。
+            // 飛んで向かうので、上下差は移動のしやすさとほぼ関係がない。
+            FateSortKey.Distance => (f => Vector2.DistanceSquared(
+                new Vector2(f.Position.X, f.Position.Z),
+                new Vector2(playerPos.X, playerPos.Z)), false),
             FateSortKey.Level => (f => f.Level, true),
             _ => (_ => 0, false),
         };

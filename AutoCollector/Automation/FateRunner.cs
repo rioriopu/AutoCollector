@@ -1189,6 +1189,21 @@ public sealed class FateRunner(
                         $"{NpcLocationService.GetTerritoryName(destination)} へテレポートできません。落ち着くまで待ちます");
                 }
 
+                // **待ち続けない。**
+                //
+                // ここで return していたため、下のタイムアウト判定に
+                // 一度も届かなかった。拒否され続けると永久に待つ。
+                // 猶予を過ぎたら、次のマップへ送る。
+                if (DateTime.UtcNow - this.teleportStartedUtc > TeleportTimeout)
+                {
+                    this.anomalyLog.Warn(
+                        "Fate",
+                        $"{NpcLocationService.GetTerritoryName(destination)} へテレポートできないため、次のマップへ移ります");
+
+                    this.teleportStartedUtc = DateTime.MinValue;
+                    this.AdvanceZone(cfg);
+                }
+
                 return;
             }
 
@@ -1215,8 +1230,7 @@ public sealed class FateRunner(
             return;
         }
 
-        var next = this.prefetched ?? this.PickNext(cfg);
-        this.prefetched = null;
+        var next = this.ChooseDeparture(cfg);
 
         if (next is null)
         {
@@ -1225,6 +1239,59 @@ public sealed class FateRunner(
         }
 
         this.BeginMoveTo(next);
+    }
+
+    /// <summary>
+    /// 狙える FATE が無い理由を、利用者が対処できる形で書く。
+    ///
+    /// <b>「湧いていない」と「条件に合わない」は違う。</b>
+    /// 前者は待つしかないが、後者は条件をゆるめれば狙える。
+    /// 同じ文言だと、設定を見直せばよいことに気づけない。
+    /// </summary>
+    private string DescribeNoCandidates(Config cfg)
+    {
+        var all = this.scanner.ListAll();
+        var running = all.Count(f => f.State == FateState.Running);
+
+        if (running == 0)
+        {
+            return "FATE が湧くのを待っています";
+        }
+
+        // 湧いてはいる。何で外したかを数える。
+        var tooFar = 0;
+        var tooDone = 0;
+        var skipped = 0;
+
+        foreach (var fate in all)
+        {
+            if (fate.State != FateState.Running)
+            {
+                continue;
+            }
+
+            if (this.blacklist.Contains(fate.Id))
+            {
+                skipped++;
+            }
+            else if (fate.Progress >= 100 || fate.Progress > cfg.FateMaxProgressPct)
+            {
+                tooDone++;
+            }
+            else if (fate.RemainingSeconds < cfg.FateMinTimeRemainingSec)
+            {
+                tooFar++;
+            }
+        }
+
+        var detail = new List<string>();
+        if (tooDone > 0) detail.Add($"進みすぎ {tooDone} 件");
+        if (tooFar > 0) detail.Add($"残り時間不足 {tooFar} 件");
+        if (skipped > 0) detail.Add($"見送り中 {skipped} 件");
+
+        return detail.Count > 0
+            ? $"条件に合う FATE がありません（{running} 件のうち {string.Join("・", detail)}）"
+            : $"条件に合う FATE がありません（{running} 件を確認）";
     }
 
     private void TickWaiting(Config cfg)
@@ -1242,9 +1309,15 @@ public sealed class FateRunner(
             return;
         }
 
+        // **「無い」と「条件に合わない」を分けて出す。**
+        //
+        // 湧いていないのか、湧いているが残り時間や達成度で外したのかで、
+        // 利用者がすべきことが変わる。同じ文言では判断できない。
+        var reason = this.DescribeNoCandidates(cfg);
+
         if (!cfg.FateSwapZoneWhenEmpty || cfg.FateZones.Count <= 1)
         {
-            this.StatusDetail = "FATE が湧くのを待っています";
+            this.StatusDetail = reason;
             return;
         }
 
@@ -1253,7 +1326,7 @@ public sealed class FateRunner(
 
         if (remaining > 0)
         {
-            this.StatusDetail = $"FATE が湧くのを待っています（{remaining} 秒後に次のマップへ）";
+            this.StatusDetail = $"{reason}（{remaining} 秒後に次のマップへ）";
             return;
         }
 
@@ -2494,8 +2567,7 @@ public sealed class FateRunner(
         this.SetStep(FateStep.Leaving, "次の FATE へ向かっています");
 
         // 先に決めてあった FATE があれば、そのまま動き出す。
-        var next = this.prefetched ?? this.PickNext(cfg, exclude: finished.Id);
-        this.prefetched = null;
+        var next = this.ChooseDeparture(cfg, exclude: finished.Id);
 
         if (next is not null)
         {
@@ -2569,6 +2641,45 @@ public sealed class FateRunner(
 
     // ---- 部品 ----
 
+    /// <summary>
+    /// 出発するときの行き先を決める。
+    ///
+    /// <b>先に決めておいた候補を、そのままは使わない。</b>
+    /// 達成度 70% の時点で決めた候補は、出発するころには
+    /// 終わっていたり、条件から外れていたり、もっと近いものが
+    /// 湧いていたりする。出発位置で選び直し、先に決めた候補は
+    /// 「まだ有効ならそれでよい」という程度に扱う。
+    /// </summary>
+    private FateInfo? ChooseDeparture(Config cfg, ushort? exclude = null)
+    {
+        var fresh = this.PickNext(cfg, exclude);
+        var reserved = this.prefetched;
+        this.prefetched = null;
+
+        if (reserved is null)
+        {
+            return fresh;
+        }
+
+        // 先に決めた候補が、いまも同じ湧きのまま選ばれたなら、それでよい。
+        if (fresh is not null && fresh.SpawnKey == reserved.SpawnKey)
+        {
+            return fresh;
+        }
+
+        // 選び直した結果が違うなら、そちらを採る。
+        if (fresh is not null)
+        {
+            this.trace.Decision(
+                "先に決めた候補を取り消す",
+                $"{reserved.Name} → {fresh.Name}（出発時に選び直し）");
+            return fresh;
+        }
+
+        // 選び直して何も無いなら、先に決めた候補も無効になっている。
+        return null;
+    }
+
     private FateInfo? PickNext(Config cfg, ushort? exclude = null)
     {
         if (!Player.Available)
@@ -2592,8 +2703,13 @@ public sealed class FateRunner(
             cfg.FateMaxLevelAbove,
             skipCollect: !cfg.FateCollectEnabled,
             skip,
-            FateScanner.DefaultSortOrder,
-            cfg.FateFollowParty);
+            // 最寄り優先なら距離だけで決める。
+            cfg.FateNearestFirst
+                ? FateScanner.NearestFirstSortOrder
+                : FateScanner.DefaultSortOrder,
+            // 最寄り優先のときは仲間追従で割り込ませない。
+            // 「いちばん近いものへ行く」という約束が崩れるため。
+            cfg.FateFollowParty && !cfg.FateNearestFirst);
     }
 
     /// <summary>見送りの期限が切れた FATE を、また狙えるようにする。</summary>
