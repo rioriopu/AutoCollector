@@ -194,6 +194,14 @@ public sealed class CurrencyCatalog(
             return;
         }
 
+        // **スロット番号は消さない。**
+        //
+        // 消したくなるが、消してはいけない。
+        // <b>スロット 0 は「未設定」ではなく、哲学トームストーンを指す。</b>
+        // 0 にすると TryResolve と IndexOf が、スクリップを選んでいるのに
+        // 哲学を選んでいると読む余地が生まれる。
+        //
+        // 残っていても CurrencyItemId が優先されるので害は無い。
         preset.CurrencyItemId = choice.ItemId;
     }
 

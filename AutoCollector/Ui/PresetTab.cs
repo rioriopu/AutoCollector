@@ -415,8 +415,6 @@ public sealed class PresetTab(Plugin plugin)
 
                     for (var i = 0; i < choices.Count; i++)
                     {
-                        using var id = ImRaii.PushId($"cur{i}");
-
                         var kind = this.plugin.Earners.KindNameFor(choices[i].ItemId);
                         if (kind != lastKind)
                         {
@@ -424,7 +422,19 @@ public sealed class PresetTab(Plugin plugin)
                             ImGui.TextColored(ImGuiColors.DalamudViolet, kind);
                         }
 
-                        if (ImGui.Selectable("##row", i == index))
+                        // **行ごとに違う名前を付ける。**
+                        //
+                        // 以前は全行を "##row" にして PushId で分けていたが、
+                        // 幅がゼロの項目になるため当たり判定が潰れ、
+                        // 押しても反応しない行ができていた。
+                        // 名前を隠したいだけなら "##" の後ろに番号を足せばよい。
+                        // 番号は名前ではなく通貨で作る。並びが変わっても、
+                        // 同じ通貨には同じ id が付く。
+                        var rowId = choices[i].TomestonesRowId != 0
+                            ? $"##cur_slot{choices[i].TomestonesRowId}"
+                            : $"##cur_item{choices[i].ItemId}";
+
+                        if (ImGui.Selectable(rowId, i == index))
                         {
                             CurrencyCatalog.Apply(preset, choices[i]);
 
