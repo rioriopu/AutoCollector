@@ -445,10 +445,23 @@ public sealed class FateRunner(
         this.appliedPresetName = string.Empty;
         this.buddy.Reset();
 
-        // いまいるマップが選択に含まれていれば、そこから始める。
+        // **一覧の上から順に回る。**
+        //
+        // 以前は「いまいるマップが一覧にあれば、そこから始める」としていた。
+        // そのため始めた場所によって巡る順番が変わり、
+        // 画面に並べた順とは違う動きになっていた。
+        //
+        // 並べた順がそのまま巡る順になるほうが、見たとおりで分かりやすい。
+        this.zoneIndex = 0;
+
+        // 先頭のマップに居なければ、まずそこへ向かう。
+        // 行き先を控えておかないと「一覧のマップに居る」と見なされ、
+        // いま居るマップで回り始めてしまう。
         var here = Svc.ClientState.TerritoryType;
-        var index = cfg.FateZones.IndexOf(here);
-        this.zoneIndex = index >= 0 ? index : 0;
+        var first = cfg.FateZones[0];
+
+        this.travelTargetTerritory = here == first ? 0 : first;
+        this.teleportIssued = false;
 
         this.SetStep(FateStep.Waiting, "FATE を探しています");
         this.waitingSinceUtc = DateTime.UtcNow;
@@ -2418,24 +2431,23 @@ public sealed class FateRunner(
             return;
         }
 
-        // **いまいるマップは飛ばす。**
-        // 一覧の並び順によっては、次の番号が「いまいるマップ」になる。
-        // そこへテレポしても何も変わらず、FATE が無いまま待ち続ける。
+        // **並べた順に、次のマップへ移る。**
+        //
+        // 一覧の末尾まで行ったら先頭へ戻る。飛ばさない。
+        // ただし「次がいまいるマップ」のときだけは、移っても何も変わらないので
+        // もう 1 つ進める（一覧に同じマップが並んでいる場合など）。
         var here = Svc.ClientState.TerritoryType;
-        uint next = 0;
 
-        for (var i = 0; i < cfg.FateZones.Count; i++)
+        this.zoneIndex = (this.zoneIndex + 1) % cfg.FateZones.Count;
+
+        if (cfg.FateZones[this.zoneIndex] == here)
         {
             this.zoneIndex = (this.zoneIndex + 1) % cfg.FateZones.Count;
-
-            if (cfg.FateZones[this.zoneIndex] != here)
-            {
-                next = cfg.FateZones[this.zoneIndex];
-                break;
-            }
         }
 
-        if (next == 0)
+        var next = cfg.FateZones[this.zoneIndex];
+
+        if (next == here)
         {
             // 一覧がいまいるマップだけだった。移りようがない。
             this.waitingSinceUtc = DateTime.UtcNow;
