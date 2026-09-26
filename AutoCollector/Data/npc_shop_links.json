@@ -83,7 +83,7 @@
     "判定は SharedFateRankService が AgentFateProgress から読む。",
     "マップの顔ぶれと上限ランクは FateProgressUI シート（18 行）にある。"
   ],
-  "verifiedGameVersion": "2026.09.15",
+  "verifiedGameVersion": "2026.09.27",
   "links": [
     {
       "npcId": 1027385,

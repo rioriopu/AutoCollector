@@ -115,6 +115,84 @@ public static class DataFileLoader
 {
     private const string ResourcePrefix = "AutoCollector.Data.";
 
+    /// <summary>
+    /// 同梱データのほうが新しければ入れ替える。
+    ///
+    /// 比べるのは JSON の <c>verifiedGameVersion</c>。
+    /// この印を持たないファイルは、版が分からないので触らない。
+    ///
+    /// 入れ替えるときは、いま入っているものを
+    /// <c>〜.backup-日付.json</c> として残す。
+    /// 手で書き換えた人の内容を、黙って消さないため。
+    /// </summary>
+    private static void UpgradeIfOutdated(string path, string fileName, AnomalyLog anomalyLog)
+    {
+        try
+        {
+            var embedded = ReadEmbedded(fileName);
+            if (embedded is null)
+            {
+                return;
+            }
+
+            var installedVersion = ReadVersion(File.ReadAllText(path));
+            var embeddedVersion = ReadVersion(embedded);
+
+            // どちらかに印が無ければ、比べようがないので触らない。
+            if (string.IsNullOrEmpty(installedVersion) || string.IsNullOrEmpty(embeddedVersion))
+            {
+                return;
+            }
+
+            // 文字列の比較で足りる。印は「2026.09.15」の形なので、
+            // 辞書順がそのまま新しい順になる。
+            if (string.CompareOrdinal(embeddedVersion, installedVersion) <= 0)
+            {
+                return;
+            }
+
+            var backup = Path.Combine(
+                Path.GetDirectoryName(path)!,
+                $"{Path.GetFileNameWithoutExtension(path)}.backup-{installedVersion}.json");
+
+            if (!File.Exists(backup))
+            {
+                File.Copy(path, backup);
+            }
+
+            File.WriteAllText(path, embedded);
+
+            anomalyLog.Info(
+                "Data",
+                $"{fileName} を {installedVersion} から {embeddedVersion} へ更新しました" +
+                $"（前の内容は {Path.GetFileName(backup)} に残しています）");
+        }
+        catch (Exception ex)
+        {
+            anomalyLog.Warn("Data", $"{fileName} の更新を確かめられませんでした: {ex.Message}");
+        }
+    }
+
+    /// <summary>JSON から verifiedGameVersion を取り出す。無ければ空。</summary>
+    private static string ReadVersion(string json)
+    {
+        try
+        {
+            var parsed = JsonConvert.DeserializeObject<VersionProbe>(json);
+            return parsed?.VerifiedGameVersion ?? string.Empty;
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
+    private sealed class VersionProbe
+    {
+        [JsonProperty("verifiedGameVersion")]
+        public string? VerifiedGameVersion { get; set; }
+    }
+
     public static string GetDataDirectory()
     {
         var dir = Path.Combine(EzConfig.GetPluginConfigDirectory(), "Data");
@@ -140,6 +218,23 @@ public static class DataFileLoader
                 {
                     File.WriteAllText(path, defaults);
                 }
+            }
+            else
+            {
+                // **同梱データが新しければ入れ替える。**
+                //
+                // 展開したあとは触らない作りにしていたため、
+                // こちらがデータを直しても、すでに入っている人には
+                // 古いまま使われ続けていた。
+                //
+                // 実際に起きた例（2026-09-27）：バイカラージェムの
+                // 交換所を 1 人から 24 人へ増やしたのに、設定ディレクトリに
+                // 残っていた 1 人ぶんの古い表が読まれ、
+                // 新しい画面が何も出なかった。
+                //
+                // 版で比べる。書き換えた人の内容を黙って消さないよう、
+                // 古いものは名前を変えて残す。
+                UpgradeIfOutdated(path, fileName, anomalyLog);
             }
 
             if (!File.Exists(path))

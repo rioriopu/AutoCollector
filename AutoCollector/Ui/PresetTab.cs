@@ -1531,6 +1531,27 @@ public sealed class PresetTab(Plugin plugin)
         var areas = this.BuildAreas(currencyItemId);
         if (areas.Count == 0)
         {
+            // **なぜ出ないのかを追えるようにする。**
+            // 条件がいくつも重なっているため、出ない理由を推測で
+            // 探すと時間がかかる。実際の数を記録に残す。
+            if (ECommons.Throttlers.EzThrottler.Throttle("AutoCollector.FateArea", 5000))
+            {
+                var vendors = resolver.LiveResults
+                    .GroupBy(x => x.NpcDataId)
+                    .Select(g => g.First())
+                    .ToList();
+
+                var zones = this.plugin.SharedFateRankService.ZoneGroups;
+
+                this.plugin.AnomalyLog.Info(
+                    "Ui",
+                    $"交換エリアを出せません: 通貨={currencyItemId} " +
+                    $"定義={resolver.Results.Count}件 座標つき={resolver.LiveResults.Count}件 " +
+                    $"交易商={vendors.Count}人 マップ組={zones.Count}組 " +
+                    $"結びつき={links.Count}件 " +
+                    $"いる場所=[{string.Join(",", vendors.Select(v => v.TerritoryId).Distinct().OrderBy(x => x))}]");
+            }
+
             return;
         }
 
