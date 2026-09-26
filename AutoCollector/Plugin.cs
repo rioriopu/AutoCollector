@@ -494,7 +494,8 @@ public sealed class Plugin : IDalamudPlugin
             this.FateTrace,
             this.Lifestream,
             this.AetheryteService,
-            this.Vnavmesh);
+            this.Vnavmesh,
+            this.FateZoneCatalog);
         this.Fate = new FateEarner(this.FateRunner, this.FateTokens, this.AnomalyLog);
 
         this.Earners.Register(this.Combat);

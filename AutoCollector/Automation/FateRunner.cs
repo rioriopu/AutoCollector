@@ -81,7 +81,8 @@ public sealed class FateRunner(
     FateTrace trace,
     LifestreamIpc lifestream,
     AetheryteService aetherytes,
-    VnavmeshIpc vnavmesh)
+    VnavmeshIpc vnavmesh,
+    FateZoneCatalog zoneCatalog)
 {
     /// <summary>FATE の円へ入ったとみなす距離の余裕。</summary>
     private const float FateArrivalSlack = 5f;
@@ -248,6 +249,9 @@ public sealed class FateRunner(
     /// </summary>
     private const float LandHysteresisMeters = 5f;
 
+    /// <summary>終えた FATE の円から出るとき、半径にどれだけ足して離れるか。</summary>
+    private const float RetreatMarginMeters = 10f;
+
     /// <summary>テレポートが終わるのを待つ上限。</summary>
     private static readonly TimeSpan TeleportTimeout = TimeSpan.FromSeconds(60);
 
@@ -272,6 +276,7 @@ public sealed class FateRunner(
     private readonly LifestreamIpc lifestream = lifestream;
     private readonly AetheryteService aetherytes = aetherytes;
     private readonly VnavmeshIpc vnavmesh = vnavmesh;
+    private readonly FateZoneCatalog zoneCatalog = zoneCatalog;
 
     /// <summary>
     /// FATE ごとに 1 度だけ求めた、降りられる座標。
@@ -493,6 +498,27 @@ public sealed class FateRunner(
         // 画面に並べた順とは違う動きになっていた。
         //
         // 並べた順がそのまま巡る順になるほうが、見たとおりで分かりやすい。
+        //
+        // **開始時に、保存の並びを画面の並びへ揃え直す。**
+        // 設定は選んだ順に足されるため、以前に選んだものは押した順のまま。
+        // ここで直せば、古い設定でも画面どおりの順で回る。
+        var ordered = this.zoneCatalog.SortByDisplayOrder(cfg.FateZones);
+
+        if (!ordered.SequenceEqual(cfg.FateZones))
+        {
+            cfg.FateZones.Clear();
+            cfg.FateZones.AddRange(ordered);
+            ECommons.Configuration.EzConfig.Save();
+
+            this.anomalyLog.Info("Fate", "周回するマップの並びを、画面の順へ整えました");
+        }
+
+        if (cfg.FateZones.Count == 0)
+        {
+            reason = "周回するマップを選んでください";
+            return false;
+        }
+
         this.zoneIndex = 0;
 
         // 先頭のマップに居なければ、まずそこへ向かう。
@@ -994,6 +1020,27 @@ public sealed class FateRunner(
                     return;
                 }
             }
+        }
+
+        // **達成度 100% は、どの段階より先に見る。**
+        //
+        // 以前は降下（Landing）の処理が先にあり、降りている最中は
+        // 100% の判定を通らなかった。他の人が終わらせた FATE へ
+        // 降り続け、着地してから初めて「もう終わっている」と気づく。
+        //
+        // 降りている最中でも、終わったと分かった時点で離脱へ移る。
+        if (this.Step is FateStep.Landing or FateStep.Fighting
+            && this.target is { } landingTarget
+            && this.scanner.GetById(landingTarget.Id) is { } liveTarget
+            && liveTarget.Id != this.leftFateId
+            && (liveTarget.Progress >= 100 || liveTarget.State != FateState.Running))
+        {
+            this.trace.Decision(
+                "終わったので離れる",
+                $"{liveTarget.Name} 進捗{liveTarget.Progress}% 段階={this.Step}");
+
+            this.LeaveFate(cfg, liveTarget);
+            return;
         }
 
         // **降りている最中はここで完結させる。**
@@ -2456,8 +2503,60 @@ public sealed class FateRunner(
             return;
         }
 
+        // **次が無くても、円の外へは出る。**
+        //
+        // 以前はその場で待っていた。終わった FATE の円の中に立ったままなので、
+        // 利用者からは「終わったのに動かない」に見える。
+        // 納品 FATE の報酬を待つ場合も、待つ場所は円の外でよい。
+        this.RetreatFromCircle(finished);
+
         this.SetStep(FateStep.Waiting, "FATE を探しています");
         this.waitingSinceUtc = DateTime.UtcNow;
+    }
+
+    /// <summary>
+    /// 終えた FATE の円から出る。
+    ///
+    /// <b>次の FATE が無くても、その場に留まらない。</b>
+    /// 円の中に立っていると、終わったのに動いていないように見える。
+    /// 納品 FATE の報酬待ちも、円の外で待てばよい。
+    ///
+    /// 出る先はメッシュに聞く。聞けなければ、中心から離れる向きへ素直に出る。
+    /// </summary>
+    private void RetreatFromCircle(FateInfo finished)
+    {
+        if (!Player.Available)
+        {
+            return;
+        }
+
+        var here = Player.Position;
+
+        // 中心から自分へ向かう向き。円の外はその延長線上。
+        var away = new Vector3(here.X - finished.Position.X, 0f, here.Z - finished.Position.Z);
+        var length = away.Length();
+
+        // 中心とほぼ同じ場所にいるなら、向きが決まらない。適当な向きで出る。
+        var direction = length > 1f
+            ? away / length
+            : new Vector3(1f, 0f, 0f);
+
+        var margin = MathF.Max(finished.Radius, 20f) + RetreatMarginMeters;
+        var outside = finished.Position + (direction * margin);
+
+        // 立てる場所へ寄せる。寄せられなければそのまま向かう。
+        if (this.vnavmesh.TryIsReady(out var ready) && ready &&
+            this.vnavmesh.TryNearestPointReachable(outside, 30f, 100f, out var onMesh) &&
+            onMesh is { } spot)
+        {
+            outside = spot;
+        }
+
+        this.trace.Decision(
+            "円の外へ出る",
+            $"{finished.Name} 半径{finished.Radius:F0}m → ({outside.X:F0},{outside.Y:F0},{outside.Z:F0})");
+
+        this.navigation.BeginMove(outside, 5f, MountService.IsFlying, out _);
     }
 
     private void FinishCurrentFate()

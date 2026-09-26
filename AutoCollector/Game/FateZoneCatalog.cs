@@ -97,6 +97,37 @@ public sealed class FateZoneCatalog(AnomalyLog anomalyLog)
         }
     }
 
+    /// <summary>
+    /// 選んだマップを、画面に並んでいる順へ整える。
+    ///
+    /// <b>保存の順は、押した順になっている。</b>
+    /// 設定は `FateZones.Add` で足していくので、先にコザマル・カを選んでから
+    /// 拡張をまとめて選ぶと、コザマル・カが先頭に残る。
+    /// 巡回は保存の順で回るため、画面に並べた順とは違う巡り方になっていた。
+    ///
+    /// 画面の順（拡張の番号順 → その中は TerritoryId 順）へ揃える。
+    /// 一覧に無いマップ（選択後に対象から外れたもの）は落とす。
+    /// 重複も取り除く。
+    /// </summary>
+    public IReadOnlyList<uint> SortByDisplayOrder(IEnumerable<uint> chosen)
+    {
+        var want = new HashSet<uint>(chosen);
+        var ordered = new List<uint>(want.Count);
+
+        foreach (var ex in this.ListExpansions())
+        {
+            foreach (var zone in ex.Zones)
+            {
+                if (want.Remove(zone.TerritoryId))
+                {
+                    ordered.Add(zone.TerritoryId);
+                }
+            }
+        }
+
+        return ordered;
+    }
+
     /// <summary>TerritoryId から表示名を引く。</summary>
     public string NameOf(uint territoryId)
     {

@@ -133,6 +133,22 @@ public sealed class FateTab(Plugin plugin)
 
     // ---- 周回するマップ ----
 
+    /// <summary>
+    /// 選んだマップを、画面に並んでいる順へ整える。
+    ///
+    /// <b>押した順のままにしない。</b>
+    /// 設定は選ぶたびに末尾へ足されるので、先に 1 つ選んでから
+    /// 拡張をまとめて選ぶと、その 1 つが先頭に残る。
+    /// 巡回は保存の順で回るため、画面の並びと違う巡り方になっていた。
+    /// </summary>
+    private void NormalizeZoneOrder(Config cfg)
+    {
+        var sorted = this.plugin.FateZoneCatalog.SortByDisplayOrder(cfg.FateZones);
+
+        cfg.FateZones.Clear();
+        cfg.FateZones.AddRange(sorted);
+    }
+
     private void DrawZoneSelection(Config cfg)
     {
         ImGui.Text("周回するマップ");
@@ -175,6 +191,7 @@ public sealed class FateTab(Plugin plugin)
                     }
                 }
 
+                this.NormalizeZoneOrder(cfg);
                 EzConfig.Save();
             }
 
@@ -199,6 +216,7 @@ public sealed class FateTab(Plugin plugin)
                         cfg.FateZones.Remove(z.TerritoryId);
                     }
 
+                    this.NormalizeZoneOrder(cfg);
                     EzConfig.Save();
                 }
             }
