@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
@@ -129,7 +129,6 @@ public sealed unsafe class FateScanner(AnomalyLog anomalyLog)
     /// <summary>直近の読み取りで例外が出たか。UI の表示に使う。</summary>
     public string? LastError { get; private set; }
 
-    /// <summary>いまのエリアに湧いている FATE をすべて読む。読めなければ空を返す。</summary>
     /// <summary>
     /// 検証用に、FATE が 1 つも無いことにする。
     ///
@@ -142,6 +141,7 @@ public sealed unsafe class FateScanner(AnomalyLog anomalyLog)
     /// </summary>
     public bool PretendEmpty { get; set; }
 
+    /// <summary>いまのエリアに湧いている FATE をすべて読む。読めなければ空を返す。</summary>
     public IReadOnlyList<FateInfo> ListAll()
     {
         // 検証用。見つからないことにする。
@@ -231,6 +231,37 @@ public sealed unsafe class FateScanner(AnomalyLog anomalyLog)
         {
             this.LastError = ex.Message;
             return null;
+        }
+    }
+
+    /// <summary>
+    /// 納品 FATE で、納品できるだけの品を持っているか。
+    ///
+    /// <b>持っていれば BMR が納品へ向かう。</b>
+    /// BMR の FateUtils は 10 個たまると納品 NPC を狙い、移動を強制する。
+    /// そのあいだにこちらから経路を積むと引っ張り合いになるので、
+    /// 見分けて手を引くために使う。
+    ///
+    /// 品の番号は Fate シートの EventItem から引く（BMR と同じ）。
+    /// 集めた品は鞄ではなくキーアイテム欄に入る。
+    /// </summary>
+    public bool HasHandInItems(ushort fateId, int required = 10)
+    {
+        try
+        {
+            var item = Svc.Data.GetExcelSheet<Lumina.Excel.Sheets.Fate>()?.GetRowOrDefault(fateId)?.EventItem.RowId ?? 0;
+            if (item == 0)
+            {
+                return false;
+            }
+
+            var inventory = FFXIVClientStructs.FFXIV.Client.Game.InventoryManager.Instance();
+            return inventory is not null && inventory->GetInventoryItemCount(item) >= required;
+        }
+        catch (Exception ex)
+        {
+            this.LastError = ex.Message;
+            return false;
         }
     }
 

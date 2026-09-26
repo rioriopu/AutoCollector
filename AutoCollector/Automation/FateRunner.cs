@@ -1901,6 +1901,27 @@ public sealed class FateRunner(
             return;
         }
 
+        // **納品 FATE の納品中は、こちらから動かさない。**
+        //
+        // BMR の FateUtils は、集めた品が 10 個たまると納品 NPC を狙い、
+        // そこへ向けて移動を強制する（Hints.ForcedMovement）。
+        // こちらが同時に経路を積むと、2 つの力が引っ張り合って
+        // NPC の前でガクガク動き、何度も話しかけることになる
+        // （2026-09-26 実測。「彼らの想いで」でアンロスト・セントリーGX に
+        // 繰り返し話しかけていた）。
+        //
+        // 納品は BMR のほうが段取りを知っている。任せる。
+        if (fate.IsCollect && this.scanner.HasHandInItems(fate.Id))
+        {
+            if (this.approaching)
+            {
+                this.StopApproach();
+                this.trace.Decision("近づくのをやめた", "納品は BossMod Reborn に任せる");
+            }
+
+            return;
+        }
+
         var nearest = this.scanner.FindNearestMob(fate.Id, Player.Position);
 
         if (nearest is not { } mob)
@@ -1949,16 +1970,25 @@ public sealed class FateRunner(
             // 大きく離れたときだけ引き直す。
             var moved = Vector3.Distance(destination, this.approachTarget);
 
-            if (moved <= ApproachRepathMeters &&
-                this.navigation.Tick(this.approachTarget, MobReachMeters) is MoveStatus.Moving)
+            // **間隔は、動いているかに関わらず空ける。**
+            //
+            // 以前は「動いているなら引き直さない」としていた。
+            // ところが引っかかって動けていないときこそ Tick が Moving を返さず、
+            // 毎フレーム引き直すことになっていた。
+            // 引き直すたびに足が止まるので、いつまでも動き出せない
+            // （2026-09-26 実測。160 ミリ秒ごとに「経路 1 回目」を繰り返し、
+            // その間 1m しか進んでいなかった）。
+            //
+            // 進んでいないなら、なおさら間を置く。
+            if (DateTime.UtcNow - this.approachIssuedUtc < ApproachRepathInterval)
             {
+                this.navigation.Tick(this.approachTarget, MobReachMeters);
                 return;
             }
 
-            // 引き直す間隔も空ける。経路探索そのものが重く、
-            // 続けて投げると足が止まったままになる。
-            if (moved > ApproachRepathMeters &&
-                DateTime.UtcNow - this.approachIssuedUtc < ApproachRepathInterval &&
+            // 間隔が空いていても、狙う先がほとんど動いていないなら引き直さない。
+            // 同じ場所へ何度も引き直しても結果は変わらない。
+            if (moved <= ApproachRepathMeters &&
                 this.navigation.Tick(this.approachTarget, MobReachMeters) is MoveStatus.Moving)
             {
                 return;
