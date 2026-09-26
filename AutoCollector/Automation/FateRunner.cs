@@ -252,6 +252,9 @@ public sealed class FateRunner(
     /// <summary>終えた FATE の円から出るとき、半径にどれだけ足して離れるか。</summary>
     private const float RetreatMarginMeters = 10f;
 
+    /// <summary>円の外へ出るのを待つ上限。出られなくても周回は続ける。</summary>
+    private static readonly TimeSpan RetreatTimeout = TimeSpan.FromSeconds(15);
+
     /// <summary>テレポートが終わるのを待つ上限。</summary>
     private static readonly TimeSpan TeleportTimeout = TimeSpan.FromSeconds(60);
 
@@ -333,6 +336,12 @@ public sealed class FateRunner(
 
     /// <summary>完了として数えた湧き。同じものを二度数えないために覚える。</summary>
     private (ushort Id, int Start)? countedSpawn;
+
+    /// <summary>いま円の外へ出ようとしている FATE。出られたら消す。</summary>
+    private FateInfo? retreatFrom;
+
+    /// <summary>退避を始めた時刻。出られなくても待ち続けないために使う。</summary>
+    private DateTime retreatSinceUtc = DateTime.MinValue;
 
     /// <summary>
     /// 報酬待ちの納品 FATE。着地するまでマップを離れない。
@@ -472,6 +481,7 @@ public sealed class FateRunner(
         this.prefetched = null;
         this.pendingRewards.Clear();
         this.countedSpawn = null;
+        this.retreatFrom = null;
         this.leftFateId = null;
         this.landable = null;
         this.landingRefuge = null;
@@ -870,10 +880,19 @@ public sealed class FateRunner(
         }
 
         // 戻る先が選択に含まれていれば、そこから再開する。
+        //
+        // **行き先も一緒に直す。**
+        // Start は「先頭のマップへ向かう」を立てる。添字だけ直しても
+        // 行き先は先頭のままなので、いったん先頭へ向かう状態を通ってしまう。
         var index = Plugin.C.FateZones.IndexOf(territoryId);
         if (index >= 0)
         {
             this.zoneIndex = index;
+
+            // すでに戻り先に居るなら移動は要らない。
+            this.travelTargetTerritory =
+                Svc.ClientState.TerritoryType == territoryId ? 0 : territoryId;
+            this.teleportIssued = false;
         }
 
         // 座標まで戻すかは設定次第。エリアへは必ず戻るので、
@@ -1065,6 +1084,14 @@ public sealed class FateRunner(
         if (this.Step == FateStep.Landing)
         {
             this.TickLanding(cfg);
+            return;
+        }
+
+        // **円の外へ出ている最中は、それを見届ける。**
+        // ここを作らないと、積んだ退避の経路を誰も監視しない。
+        if (this.Step == FateStep.Leaving && this.retreatFrom is not null)
+        {
+            this.TickLeaving(cfg);
             return;
         }
 
@@ -2624,8 +2651,85 @@ public sealed class FateRunner(
         // 以前はその場で待っていた。終わった FATE の円の中に立ったままなので、
         // 利用者からは「終わったのに動かない」に見える。
         // 納品 FATE の報酬を待つ場合も、待つ場所は円の外でよい。
-        this.RetreatFromCircle(finished);
+        // 退避の経路を積み、Leaving のまま見届ける。
+        // ここで Waiting にすると、積んだ経路を誰も監視しない。
+        if (this.RetreatFromCircle(finished))
+        {
+            this.retreatFrom = finished;
+            this.retreatSinceUtc = DateTime.UtcNow;
+            this.SetStep(FateStep.Leaving, $"{finished.Name} の範囲外へ退避しています");
+            return;
+        }
 
+        // 経路を積めなかった。退避は諦めて探索へ戻る。
+        this.SetStep(FateStep.Waiting, "FATE を探しています");
+        this.waitingSinceUtc = DateTime.UtcNow;
+    }
+
+    /// <summary>
+    /// 円の外へ出るのを見届ける。
+    ///
+    /// <b>経路を積んだだけでは出られたことにならない。</b>
+    /// 以前はここを作らず、積んだ直後に Waiting へ移していた。
+    /// Waiting は移動を監視しないので、経路が引けなくても、
+    /// 途中で引っかかっても、誰も気づかないままだった。
+    /// </summary>
+    private void TickLeaving(Config cfg)
+    {
+        if (this.retreatFrom is not { } finished || !Player.Available)
+        {
+            this.SetStep(FateStep.Waiting, "FATE を探しています");
+            this.waitingSinceUtc = DateTime.UtcNow;
+            this.retreatFrom = null;
+            return;
+        }
+
+        // 円の外へ出られたか。出られていれば、それでよい。
+        var flat = Vector2.Distance(
+            new Vector2(Player.Position.X, Player.Position.Z),
+            new Vector2(finished.Position.X, finished.Position.Z));
+
+        var outside = MathF.Max(finished.Radius, 20f) + RetreatMarginMeters;
+
+        if (flat >= outside)
+        {
+            this.trace.Decision("円の外へ出た", $"{finished.Name} 中心から {flat:F0}m");
+            this.navigation.Stop();
+            this.FinishRetreat();
+            return;
+        }
+
+        // 待ちすぎない。出られなくても周回は続ける。
+        if (DateTime.UtcNow - this.retreatSinceUtc > RetreatTimeout)
+        {
+            this.trace.Trouble(
+                "円の外へ出られない",
+                $"{finished.Name} 中心から {flat:F0}m（{outside:F0}m まで離れたかった）");
+
+            this.navigation.Stop();
+            this.FinishRetreat();
+            return;
+        }
+
+        // 移動を見届ける。引けていなければ、その場で終わりにする。
+        var status = this.navigation.Tick(finished.Position, outside);
+
+        if (status is MoveStatus.Failed or MoveStatus.Stuck)
+        {
+            this.trace.Trouble("退避できない", $"{finished.Name}（{status}）");
+            this.navigation.Stop();
+            this.FinishRetreat();
+            return;
+        }
+
+        this.StatusDetail = $"{finished.Name} の範囲外へ退避しています（中心から {flat:F0}m）";
+    }
+
+    /// <summary>退避を終えて、次を探す段階へ戻す。</summary>
+    private void FinishRetreat()
+    {
+        this.retreatFrom = null;
+        this.moveIssued = false;
         this.SetStep(FateStep.Waiting, "FATE を探しています");
         this.waitingSinceUtc = DateTime.UtcNow;
     }
@@ -2639,11 +2743,11 @@ public sealed class FateRunner(
     ///
     /// 出る先はメッシュに聞く。聞けなければ、中心から離れる向きへ素直に出る。
     /// </summary>
-    private void RetreatFromCircle(FateInfo finished)
+    private bool RetreatFromCircle(FateInfo finished)
     {
         if (!Player.Available)
         {
-            return;
+            return false;
         }
 
         var here = Player.Position;
@@ -2672,7 +2776,7 @@ public sealed class FateRunner(
             "円の外へ出る",
             $"{finished.Name} 半径{finished.Radius:F0}m → ({outside.X:F0},{outside.Y:F0},{outside.Z:F0})");
 
-        this.navigation.BeginMove(outside, 5f, MountService.IsFlying, out _);
+        return this.navigation.BeginMove(outside, 5f, MountService.IsFlying, out _);
     }
 
     private void FinishCurrentFate()

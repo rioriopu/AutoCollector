@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using AutoCollector.Diagnostics;
 using AutoCollector.Ipc;
 
@@ -116,14 +116,6 @@ public static class FateCombatPreset
     /// <summary>
     /// このプリセットが必ず持っていなければならない設定。
     ///
-    /// <b>ここが欠けていると FATE 周回が成り立たない。</b>
-    /// 古い版で作ったプリセットが残っていると、直したはずの設定が
-    /// 効かないまま動く。実際にそうなった（Sync を None で作っていた版が
-    /// 残り、レベルシンクが入らなかった・2026-09-25）。
-    /// </summary>
-    /// <summary>
-    /// このプリセットが必ず持っていなければならない設定。
-    ///
     /// <b>既定値のトラックはここに入れない。</b>
     /// BMR は「その enum の既定値（＝0 番）」のトラックを書き出さない。
     /// FateUtils の Flag は <c>{ Enabled, Disabled }</c> で <b>Enabled が 0</b> なので、
@@ -134,6 +126,17 @@ public static class FateCombatPreset
     /// Collect = Disabled（1 番）と Sync = Enable（None が 0 番なので 1 番）は
     /// 既定値ではないため、書き出される。
     /// </summary>
+    /// <summary>
+    /// 入っていてはいけない設定。
+    ///
+    /// 既定値のトラックは、正しい設定なら JSON に現れない。
+    /// 現れているということは、明示的に既定と違う値が保存されている。
+    /// </summary>
+    private static readonly (string Track, string Option)[] Forbidden =
+    [
+        ("Handin", "Disabled"),
+    ];
+
     private static readonly (string Track, string Option)[] Required =
     [
         ("Sync", "Enable"),
@@ -212,6 +215,32 @@ public static class FateCombatPreset
         if (!serialized.Contains(RequiredModule, StringComparison.Ordinal))
         {
             return "ジョブのローテーション";
+        }
+
+        // **「入っていてはいけない値」も見る。**
+        //
+        // Handin は既定値（Enabled）なので、正しい設定では JSON に現れない。
+        // そのため Required に入れても照合できない。
+        // ところが明示的に Disabled で保存されたプリセットは
+        // JSON に現れるため、こちらで拾える。
+        //
+        // 拾えないと、納品 FATE で BMR が納品へ向かわないまま
+        // 「プリセットは正しい」と判断してしまう。
+        foreach (var (track, option) in Forbidden)
+        {
+            var trackAt = serialized.IndexOf($"\"{track}\"", StringComparison.Ordinal);
+            if (trackAt < 0)
+            {
+                continue;
+            }
+
+            var optionAt = serialized.IndexOf($"\"{option}\"", trackAt, StringComparison.Ordinal);
+            var nextTrackAt = serialized.IndexOf("\"Track\"", trackAt + 1, StringComparison.Ordinal);
+
+            if (optionAt >= 0 && (nextTrackAt < 0 || optionAt < nextTrackAt))
+            {
+                return $"{track} が {option} になっています";
+            }
         }
 
         foreach (var (track, option) in Required)
