@@ -136,7 +136,7 @@ public sealed record ExchangeDefinition
     public bool HasLocation => this.NpcDataId != 0 && this.TerritoryId != 0;
 
     /// <summary>
-    /// この品を交換するのに要るシェアF.A.T.E のランク。0 なら条件なし。
+    /// この品を交換するのに要るF.A.T.E達成度。0 なら条件なし。
     ///
     /// <b>バイカラージェムの交換所は、ランクが上がると品が増える。</b>
     /// 実測（ver 2026.09.15）した持ち方は、拡張によって違う。

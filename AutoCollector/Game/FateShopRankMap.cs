@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using AutoCollector.Diagnostics;
@@ -74,7 +74,7 @@ public sealed class FateShopRankMap(AnomalyLog anomalyLog)
     }
 
     /// <summary>
-    /// シェアF.A.T.E の通貨（バイカラージェムなど）を使うショップか。
+    /// F.A.T.E達成度の通貨（バイカラージェムなど）を使うショップか。
     ///
     /// 通貨の ItemId は <c>FateTokenType</c> シートから引く。
     /// バイカラージェムの番号をコードへ埋め込まない
@@ -104,7 +104,7 @@ public sealed class FateShopRankMap(AnomalyLog anomalyLog)
 
     private static HashSet<uint>? fateTokenItemIds;
 
-    /// <summary>シェアF.A.T.E の通貨の ItemId。FateTokenType シートから引く。</summary>
+    /// <summary>F.A.T.E達成度の通貨の ItemId。FateTokenType シートから引く。</summary>
     private static HashSet<uint> FateTokenItemIds
     {
         get
@@ -157,7 +157,7 @@ public sealed class FateShopRankMap(AnomalyLog anomalyLog)
 
             this.anomalyLog.Info(
                 "FateRank",
-                $"シェアF.A.T.E のランク条件を {this.rankByEntry.Count} 件読みました" +
+                $"F.A.T.E達成度の条件を {this.rankByEntry.Count} 件読みました" +
                 $"（段階分けされたショップ {this.stageByShop.Count} 件）");
         }
         catch (Exception ex)
@@ -301,7 +301,7 @@ public sealed class FateShopRankMap(AnomalyLog anomalyLog)
             // 実測（ver 2026.09.15）すると、印を持つショップ 9 件のうち
             // 6 件がバイカラージェムの漆黒マップだが、残りは
             // 「チョコボ教本の交換」のように、ランクとは無関係のものだった。
-            // シェアF.A.T.E のランクとして扱ってよいのは、
+            // F.A.T.E達成度の条件として扱ってよいのは、
             // その通貨を使うショップだけ。
             if (!UsesFateToken(shop))
             {

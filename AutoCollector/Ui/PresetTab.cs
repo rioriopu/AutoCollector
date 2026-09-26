@@ -1347,7 +1347,7 @@ public sealed class PresetTab(Plugin plugin)
                     $" / {auto.CurrencyCost} 必要");
 
                 // **なぜその相手が選ばれたのかを添える。**
-                // 都市の交易商はシェアF.A.T.E のランクが全マップ最大のときだけ使える。
+                // 都市の交易商はF.A.T.E達成度が全マップ最大のときだけ使える。
                 // 「なぜ都市に行かないのか」が分からないと、不具合に見えてしまう。
                 this.DrawSharedFateHint(auto);
             }
@@ -1401,7 +1401,7 @@ public sealed class PresetTab(Plugin plugin)
     ///
     /// <b>エリアの名前はシートから引く。</b>「漆黒」などの文字を
     /// コードへ書かない（docs/00_設計決定.md の D-2）。
-    /// シェアF.A.T.E のマップ群 1 組が 1 拡張なので、
+    /// F.A.T.E達成度のマップ群 1 組が 1 拡張なので、
     /// その代表マップの ExVersion から名前を得る。
     ///
     /// 並びは都市を先頭にし、あとはマップを続ける。
@@ -1458,7 +1458,7 @@ public sealed class PresetTab(Plugin plugin)
                     unlocked,
                     ranks.CanReadRanks()
                         ? $"全マップ最大が条件。いま {progress}"
-                        : "シェアF.A.T.E の画面を一度開くと判定できます"));
+                        : "F.A.T.E達成度の画面を一度開くと判定できます"));
             }
 
             // マップの交易商は、その拡張のマップ順に並べる。
@@ -1511,7 +1511,7 @@ public sealed class PresetTab(Plugin plugin)
     ///
     /// クラフタースクリップの「系統」「種別」と同じ形にしている。
     ///
-    /// <b>シェアF.A.T.E のランクで、出せるものが変わる。</b>
+    /// <b>F.A.T.E達成度で、出せるものが変わる。</b>
     ///   ・都市の交易商は、その拡張の 6 マップ全部が最大でないと選べない
     ///   ・各品は、決まった段階に達していないと選べない
     /// 選べないものは薄く出し、押したときに理由を出す。
@@ -1647,7 +1647,7 @@ public sealed class PresetTab(Plugin plugin)
                             if (locked)
                             {
                                 this.ShowLockedMessage(
-                                    $"{vendor!.Name}：シェアF.A.T.E のランクが足りないため選べません" +
+                                    $"{vendor!.Name}：F.A.T.E達成度が足りないため選べません" +
                                     $"（{vendor.LockReason}）");
                             }
                             else
@@ -1712,7 +1712,7 @@ public sealed class PresetTab(Plugin plugin)
             ImGuiColors.DalamudGrey,
             vendor.IsCity
                 ? $"  {goods.Count} 件"
-                : $"  {goods.Count} 件 / いまのランク {(canRead ? currentRank.ToString() : "不明")}");
+                : $"  {goods.Count} 件 / いまの達成度 ランク{(canRead ? currentRank.ToString() : "不明")}");
 
         using var child = ImRaii.Child(
             "##fategoods",
@@ -1748,7 +1748,7 @@ public sealed class PresetTab(Plugin plugin)
                     if (locked)
                     {
                         this.ShowLockedMessage(
-                            $"{name}：F.A.T.Eランクが低いため交換できません" +
+                            $"{name}：F.A.T.E達成度が低いため交換できません" +
                             $"（ランク{good.RequiredRank} から。いま {currentRank}）");
                     }
                     else if (selected)
@@ -1792,7 +1792,7 @@ public sealed class PresetTab(Plugin plugin)
     }
 
     /// <summary>
-    /// シェアF.A.T.E のランクによる制限を説明する。
+    /// F.A.T.E達成度による制限を説明する。
     ///
     /// バイカラージェムの都市交易商（クリスタリウム / ラザハン /
     /// ソリューション・ナインなど）は、その拡張の 6 マップすべてが
@@ -1819,7 +1819,7 @@ public sealed class PresetTab(Plugin plugin)
         {
             ImGui.TextColored(
                 ImGuiColors.HealerGreen,
-                "  シェアF.A.T.E が全マップ最大のため、まとめて扱う交換所を使います");
+                "  F.A.T.E達成度が全マップ最大のため、まとめて扱う交換所を使います");
             return;
         }
 
@@ -1831,7 +1831,7 @@ public sealed class PresetTab(Plugin plugin)
 
         ImGui.TextColored(
             ImGuiColors.DalamudYellow,
-            $"  シェアF.A.T.E が全マップ最大になると、都市の交換所にまとまります" +
+            $"  F.A.T.E達成度が全マップ最大になると、都市の交換所にまとまります" +
             $"（いま {ranks.DescribeProgress(chosen.TerritoryId)}）");
     }
 

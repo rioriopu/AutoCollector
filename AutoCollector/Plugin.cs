@@ -52,7 +52,7 @@ public sealed class Plugin : IDalamudPlugin
     /// <summary>シートから辿れない交換所を NPC に結びつける表。</summary>
     internal NpcShopLinkMap NpcShopLinkMap { get; private set; } = null!;
 
-    /// <summary>シェアF.A.T.E のランク。都市の交易商が使えるかの判定に要る。</summary>
+    /// <summary>F.A.T.E達成度。都市の交易商が使えるかの判定に要る。</summary>
     internal SharedFateRankService SharedFateRankService { get; private set; } = null!;
 
     /// <summary>品ごとの「何ランクで解放されるか」。</summary>
@@ -450,7 +450,7 @@ public sealed class Plugin : IDalamudPlugin
         // NPC があるため、外部データで補う。
         this.NpcShopLinkMap = new NpcShopLinkMap(this.AnomalyLog);
 
-        // シェアF.A.T.E のランク。バイカラージェムの都市交易商は、
+        // F.A.T.E達成度。バイカラージェムの都市交易商は、
         // その拡張の 6 マップすべてがランク最大でないと利用できない。
         this.SharedFateRankService = new SharedFateRankService(this.AnomalyLog);
 

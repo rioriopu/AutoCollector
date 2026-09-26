@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using AutoCollector.Diagnostics;
@@ -8,7 +8,7 @@ using Lumina.Excel;
 
 namespace AutoCollector.Game;
 
-/// <summary>シェアF.A.T.E の 1 マップ分の達成度。</summary>
+/// <summary>F.A.T.E達成度の 1 マップ分。</summary>
 /// <param name="TerritoryId">マップの TerritoryType 番号。</param>
 /// <param name="CurrentRank">いまのランク。</param>
 /// <param name="MaxRank">そのマップの上限ランク。</param>
@@ -19,7 +19,7 @@ public sealed record SharedFateZoneRank(uint TerritoryId, byte CurrentRank, byte
 }
 
 /// <summary>
-/// シェアF.A.T.E のランクを読み、都市の集約交換所が解放されているかを判断する。
+/// F.A.T.E達成度を読み、都市の集約交換所が解放されているかを判断する。
 ///
 /// <b>なぜ要るか。</b>
 /// バイカラージェムの交換所には 2 種類ある。
@@ -37,7 +37,7 @@ public sealed record SharedFateZoneRank(uint TerritoryId, byte CurrentRank, byte
 /// ここから拡張ごとの区切りを作るので、マップ番号は埋め込まない
 /// （docs/00_設計決定.md の D-2）。
 ///
-/// いまのランクは <see cref="AgentFateProgress"/>（シェアF.A.T.E の画面）が持つ。
+/// いまのランクは <see cref="AgentFateProgress"/>（F.A.T.E達成度の画面）が持つ。
 /// 3 タブ × 6 ゾーンの構造で、ゾーンごとに CurrentRank / MaxRank がある。
 ///
 /// <b>画面を開いていないと読めないことがある。</b>
@@ -66,7 +66,7 @@ public sealed class SharedFateRankService(AnomalyLog anomalyLog)
     private long cachedAt;
 
     /// <summary>
-    /// シェアF.A.T.E に出てくるマップを、拡張ごとにまとめて返す。
+    /// F.A.T.E達成度の画面に出てくるマップを、拡張ごとにまとめて返す。
     ///
     /// シートは拡張ごとに 6 件ずつ並んでいる（漆黒 / 暁月 / 黄金）。
     /// 並び順に 6 件ずつ切るのではなく、TerritoryType の番号帯で切る。
@@ -122,13 +122,13 @@ public sealed class SharedFateRankService(AnomalyLog anomalyLog)
 
             this.anomalyLog.Info(
                 "SharedFate",
-                $"シェアF.A.T.E のマップを {zones.Count} 件、拡張 {groups.Count} 組として読みました");
+                $"F.A.T.E達成度のマップを {zones.Count} 件、拡張 {groups.Count} 組として読みました");
 
             return groups;
         }
         catch (Exception ex)
         {
-            this.anomalyLog.Warn("SharedFate", $"シェアF.A.T.E のマップ一覧を組み立てられませんでした: {ex.Message}");
+            this.anomalyLog.Warn("SharedFate", $"F.A.T.E達成度のマップ一覧を組み立てられませんでした: {ex.Message}");
             return [];
         }
     }
@@ -180,7 +180,7 @@ public sealed class SharedFateRankService(AnomalyLog anomalyLog)
         }
         catch (Exception ex)
         {
-            this.anomalyLog.Warn("SharedFate", $"シェアF.A.T.E のランクを読めませんでした: {ex.Message}");
+            this.anomalyLog.Warn("SharedFate", $"F.A.T.E達成度を読めませんでした: {ex.Message}");
             return new Dictionary<uint, SharedFateZoneRank>();
         }
 
@@ -234,7 +234,7 @@ public sealed class SharedFateRankService(AnomalyLog anomalyLog)
         => this.ReadCurrentRanks().TryGetValue(territoryId, out var rank) ? rank.CurrentRank : (byte)0;
 
     /// <summary>
-    /// ランクを読める状態か（シェアF.A.T.E の画面が一度でも開かれたか）。
+    /// ランクを読める状態か（F.A.T.E達成度の画面が一度でも開かれたか）。
     /// </summary>
     public bool CanReadRanks() => this.ReadCurrentRanks().Count > 0;
 
@@ -252,7 +252,7 @@ public sealed class SharedFateRankService(AnomalyLog anomalyLog)
         var ranks = this.ReadCurrentRanks();
         if (ranks.Count == 0)
         {
-            return "シェアF.A.T.E の画面を一度開くと判定できます";
+            return "F.A.T.E達成度の画面を一度開くと判定できます";
         }
 
         var maxed = group.Count(t => ranks.TryGetValue(t, out var r) && r.IsMaxed);

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using AutoCollector.Automation;
@@ -25,8 +25,8 @@ public sealed class NpcShopLink
     /// <summary>
     /// 都市の集約交易商か。
     ///
-    /// true の交易商は、その拡張の 6 マップすべてがシェアF.A.T.E の
-    /// ランク最大でないと利用できない。条件を満たさないうちに行っても
+    /// true の交易商は、その拡張の 6 マップすべてで
+    /// F.A.T.E達成度が最大でないと利用できない。条件を満たさないうちに行っても
     /// 交換できないため、選択肢から外す必要がある。
     /// </summary>
     [JsonProperty("isCityShop")]
@@ -99,7 +99,7 @@ public sealed class NpcShopLinkMap
 
     /// <summary>
     /// この NPC は都市の集約交易商か。
-    /// true なら、その拡張の 6 マップすべてがランク最大でないと利用できない。
+    /// true なら、その拡張の 6 マップすべてで F.A.T.E達成度が最大でないと利用できない。
     /// </summary>
     public bool IsCityNpc(uint npcId) => this.cityNpcs.Contains(npcId);
 
@@ -107,9 +107,9 @@ public sealed class NpcShopLinkMap
     /// 都市の交易商と同じ拡張にある、マップ 1 つの territory を返す。
     ///
     /// <b>なぜ要るか。</b>
-    /// 解放条件は「その拡張の 6 マップすべてがランク最大か」で決まる。
+    /// 解放条件は「その拡張の 6 マップすべてで F.A.T.E達成度が最大か」で決まる。
     /// ところが都市そのもの（クリスタリウム 819 や ラザハン 963）は
-    /// シェアF.A.T.E のマップ 18 件に入っていないため、
+    /// F.A.T.E達成度のマップ 18 件に入っていないため、
     /// 都市の territory を渡しても、どの拡張か分からない。
     ///
     /// そこで同じ拡張のマップを 1 つ借りて渡す。

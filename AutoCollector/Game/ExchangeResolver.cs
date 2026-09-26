@@ -41,7 +41,7 @@ public sealed class ExchangeResolver(
     /// <summary>シートから辿れない交換所を NPC に結びつける表。</summary>
     private readonly NpcShopLinkMap npcShopLinks = npcShopLinks;
 
-    /// <summary>シェアF.A.T.E のランク。都市の交易商が使えるかの判定に要る。</summary>
+    /// <summary>F.A.T.E達成度。都市の交易商が使えるかの判定に要る。</summary>
     private readonly SharedFateRankService sharedFateRanks = sharedFateRanks;
 
     /// <summary>品ごとの「何ランクで解放されるか」。</summary>
@@ -870,7 +870,7 @@ public sealed class ExchangeResolver(
     /// <summary>
     /// いま実際に使える交換所だけに絞る。
     ///
-    /// <b>バイカラージェムの交換所は、シェアF.A.T.E のランクで使える相手が変わる。</b>
+    /// <b>バイカラージェムの交換所は、F.A.T.E達成度で使える相手が変わる。</b>
     ///
     ///   ・都市の交易商（6 人）…その拡張の 6 マップすべてがランク最大のときだけ使える
     ///   ・各マップの交易商（18 人）…いつでも使えるが、そのマップの品しか扱わない
@@ -887,7 +887,7 @@ public sealed class ExchangeResolver(
     /// 行っても買えない可能性は残るが、候補を消して「交換できません」と
     /// 言うよりは、行って確かめられるほうがよい。
     ///
-    /// シェアF.A.T.E と無関係な通貨では、都市の印が付いた NPC が
+    /// F.A.T.E達成度と無関係な通貨では、都市の印が付いた NPC が
     /// そもそも居ないので、この処理は何もしない。
     /// </summary>
     private List<ExchangeDefinition> FilterByUnlock(List<ExchangeDefinition> candidates)
@@ -902,7 +902,7 @@ public sealed class ExchangeResolver(
         // 解放されているかは拡張ごとに違う。
         //
         // **都市が立つ場所では判定できない。**
-        // クリスタリウム(819) や ラザハン(963) は、シェアF.A.T.E の
+        // クリスタリウム(819) や ラザハン(963) は、F.A.T.E達成度の
         // マップ 18 件に含まれていない。そこを渡しても組が見つからない。
         // 判定は必ず「その拡張のマップ」で行う必要がある。
         //
