@@ -1335,6 +1335,11 @@ public sealed class PresetTab(Plugin plugin)
                     $"{NpcLocationService.GetTerritoryName(auto.TerritoryId)}" +
                     (here ? "（このエリア内）" : string.Empty) +
                     $" / {auto.CurrencyCost} 必要");
+
+                // **なぜその相手が選ばれたのかを添える。**
+                // 都市の交易商はシェアF.A.T.E のランクが全マップ最大のときだけ使える。
+                // 「なぜ都市に行かないのか」が分からないと、不具合に見えてしまう。
+                this.DrawSharedFateHint(auto);
             }
         }
 
@@ -1365,6 +1370,50 @@ public sealed class PresetTab(Plugin plugin)
     /// 武器の交換は通貨だけでは成立しない。足りないまま開始すると
     /// 交換所まで行って断られる。出発前に画面で分かるようにしておく。
     /// </summary>
+    /// <summary>
+    /// シェアF.A.T.E のランクによる制限を説明する。
+    ///
+    /// バイカラージェムの都市交易商（クリスタリウム / ラザハン /
+    /// ソリューション・ナインなど）は、その拡張の 6 マップすべてが
+    /// ランク最大でないと利用できない。
+    /// 満たしていないと各マップの交易商が選ばれるが、
+    /// 理由が見えないと「なぜ都市へ行かないのか」が分からない。
+    /// </summary>
+    private void DrawSharedFateHint(ExchangeDefinition chosen)
+    {
+        var links = this.plugin.NpcShopLinkMap;
+        var ranks = this.plugin.SharedFateRankService;
+
+        // 都市の交易商が関わらない通貨では、何も出さない。
+        if (!links.IsCityNpc(chosen.NpcDataId) && links.SampleZoneForCityNpc(chosen.NpcDataId) == 0)
+        {
+            // 選ばれたのがマップの交易商なら、その拡張に都市があるかを見る。
+            if (!ranks.ZoneGroups.Any(g => g.Contains(chosen.TerritoryId)))
+            {
+                return;
+            }
+        }
+
+        if (links.IsCityNpc(chosen.NpcDataId))
+        {
+            ImGui.TextColored(
+                ImGuiColors.HealerGreen,
+                "  シェアF.A.T.E が全マップ最大のため、まとめて扱う交換所を使います");
+            return;
+        }
+
+        var group = ranks.ZoneGroups.FirstOrDefault(g => g.Contains(chosen.TerritoryId));
+        if (group is null)
+        {
+            return;
+        }
+
+        ImGui.TextColored(
+            ImGuiColors.DalamudYellow,
+            $"  シェアF.A.T.E が全マップ最大になると、都市の交換所にまとまります" +
+            $"（いま {ranks.DescribeProgress(chosen.TerritoryId)}）");
+    }
+
     private void DrawExtraCostStock(List<ExchangeDefinition> usable)
     {
         // どの窓口を選んでも要るものは同じなので、1 件ぶん見れば足りる。

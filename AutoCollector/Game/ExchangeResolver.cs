@@ -29,7 +29,8 @@ public sealed class ExchangeResolver(
     TomestoneService tomestoneService,
     NpcLocationService npcLocationService,
     SpecialCurrencyMap specialCurrencyMap,
-    NpcShopLinkMap npcShopLinks)
+    NpcShopLinkMap npcShopLinks,
+    SharedFateRankService sharedFateRanks)
 {
     private readonly AnomalyLog anomalyLog = anomalyLog;
     private readonly TomestoneService tomestoneService = tomestoneService;
@@ -38,6 +39,9 @@ public sealed class ExchangeResolver(
 
     /// <summary>シートから辿れない交換所を NPC に結びつける表。</summary>
     private readonly NpcShopLinkMap npcShopLinks = npcShopLinks;
+
+    /// <summary>シェアF.A.T.E のランク。都市の交易商が使えるかの判定に要る。</summary>
+    private readonly SharedFateRankService sharedFateRanks = sharedFateRanks;
 
     /// <summary>構築中の一時データ: ShopId → そのショップ内の該当エントリ。</summary>
     private readonly Dictionary<uint, List<ShopEntryRecord>> shopEntries = [];
@@ -858,6 +862,77 @@ public sealed class ExchangeResolver(
     }
 
     /// <summary>
+    /// いま実際に使える交換所だけに絞る。
+    ///
+    /// <b>バイカラージェムの交換所は、シェアF.A.T.E のランクで使える相手が変わる。</b>
+    ///
+    ///   ・都市の交易商（6 人）…その拡張の 6 マップすべてがランク最大のときだけ使える
+    ///   ・各マップの交易商（18 人）…いつでも使えるが、そのマップの品しか扱わない
+    ///
+    /// 条件を満たしていないのに都市へ行くと、着いても交換できずに終わる。
+    /// 逆にすべて最大になったら、都市で全部買えるのでマップの交易商へ行く理由はない。
+    /// そこで次のように絞る。
+    ///
+    ///   ランク未達成 → 都市の交易商を候補から外す
+    ///   ランク達成済 → 都市の交易商があるなら、そちらだけを残す
+    ///
+    /// <b>絞った結果が空になるなら、絞らない。</b>
+    /// その品を都市でしか扱っていない場合、外すと交換先が無くなる。
+    /// 行っても買えない可能性は残るが、候補を消して「交換できません」と
+    /// 言うよりは、行って確かめられるほうがよい。
+    ///
+    /// シェアF.A.T.E と無関係な通貨では、都市の印が付いた NPC が
+    /// そもそも居ないので、この処理は何もしない。
+    /// </summary>
+    private List<ExchangeDefinition> FilterByUnlock(List<ExchangeDefinition> candidates)
+    {
+        var city = candidates.Where(x => this.npcShopLinks.IsCityNpc(x.NpcDataId)).ToList();
+        if (city.Count == 0)
+        {
+            // 都市の交易商が候補に居ない。絞る対象が無い。
+            return candidates;
+        }
+
+        // 解放されているかは拡張ごとに違う。
+        //
+        // **都市が立つ場所では判定できない。**
+        // クリスタリウム(819) や ラザハン(963) は、シェアF.A.T.E の
+        // マップ 18 件に含まれていない。そこを渡しても組が見つからない。
+        // 判定は必ず「その拡張のマップ」で行う必要がある。
+        //
+        // 候補にマップの交易商が居ればその territory を使う。
+        // 居ない場合（その品を都市でしか扱っていない場合）は、
+        // その都市が扱うショップと同じ拡張のマップを表から探す。
+        var unlocked = candidates
+            .Where(x => !this.npcShopLinks.IsCityNpc(x.NpcDataId))
+            .Any(x => this.sharedFateRanks.IsCityShopUnlocked(x.TerritoryId));
+
+        if (!unlocked)
+        {
+            // 候補にマップの交易商が居ない。都市の相棒となるマップを表から引く。
+            foreach (var definition in city)
+            {
+                var zone = this.npcShopLinks.SampleZoneForCityNpc(definition.NpcDataId);
+                if (zone != 0 && this.sharedFateRanks.IsCityShopUnlocked(zone))
+                {
+                    unlocked = true;
+                    break;
+                }
+            }
+        }
+
+        if (unlocked)
+        {
+            // 全マップ最大。都市でまとめて買えるので、都市だけを残す。
+            return city;
+        }
+
+        // まだ達成していない。都市へ行っても交換できないので外す。
+        var others = candidates.Where(x => !this.npcShopLinks.IsCityNpc(x.NpcDataId)).ToList();
+        return others.Count > 0 ? others : candidates;
+    }
+
+    /// <summary>
     /// 通貨と報酬アイテムから 1 件へ絞る。
     /// preferredNpcDataId が指定されていればそれを最優先する。
     ///
@@ -882,6 +957,12 @@ public sealed class ExchangeResolver(
         }
 
         var candidates = this.results.Where(x => x.RewardItemId == rewardItemId && x.HasLocation).ToList();
+        if (candidates.Count == 0)
+        {
+            return null;
+        }
+
+        candidates = this.FilterByUnlock(candidates);
         if (candidates.Count == 0)
         {
             return null;
