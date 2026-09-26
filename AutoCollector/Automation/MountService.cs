@@ -274,6 +274,60 @@ public sealed unsafe class MountService(AnomalyLog anomalyLog, FateTrace trace)
     }
 
     /// <summary>
+    /// いま乗れない理由。乗れるなら「乗れる」。
+    ///
+    /// <b>一時的な理由と恒久的な理由を見分けるために出す。</b>
+    /// 「乗れません」だけでは、硬直で待てばよいのか、
+    /// そのエリアでは無理なのかがログから分からなかった。
+    /// </summary>
+    public static string DescribeMountBlocker()
+    {
+        try
+        {
+            if (IsMounted)
+            {
+                return "すでに乗っている";
+            }
+
+            if (Svc.Condition[ConditionFlag.InCombat])
+            {
+                return "戦闘中";
+            }
+
+            if (Svc.Condition[ConditionFlag.Mounting] || Svc.Condition[ConditionFlag.Mounting71])
+            {
+                return "乗る動作中";
+            }
+
+            if (Player.IsCasting)
+            {
+                return "詠唱中";
+            }
+
+            if (Player.IsAnimationLocked)
+            {
+                return "直前の操作の硬直中";
+            }
+
+            var am = ActionManager.Instance();
+            if (am is null)
+            {
+                return "ActionManager を取得できない";
+            }
+
+            var status = am->GetActionStatus(ActionType.GeneralAction, MountRouletteAction);
+
+            return status == 0
+                ? "乗れる"
+                : $"ゲームが受け付けない（状態 {status}）";
+        }
+        catch (Exception ex)
+        {
+            return $"判定できず: {ex.Message}";
+        }
+    }
+
+    /// <summary>
     /// 距離を見ずに、必ず乗る。
     ///
     /// <b>飛んで入る段取りでは距離で決めない。</b>

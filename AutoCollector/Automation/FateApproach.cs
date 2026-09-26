@@ -246,6 +246,9 @@ public sealed class FateApproach(
     /// <summary>いま何段目を目指しているか。</summary>
     private int descentStage;
 
+    /// <summary>直前に記録した「乗れない理由」。同じ理由を毎フレーム書かないために持つ。</summary>
+    private string lastMountBlocker = string.Empty;
+
     /// <summary>いま辿らせている経路の終点。監視に使う。</summary>
     /// <summary>
     /// いま辿らせている経路の終点。
@@ -287,6 +290,7 @@ public sealed class FateApproach(
         this.pathIssued = false;
         this.descentStages = [];
         this.descentStage = 0;
+        this.lastMountBlocker = string.Empty;
         this.FailureReason = string.Empty;
         this.startedUtc = DateTime.UtcNow;
 
@@ -502,10 +506,31 @@ public sealed class FateApproach(
             return;
         }
 
-        if (!MountService.IsMounted)
+        // **1 回断られただけで諦めない。**
+        //
+        // TryMount が false を返す理由は 2 つあり、意味がまったく違う。
+        //
+        //   恒久的：騎乗が解放されていないエリア、コンテンツの中
+        //   一時的：直前の操作の硬直、詠唱中
+        //
+        // 開始と同時にバディ（ギサールの野菜）を呼ぶため、その硬直が
+        // 残っているあいだは必ず一時的な false が返る。
+        // それを「乗れない」と読んで進入を丸ごと中止していたため、
+        // 地上の経路へ落ちてから乗り直して飛ぶ、という往復が起きていた。
+        // 利用者からは「飛び立ったのにエーテライトへ戻る」ように見える
+        // （2026-09-26 実測。3 キャラ全員が開始から 2〜4 秒で同じ失敗をしていた）。
+        //
+        // 乗れないまま MountTimeout を過ぎたら、そのときに初めて諦める
+        // （OnPhaseTimeout が面倒を見る）。
+        var status = MountService.DescribeMountBlocker();
+
+        if (status != this.lastMountBlocker)
         {
-            this.Fail("マウントに乗れません");
+            this.lastMountBlocker = status;
+            this.trace.State("まだ乗れない", $"{status}。{MountTimeout.TotalSeconds:F0} 秒まで待ちます");
         }
+
+        this.Detail = $"マウントに乗れるのを待っています（{status}）";
     }
 
     /// <summary>
@@ -1270,7 +1295,9 @@ public sealed class FateApproach(
                 return;
 
             case ApproachPhase.Mounting:
-                this.Fail("マウントに乗れませんでした");
+                this.Fail(
+                    $"{MountTimeout.TotalSeconds:F0} 秒待ってもマウントに乗れませんでした" +
+                    $"（{MountService.DescribeMountBlocker()}）");
                 return;
 
             case ApproachPhase.GroundConfirm:
