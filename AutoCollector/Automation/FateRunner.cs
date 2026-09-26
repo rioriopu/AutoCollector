@@ -1873,10 +1873,23 @@ public sealed class FateRunner(
             return;
         }
 
-        // 飛べないエリアでは、その場で待つしかない。
+        // **ここへ来るのは異常。**
+        //
+        // 周回するのは風脈を解放済みのマップなので、ふだん飛べないことはない
+        // （実測でも 3 キャラ全員、全エリアで PlayerState.CanFly=True）。
+        // 解放していないマップを選んだか、読み取りに失敗している。
+        // 黙って地上で待つと気づけないので、理由を残す。
         if (!MountService.CanFlyHere)
         {
-            this.StatusDetail = $"{waiting}（このエリアでは飛べないので、その場で待ちます）";
+            if (EzThrottler.Throttle("AutoCollector.HoverCannotFly", 30000))
+            {
+                this.anomalyLog.Warn(
+                    "Fate",
+                    $"このエリアで飛べないため、報酬待ちのあいだ地上に留まります" +
+                    $"（{MountService.DescribeFlightStatus()}）。風脈を解放してください");
+            }
+
+            this.StatusDetail = $"{waiting}（飛べないため地上で待っています）";
             return;
         }
 
