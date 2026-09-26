@@ -189,6 +189,14 @@ public sealed class FateRunner(
     /// <summary>手動の脱出を「もう一度押した」とみなす間隔。</summary>
     private static readonly TimeSpan EscapeNowRetryWindow = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// 止めたあと、動き出さないか見張る長さ。
+    ///
+    /// 経路探索は遠い目的地だと十数秒かかる。
+    /// 止めた時点で走っていた探索が終わるまで見張る。
+    /// </summary>
+    private static readonly TimeSpan StopGuardWindow = TimeSpan.FromSeconds(20);
+
     /// <summary>見張りが「動いた」と認める距離。</summary>
     private const float WatchdogProgressMeters = 3f;
 
@@ -284,6 +292,9 @@ public sealed class FateRunner(
     /// <summary>手動の脱出を最後に押した時刻と場所。二度目は帰還に切り替える。</summary>
     private DateTime lastEscapeNowUtc = DateTime.MinValue;
     private Vector3 lastEscapeNowFrom;
+
+    /// <summary>止めたあとに動き出さないか見張る期限。</summary>
+    private DateTime stopGuardUntil = DateTime.MinValue;
 
     /// <summary>動けていない状態がいつから続いているか。段階をまたいで見張る。</summary>
     private DateTime watchdogSince = DateTime.MinValue;
@@ -474,6 +485,39 @@ public sealed class FateRunner(
     }
 
     /// <summary>
+    /// 止めたあとに動き出していないかを見張り、動き出していたら止める。
+    ///
+    /// <b>1 回止めるだけでは足りない。</b>
+    /// vnavmesh の Path.Stop は、積んである経路点を捨てるだけ
+    /// （FollowPath.Stop）で、探索中の経路までは取り消さない。
+    /// 止めた直後に探索が終わると、その結果が積まれてまた歩き出す
+    /// （AsyncMoveRequest.Update が _follow.Move を呼ぶ）。
+    ///
+    /// 探索は数秒かかることがあるので、しばらく見張って捨て続ける。
+    /// </summary>
+    private void TickStopGuard()
+    {
+        if (this.stopGuardUntil == DateTime.MinValue)
+        {
+            return;
+        }
+
+        if (DateTime.UtcNow > this.stopGuardUntil)
+        {
+            this.stopGuardUntil = DateTime.MinValue;
+            return;
+        }
+
+        // 経路を持っていたら捨てる。止めたはずなので、持っているのは
+        // 止めたあとに積まれたもの。
+        if (this.vnavmesh.TryNumWaypoints(out var waypoints) && waypoints > 0)
+        {
+            this.vnavmesh.TryStop();
+            this.trace.Decision("止めたあとの経路を捨てた", $"経路点 {waypoints} 個");
+        }
+    }
+
+    /// <summary>
     /// 段階に関係なく、動けなくなっていないかを見張る。
     ///
     /// <b>「動くつもりなのに動いていない」を捕まえる。</b>
@@ -651,6 +695,16 @@ public sealed class FateRunner(
         this.navigation.Stop();
         this.vnavmesh.TryStop();
 
+        // **止めたあとに動き出さないよう、しばらく見張る。**
+        //
+        // vnavmesh の Path.Stop は、積んである経路点を捨てるだけ
+        // （FollowPath.Stop）。探索中の経路までは取り消さない。
+        // そのため、止めた直後に探索が終わると
+        // AsyncMoveRequest.Update がその結果を積み、また歩き出す。
+        //
+        // 探索が終わるのを待って、積まれたら捨てる。
+        this.stopGuardUntil = DateTime.UtcNow + StopGuardWindow;
+
         // 頼んである経路探索の結果も捨てる。
         // 残しておくと、止めたあとに出来上がって積まれてしまう。
         this.detourTask = null;
@@ -763,6 +817,14 @@ public sealed class FateRunner(
     /// <summary>毎フレーム呼ぶ。</summary>
     public void Tick()
     {
+        // **止めたあとも、しばらくは見張る。**
+        //
+        // 止めた時点で探索中だった経路は、終わった瞬間に積まれて
+        // また歩き出す（vnavmesh の AsyncMoveRequest.Update）。
+        // Path.Stop は積んである経路点を捨てるだけで、
+        // 探索そのものは取り消せないため、ここで拾って捨てる。
+        this.TickStopGuard();
+
         if (!this.IsRunning)
         {
             return;
@@ -2780,6 +2842,13 @@ public sealed class FateRunner(
         {
             return;
         }
+
+        // **BMR の AI も止める。**
+        //
+        // こちらは AI を使わない方針だが、以前の版や利用者の操作で
+        // 入っていることがある。入ったままだと、プリセットを外しても
+        // BMR が敵を追って動き続け、止めたのに動いて見える。
+        this.bossMod.TrySetAiEnabled(false);
 
         this.bossMod.TryClearActivePreset(out _);
 
