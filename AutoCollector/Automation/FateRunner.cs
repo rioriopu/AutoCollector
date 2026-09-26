@@ -562,6 +562,14 @@ public sealed class FateRunner(
     /// <summary>止めた理由。</summary>
     public string? StoppedReason { get; private set; }
 
+    /// <summary>
+    /// いま実際に回っているルート。止まっていれば空。
+    ///
+    /// 画面で「設定を変えたが、この周回には効かない」ことを
+    /// 伝えるために見せる。
+    /// </summary>
+    public IReadOnlyList<uint> RunningRoute => this.IsRunning ? this.route : [];
+
     private static Config C => Plugin.C;
 
     /// <summary>周回を始める。始められない場合は理由を返す。</summary>
@@ -712,26 +720,47 @@ public sealed class FateRunner(
         // **テレポ先が見つかるかを、始める前に確かめる。**
         //
         // 見つからないマップは、行こうとして 60 秒待ってから諦めることになる。
-        // 事前に分かるなら伝える。1 つも行けないなら始めない。
-        var unreachable = this.route
-            .Where(t => !this.aetherytes.TryFindTarget(t, out var found) || found is null)
-            .ToList();
-
-        if (unreachable.Count > 0)
+        // 事前に分かるなら伝える。
+        //
+        // **ただし一覧が空のときは判断しない。**
+        //
+        // Svc.AetheryteList はコンテンツ（ID・レイド）の中では空になる。
+        // 空を「1 つもアクセスしていない」と読むと、行けるはずのマップへ
+        // 「エーテライトが無い」と言って開始を拒否してしまう。
+        // この罠はこのプラグインで一度踏んでいる
+        // （AetheryteService.IsListReady のコメントを参照。
+        //  討伐中に「ソリューション・ナイン へ行けません」で止まった）。
+        //
+        // 読めないときは黙って通す。行こうとした時点で分かるし、
+        // そのときは 60 秒のタイムアウトが面倒を見る。
+        if (this.aetherytes.IsListReady())
         {
-            var names = string.Join("、", unreachable.Select(NpcLocationService.GetTerritoryName));
+            var unreachable = this.route
+                .Where(t => !this.aetherytes.TryFindTarget(t, out var found) || found is null)
+                .ToList();
 
-            if (unreachable.Count == this.route.Count)
+            if (unreachable.Count > 0)
             {
-                reason = $"選んだマップへのテレポ先が見つかりません（{names}）。エーテライトを解放してください";
-                this.trace.Trouble("開始できない", reason);
-                return false;
-            }
+                var names = string.Join("、", unreachable.Select(NpcLocationService.GetTerritoryName));
 
-            this.anomalyLog.Warn(
-                "Fate",
-                $"テレポ先が見つからないマップがあります（{names}）。" +
-                "そのマップは飛ばして回ります");
+                if (unreachable.Count == this.route.Count)
+                {
+                    reason = $"選んだマップへのテレポ先が見つかりません（{names}）。エーテライトを解放してください";
+                    this.trace.Trouble("開始できない", reason);
+                    return false;
+                }
+
+                this.anomalyLog.Warn(
+                    "Fate",
+                    $"テレポ先が見つからないマップがあります（{names}）。" +
+                    "そのマップは飛ばして回ります");
+            }
+        }
+        else
+        {
+            this.trace.State(
+                "テレポ先を確かめない",
+                "エーテライトの一覧が空です（コンテンツの中かもしれません）。行こうとした時点で判断します");
         }
 
         // 先頭のマップに居なければ、まずそこへ向かう。
@@ -1218,6 +1247,21 @@ public sealed class FateRunner(
 
         if (!inZone || heading)
         {
+            // **別のマップへ移るなら、進入の段取りを畳む。**
+            //
+            // 畳まないと、進入は Tick が呼ばれないまま Active のまま残る。
+            // 段階の中でエリアの食い違いを見ているが、その判定にも
+            // 辿り着けない。経路探索の Task も残ったままになる。
+            //
+            // いまは vnavmesh がメッシュの読み込み直しで探索を
+            // 取り消してくれるので壊れにくいが、それは他のプラグインの
+            // 都合に頼っているだけで、こちらの筋が通っていない。
+            if (this.approach.Active)
+            {
+                this.approach.Cancel("別のマップへ移ります");
+                this.groundOnlyFate = null;
+            }
+
             this.TickTraveling(cfg);
             return;
         }
@@ -2253,6 +2297,28 @@ public sealed class FateRunner(
     private void EscapeStuckSpot(FateInfo? fate, DateTime now, Vector3 here)
     {
         this.escapeAttempts++;
+
+        // **進入の段取りを先に畳む。**
+        //
+        // 畳まないと、これから積む脱出の経路を進入側が
+        // 「自分の経路がまだ走っている」と読んでしまう
+        // （RunPath は Path.NumWaypoints が 0 より大きければ見守るだけ）。
+        // 脱出点へ向かうあいだ、段階は FlyToEntry や Descending のまま
+        // 何もせず止まる。
+        //
+        // 「進入中に vnavmesh を触るのは進入側だけ」という約束を、
+        // ここで破ってしまっていた。
+        if (this.approach.Active)
+        {
+            this.approach.Cancel("詰まったので脱出します");
+
+            // 飛んで入り直すのはやめる。詰まった地形でもう一度
+            // 同じ経路を引いても、同じ場所で詰まる。
+            if (fate is not null)
+            {
+                this.groundOnlyFate = fate.Id;
+            }
+        }
 
         // **最後は帰還する。**
         //

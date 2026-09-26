@@ -99,6 +99,15 @@ public sealed class FateApproach(
     private const float LandingHeightMeters = 3f;
 
     /// <summary>
+    /// 接地を認める水平距離。
+    ///
+    /// <b>円の中であることでは足りない。</b>円の半径は数十メートルあるので、
+    /// 「円の中で降りた」を接地と認めると、着地点から遠く離れた場所で
+    /// 戦闘を始めてしまう。着地点の近くであることを要求する。
+    /// </summary>
+    private const float GroundConfirmFlatMeters = 10f;
+
+    /// <summary>
     /// 着地点より下にいてよい深さ。
     ///
     /// <b>高さの差は絶対値で見ない。</b>
@@ -124,6 +133,17 @@ public sealed class FateApproach(
     /// <summary>1 つの段階に与える上限。経路探索の時間も含む。</summary>
     private static readonly TimeSpan PhaseTimeout = TimeSpan.FromSeconds(90);
 
+    /// <summary>
+    /// 進入全体に与える上限。
+    ///
+    /// <b>段階ごとの上限だけでは足りない。</b>
+    /// 向きを変えてやり直すたびに時間が積み上がり、
+    /// 段階 90 秒 × やり直し 5 回で 20 分を超えうる。
+    /// FATE は 15 分ほどで終わるので、それでは間に合わない。
+    /// 諦めて地上の経路で向かうほうがましなので、ここで切る。
+    /// </summary>
+    private static readonly TimeSpan TotalBudget = TimeSpan.FromMinutes(3);
+
     /// <summary>地表に着いたかを確かめるのに与える上限。</summary>
     private static readonly TimeSpan GroundConfirmTimeout = TimeSpan.FromSeconds(20);
 
@@ -138,6 +158,29 @@ public sealed class FateApproach(
 
     /// <summary>降下を分割するときの刻み。</summary>
     private static readonly float[] DescentFractions = [0.25f, 0.5f, 0.75f, 1.0f];
+
+    /// <summary>
+    /// 最後に残してよい垂直落下の高さ。
+    ///
+    /// 地表すぐ上の短い落下は避けられない。問題なのは
+    /// 上空から長く落ちることで、その間は何もできない。
+    /// </summary>
+    private const float MaxVerticalTailMeters = 12f;
+
+    /// <summary>「もう水平には着いている」と見る距離。垂直落下の判定に使う。</summary>
+    private const float MaxVerticalTailFlatMeters = 3f;
+
+    /// <summary>段に分けた降下で、その段に着いたと認める距離。</summary>
+    private const float StageReachedMeters = 4f;
+
+    /// <summary>
+    /// 「飛べた記録」より上を、どれだけ目指してよいか。
+    ///
+    /// 記録は下限の証拠でしかないので、そのまま上限にすると
+    /// 低く見積もりすぎる。余裕を足して試し、本当に頭打ちなら
+    /// 段階の上限で拾う。
+    /// </summary>
+    private const float CeilingHeadroomMeters = 25f;
 
     /// <summary>地表に着いたと認めるまでに、安定を確認し続ける回数。</summary>
     private const int GroundStableFrames = 5;
@@ -192,7 +235,26 @@ public sealed class FateApproach(
     /// <summary>この段階で経路を渡したか。段階ごとに 1 度だけ渡す。</summary>
     private bool pathIssued;
 
+    /// <summary>
+    /// 段に分けた降下の中継点。
+    ///
+    /// 空なら一本の経路で降りる。一本が垂直落下になると分かったときだけ、
+    /// ここへ中継点を入れて段ごとに探索する。
+    /// </summary>
+    private List<Vector3> descentStages = [];
+
+    /// <summary>いま何段目を目指しているか。</summary>
+    private int descentStage;
+
     /// <summary>いま辿らせている経路の終点。監視に使う。</summary>
+    /// <summary>
+    /// いま辿らせている経路の終点。
+    ///
+    /// <b>記録のためだけに持つのではない。</b>
+    /// 監視している点と食い違っていないかを毎フレーム見る。
+    /// 食い違っていたら引き直す。以前の実装は、経路を持ち上げた点へ頼み、
+    /// 到着を地上の点で測っていた。その食い違いをここで拾えるようにする。
+    /// </summary>
     private Vector3 issuedDestination;
 
     /// <summary>進入中か。</summary>
@@ -223,6 +285,8 @@ public sealed class FateApproach(
         this.flyingFrames = 0;
         this.groundFrames = 0;
         this.pathIssued = false;
+        this.descentStages = [];
+        this.descentStage = 0;
         this.FailureReason = string.Empty;
         this.startedUtc = DateTime.UtcNow;
 
@@ -247,8 +311,30 @@ public sealed class FateApproach(
         this.CancelPending();
         this.vnavmesh.TryStop();
         this.pathIssued = false;
+        this.descentStages = [];
+        this.descentStage = 0;
         this.Phase = ApproachPhase.Idle;
         this.Detail = string.Empty;
+
+        // **vnavmesh 側に遅れて入る経路がないかを見る。**
+        //
+        // Path.Stop は積んである経路点を捨てるだけで、走っている
+        // 経路探索は止めない。さらに vnavmesh の RetryOnStuck が
+        // 有効だと、Path.MoveTo で始めた経路でも詰まったときに
+        // vnavmesh 自身が SimpleMove として引き直す
+        // （FollowPath.cs:121-127 → AsyncMoveRequest.cs:24-30）。
+        // その結果は AsyncMoveRequest.Update が勝手に積むため、
+        // こちらの世代番号では捨てられない。
+        //
+        // ここでは知らせるだけにする。止める手立ては
+        // 呼び出し側（FateRunner の止めたあとの見張り）が持っている。
+        if (this.vnavmesh.TrySimpleMovePathfindInProgress(out var pending) && pending)
+        {
+            this.trace.Trouble(
+                "遅れて入る経路がある",
+                "vnavmesh が経路探索中です。止めたあとに動き出す可能性があります");
+        }
+
         this.trace.State("進入をやめた", why);
     }
 
@@ -278,6 +364,17 @@ public sealed class FateApproach(
             fate.StartTimeEpoch != this.spawnKey.Start)
         {
             this.Fail("狙っていた FATE が入れ替わりました");
+            return;
+        }
+
+        // **進入そのものに与える上限。**
+        //
+        // 段階ごとの上限だけでは、やり直すたびに時間が積み上がる。
+        // 段階 90 秒 × やり直し 5 回で 20 分を超えうる。
+        // FATE は 15 分ほどで終わるので、それでは間に合わない。
+        if (DateTime.UtcNow - this.startedUtc > TotalBudget)
+        {
+            this.Fail($"進入に {TotalBudget.TotalMinutes:F0} 分かかっても着けませんでした");
             return;
         }
 
@@ -492,6 +589,11 @@ public sealed class FateApproach(
 
             this.vnavmesh.TryStop();
             this.pathIssued = false;
+
+            // 降り方は、これから引く経路を見て決める。前の記録は捨てる。
+            this.descentStages = [];
+            this.descentStage = 0;
+
             this.SetPhase(ApproachPhase.Descending, "中心の地上へ降りています");
             return;
         }
@@ -531,8 +633,34 @@ public sealed class FateApproach(
             return;
         }
 
-        this.RunPath(this.landing, fly: true, describe: "中心の地上へ");
-        this.Detail = $"中心の地上へ降りています（残り 水平{flat:F0}m 高さ{above:F0}m）";
+        // **段に分けて降りる場合は、その段の終点を目指す。**
+        //
+        // 一本の経路が垂直落下になると分かったときだけ、ここに入る。
+        var destination = this.descentStages.Count > 0 && this.descentStage < this.descentStages.Count
+            ? this.descentStages[this.descentStage]
+            : this.landing;
+
+        this.RunPath(destination, fly: true, describe: "中心の地上へ");
+
+        // 段の終点に着いたら、次の段へ。
+        if (this.descentStages.Count > 0 &&
+            this.descentStage < this.descentStages.Count &&
+            this.pathIssued &&
+            Flat(Player.Position, destination) <= StageReachedMeters &&
+            MathF.Abs(Player.Position.Y - destination.Y) <= StageReachedMeters)
+        {
+            this.descentStage++;
+            this.vnavmesh.TryStop();
+            this.pathIssued = false;
+
+            this.trace.State(
+                "降下の段を進めた",
+                $"{this.descentStage}/{this.descentStages.Count} 段目へ");
+        }
+
+        this.Detail = this.descentStages.Count > 0
+            ? $"中心の地上へ降りています（{this.descentStage + 1}/{this.descentStages.Count} 段・残り 水平{flat:F0}m 高さ{above:F0}m）"
+            : $"中心の地上へ降りています（残り 水平{flat:F0}m 高さ{above:F0}m）";
     }
 
     /// <summary>
@@ -568,10 +696,29 @@ public sealed class FateApproach(
         }
 
         // 着地点との高さが噛み合っているか。
-        // 大きく離れていれば、別の階層か、途中の足場に載っている。
-        if (MathF.Abs(above) > LandingHeightMeters + LandingBelowMeters)
+        //
+        // **上下を分けて見る。** 以前は絶対値で ±5m としていたため、
+        // 着地点より 4.9m 下（1 階層下の床、崖の途中の棚）でも
+        // 接地確定になっていた。下にいるのは階層が違う証拠なので狭く取る。
+        if (above > LandingHeightMeters || above < -LandingBelowMeters)
         {
-            this.Detail = $"着地点と高さが合いません（{above:F1}m）";
+            this.Detail = above < 0
+                ? $"着地点より {-above:F1}m 下にいます（別の階層かもしれません）"
+                : $"着地点より {above:F1}m 上にいます";
+
+            return;
+        }
+
+        // **水平にも離れていないか。**
+        //
+        // EnsureStillFlying から来た場合、円の中でさえあれば
+        // ここへ入れてしまう。円の半径は数十メートルあるので、
+        // 着地点から遠く離れた場所で接地を認めることになる。
+        var flat = Flat(here, this.landing);
+
+        if (flat > GroundConfirmFlatMeters)
+        {
+            this.Detail = $"着地点から水平に {flat:F1}m 離れています";
             return;
         }
 
@@ -617,8 +764,13 @@ public sealed class FateApproach(
         }
 
         // 地面に触れて飛行が解けた。もう着地点の近くなら、それでよい。
-        if (Flat(Player.Position, this.landing) <= this.radius &&
-            MathF.Abs(Player.Position.Y - this.landing.Y) <= LandingHeightMeters + LandingBelowMeters)
+        //
+        // **「円の中」では広すぎる。** 円の半径は数十メートルあるので、
+        // 着地点から遠く離れた場所で接地の確認へ進んでしまう。
+        // 接地の確認と同じ狭さを要求する。
+        if (Flat(Player.Position, this.landing) <= GroundConfirmFlatMeters &&
+            Player.Position.Y - this.landing.Y <= LandingHeightMeters &&
+            Player.Position.Y - this.landing.Y >= -LandingBelowMeters)
         {
             this.trace.State("降りてしまった", "着地点の近くなので、そのまま地表の確認へ移ります");
             this.vnavmesh.TryStop();
@@ -650,13 +802,45 @@ public sealed class FateApproach(
         // 経路を渡してある。まだ辿っているなら見守る。
         if (this.pathIssued)
         {
-            if (this.vnavmesh.TryNumWaypoints(out var left) && left > 0)
+            // **読めなかったときは「使い切った」と読まない。**
+            //
+            // TryNumWaypoints は IPC が失敗しても false を返す。
+            // out の既定値 0 と合わせて「経路が無い」と同じ扱いになるため、
+            // vnavmesh 側が答えられない状態だと毎フレーム
+            // 新しい経路探索を投げ続けることになる。
+            if (!this.vnavmesh.TryNumWaypoints(out var left))
             {
+                this.Detail = $"{describe}の経路の状態を読めません";
                 return;
             }
 
-            // 経路を使い切ったが、まだ着いていない。引き直す。
-            this.pathIssued = false;
+            if (left > 0)
+            {
+                // **頼んだ先と見ている先が食い違っていないか。**
+                //
+                // 段階が進んで目的地が変わったのに、前の段階の経路を
+                // まだ辿っていることがありうる。そのまま見守ると、
+                // 別の場所へ向かいながら「着くのを待っている」ことになる。
+                if (Vector3.DistanceSquared(this.issuedDestination, destination) > 1f)
+                {
+                    this.trace.Trouble(
+                        "経路の終点が変わった",
+                        $"{describe} 頼んだ先({this.issuedDestination.X:F0},{this.issuedDestination.Y:F0},{this.issuedDestination.Z:F0}) " +
+                        $"→ いま見ている先({destination.X:F0},{destination.Y:F0},{destination.Z:F0}) 引き直します");
+
+                    this.vnavmesh.TryStop();
+                    this.pathIssued = false;
+                }
+                else
+                {
+                    return;
+                }
+            }
+            else
+            {
+                // 経路を使い切ったが、まだ着いていない。引き直す。
+                this.pathIssued = false;
+            }
         }
 
         // 探索の結果を待っている。
@@ -690,6 +874,23 @@ public sealed class FateApproach(
             if (!this.Validate(waypoints, destination, out var why))
             {
                 this.OnPathRejected(describe, why);
+                return;
+            }
+
+            // **降下の経路は、形も見る。**
+            //
+            // 段に分けていない一本の経路が垂直落下になるなら、
+            // まず段に分けて引き直す。それでも駄目なら向きを変える。
+            if (this.Phase == ApproachPhase.Descending &&
+                this.descentStages.Count == 0 &&
+                !this.IsDescentAcceptable(waypoints, this.landing, out var shape))
+            {
+                this.trace.Trouble("垂直落下になる経路", $"{shape} 段に分けて引き直します");
+
+                this.descentStages = this.BuildDescentStages(Player.Position, this.landing);
+                this.descentStage = 0;
+                this.pathIssued = false;
+                this.vnavmesh.TryStop();
                 return;
             }
 
@@ -767,6 +968,10 @@ public sealed class FateApproach(
 
         var last = waypoints[^1];
 
+        // **この判定は飛行経路ではほぼ通る。**
+        // PathfindVolume は結果の末尾に目的地をそのまま足すため
+        // （NavmeshQuery.cs:226-229）、末尾は必ず目的地になる。
+        // それでも地上経路では意味があるので残す。
         if (Vector3.Distance(last, destination) > 5f)
         {
             why = $"経路の終点が目的地から {Vector3.Distance(last, destination):F0}m 離れています";
@@ -775,6 +980,88 @@ public sealed class FateApproach(
 
         why = string.Empty;
         return true;
+    }
+
+    /// <summary>
+    /// 降下の経路が、本当に降りているかを確かめる。
+    ///
+    /// <b>ここが C の肝心なところ。</b>
+    /// vnavmesh は「指定の角度で降りる」API ではない。空間が開けていれば
+    /// 斜めの経路になりうるが、「中央上空まで水平に飛んでから垂直に落ちる」
+    /// 形の経路を返すこともある。それを検査せずに走らせると、
+    /// 以前と同じ垂直落下になる。
+    ///
+    /// 末尾が目的地であることは証明にならない（PathfindVolume が
+    /// そのまま足すため）。<b>途中の形を見る。</b>
+    /// </summary>
+    /// <returns>斜めに降りていれば true。</returns>
+    private bool IsDescentAcceptable(List<Vector3> waypoints, Vector3 landingPoint, out string why)
+    {
+        var from = Player.Position;
+        var totalDrop = from.Y - landingPoint.Y;
+        var totalFlat = Flat(from, landingPoint);
+
+        // ほとんど降りない、あるいはほとんど動かないなら、形を問う意味が無い。
+        if (totalDrop <= LandingHeightMeters || totalFlat <= LandingFlatMeters)
+        {
+            why = string.Empty;
+            return true;
+        }
+
+        // **最後の垂直落下がどれだけ残るかを見る。**
+        //
+        // 経路の各点で「まだ水平にどれだけ残っているか」と
+        // 「まだ高さがどれだけ残っているか」を測り、
+        // 水平が尽きた時点で高さが大きく残っていれば、それは垂直落下。
+        var worstFlatAtDrop = 0f;
+        var verticalTail = 0f;
+
+        foreach (var point in waypoints)
+        {
+            var flatLeft = Flat(point, landingPoint);
+            var dropLeft = point.Y - landingPoint.Y;
+
+            // 水平にはもう着いているのに、高さが残っている点。
+            if (flatLeft <= MaxVerticalTailFlatMeters && dropLeft > verticalTail)
+            {
+                verticalTail = dropLeft;
+                worstFlatAtDrop = flatLeft;
+            }
+        }
+
+        if (verticalTail > MaxVerticalTailMeters)
+        {
+            why = $"中央上空から {verticalTail:F0}m の垂直落下になります" +
+                  $"（水平の残り {worstFlatAtDrop:F1}m）";
+
+            return false;
+        }
+
+        why = string.Empty;
+        return true;
+    }
+
+    /// <summary>
+    /// 斜めに降りる中継点を作る。
+    ///
+    /// <b>補間した点へ直接向かわせてはいけない。</b>
+    /// その点が地形の内側かどうかを誰も見ていない。
+    /// ここで作るのは「探索を頼む区間の切れ目」で、
+    /// 区間ごとに vnavmesh へ聞き、返った経路を検査して連結する。
+    /// </summary>
+    private List<Vector3> BuildDescentStages(Vector3 from, Vector3 to)
+    {
+        var stages = new List<Vector3>(DescentFractions.Length);
+
+        foreach (var t in DescentFractions)
+        {
+            stages.Add(new Vector3(
+                from.X + ((to.X - from.X) * t),
+                from.Y + ((to.Y - from.Y) * t),
+                from.Z + ((to.Z - from.Z) * t)));
+        }
+
+        return stages;
     }
 
     /// <summary>経路が使えなかった。進入の向きを変えて試す。</summary>
@@ -921,28 +1208,42 @@ public sealed class FateApproach(
 
         var y = MathF.Max(floorY + EntryClearanceMeters, this.landing.Y + (slope * horizontal));
 
-        // **飛べると分かっている高さを超えない。**
+        // **飛べた高さは「上限」ではない。**
         //
-        // 飛行には高度の上限があり、そこに張り付くと上へ 1m も進めない。
-        // 上限そのものを読む手段が無いので、飛べた高さを上限とみなす。
+        // 覚えているのは「そこまでは行けた」という下限の証拠でしかなく、
+        // 本当の上限はもっと高い可能性が高い。初めて来たマップや、
+        // 低く飛んだだけのマップでは、記録がそのまま上限になってしまう。
+        // それを上限として扱うと、必要な高さに外周点を置けず、
+        // 指定の角度で降りられない。
         //
-        // ただし、これは「その高さまでは行ける」という下限の証拠でしかない。
-        // 実際の上限はもっと高い可能性がある。低く見積もって
-        // 進入できないよりは、抑えたうえで届かなければ
-        // 向きを変えて試すほうがよい。
-        if (MountService.KnownCeiling is { } ceiling && y > ceiling)
+        // そこで、記録より上を目指すことは禁じない。<b>余裕を足して許す。</b>
+        // 本当に頭打ちなら、その段階の上限（TakingOff / FlyToEntry）が
+        // 有限時間で拾い、向きを変えるか地上の経路へ落ちる。
+        // 「上限を読めていないなら保証しない」ので、抑え込みもしない。
+        if (MountService.KnownCeiling is { } known)
         {
-            // 抑えた結果、着地点より低くなるなら、この向きは使えない。
-            if (ceiling <= this.landing.Y + EntryClearanceMeters)
+            var allowed = known + CeilingHeadroomMeters;
+
+            if (y > allowed)
             {
-                return null;
+                // ここまで抑えても着地点より低くなるなら、この向きは使えない。
+                if (allowed <= this.landing.Y + EntryClearanceMeters)
+                {
+                    this.trace.State(
+                        "この向きは使えない",
+                        $"必要な高さ {y:F0} に対し、飛べた記録は {known:F0}（+{CeilingHeadroomMeters:F0} 余裕）");
+
+                    return null;
+                }
+
+                this.trace.State(
+                    "外周点の高さを抑えた",
+                    $"{y:F0} → {allowed:F0}" +
+                    $"（このマップで飛べた記録 {known:F0} に余裕 {CeilingHeadroomMeters:F0} を足した値。" +
+                    "これは上限の保証ではない）");
+
+                y = allowed;
             }
-
-            this.trace.State(
-                "外周点の高さを抑えた",
-                $"{y:F0} → {ceiling:F0}（このマップで飛べたのは {ceiling:F0} まで）");
-
-            y = ceiling;
         }
 
         return y;
@@ -1030,18 +1331,35 @@ public sealed class FateApproach(
 
     private void CancelPending()
     {
+        var cts = this.pendingCancel;
+        this.pendingCancel = null;
+        this.pending = null;
+
+        if (cts is null)
+        {
+            return;
+        }
+
+        // **取り消しに失敗しても必ず捨てる。**
+        // Cancel と Dispose を同じ try に入れていたため、
+        // Cancel が投げると Dispose を飛ばして漏らしていた。
         try
         {
-            this.pendingCancel?.Cancel();
-            this.pendingCancel?.Dispose();
+            cts.Cancel();
         }
         catch
         {
             // 取り消せなくても、世代番号で結果を捨てる。
         }
 
-        this.pendingCancel = null;
-        this.pending = null;
+        try
+        {
+            cts.Dispose();
+        }
+        catch
+        {
+            // 捨てられなくても動きは変えない。
+        }
     }
 
     /// <summary>水平距離。飛行中は真上に大きな差があるので、高さを混ぜない。</summary>

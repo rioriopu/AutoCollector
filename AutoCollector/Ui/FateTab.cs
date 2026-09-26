@@ -166,6 +166,28 @@ public sealed class FateTab(Plugin plugin)
                 cfg.FateZones.Select(id => this.plugin.FateZoneCatalog.NameOf(id)));
 
             ImGui.TextColored(ImGuiColors.DalamudGrey, $"  巡回順: {route} → （先頭へ戻る）");
+
+            // **周回中の変更は、次に始めるときから効く。**
+            //
+            // 回る順は開始した時点で固定される。そうしないと、
+            // 周回中にチェックを外したときに添字がずれてマップを飛ばす。
+            // ただし黙って効かないのは分からないので、ここで伝える。
+            var running = this.plugin.FateRunner.RunningRoute;
+
+            if (running.Count > 0 && !running.SequenceEqual(cfg.FateZones))
+            {
+                var current = string.Join(
+                    " → ",
+                    running.Select(id => this.plugin.FateZoneCatalog.NameOf(id)));
+
+                ImGui.TextColored(
+                    ImGuiColors.DalamudYellow,
+                    $"  いま回っているのは: {current}");
+
+                ImGui.TextColored(
+                    ImGuiColors.DalamudGrey,
+                    "  （周回中の変更は、次に開始したときから効きます）");
+            }
         }
 
         foreach (var ex in this.plugin.FateZoneCatalog.ListExpansions())
