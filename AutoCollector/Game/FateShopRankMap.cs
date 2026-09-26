@@ -227,7 +227,30 @@ public sealed class FateShopRankMap(AnomalyLog anomalyLog)
             for (var stage = 0; stage < ordered.Count; stage++)
             {
                 var shopId = ordered[stage];
-                this.stageByShop![shopId] = (uint)(stage + 1);
+
+                // **段階の番号がそのままランク。**
+                //
+                // ショップの数が最大ランクより少ないことがある
+                // （暁月は 2 ショップだが画面は RANK3 まで）。
+                // そのため「ショップ数＝ランク数」ではない。
+                //
+                // 実データで確かめると、<b>後ろのショップが複数ランクぶんを
+                // まとめて持っている</b>。サベネア島（暁月）の例：
+                //
+                //   1770460 … 素材 4 件（各 2 ジェム）                → ランク1
+                //   1770461 … 上記 + 詳細地図(70) + 譜(350) など      → ランク2 と 3 が同居
+                //
+                // 交換サイト（itumononeko.com）の一覧とも一致する。
+                // ランク 1 から素材が買えるので、最初の段階に条件は要らない。
+                //
+                // 後ろのショップに混ざったランク 2 と 3 を分ける手がかりは
+                // シートに無い。分けられない以上、まとめて
+                // 「最初にそのショップが現れる段階」を要求ランクとする。
+                // 実際より低く出る品があるが、<b>高く出して買えるものを
+                // 隠すよりは害が小さい</b>（買えなければゲーム側が拒む）。
+                var requiredRank = (uint)(stage + 1);
+
+                this.stageByShop![shopId] = requiredRank;
 
                 if (!shops.TryGetRow(shopId, out var shop))
                 {
@@ -245,10 +268,10 @@ public sealed class FateShopRankMap(AnomalyLog anomalyLog)
                     if (seen.Add(reward))
                     {
                         // この段階で初めて出てきた品。
-                        // 1 段階目（stage==0）は最初から買えるので条件なし。
-                        if (stage > 0)
+                        // 1 段階目（ランク 1）は最初から買えるので条件なし。
+                        if (requiredRank > 1)
                         {
-                            this.rankByEntry![(shopId, reward)] = (uint)(stage + 1);
+                            this.rankByEntry![(shopId, reward)] = requiredRank;
                         }
                     }
                 }
@@ -308,8 +331,20 @@ public sealed class FateShopRankMap(AnomalyLog anomalyLog)
                 continue;
             }
 
-            // 小さい順に 2 段階目から割り当てる。
-            // 印の無いエントリ（Quest==0）は最初から買えるので 1 段階目。
+            // 小さい順に ランク 2 から割り当てる。
+            //
+            // **漆黒はショップ分割方式と数え方が違う。**
+            // 印の無いエントリ（Quest==0）が「ランク 1 から買えるもの」として
+            // 実在するため、印はその次＝ランク 2・3 に対応する。
+            //
+            // 実データ（ver 2026.09.15）のレイクランド：
+            //   Q0  … 11 件（詳細地図・素材・ミラージュプリズムなど）
+            //   Q80 … 15 件（マテリジャ類）
+            //   Q81 …  2 件（オーケストリオン譜・ディープシャドウ・バード）
+            // 印は 2 つで、漆黒の最大ランクは 3。辻褄が合う。
+            //
+            // ショップ分割方式（暁月・黄金）はランク 1 の品が存在せず、
+            // 最初の段階からランク 2 が要る。そちらとは揃わないので注意。
             var stageOf = markers
                 .Select((marker, index) => (marker, stage: (uint)(index + 2)))
                 .ToDictionary(x => x.marker, x => x.stage);
