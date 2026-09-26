@@ -5,6 +5,7 @@ using AutoCollector.Ipc;
 using Dalamud.Game.ClientState.Conditions;
 using ECommons.DalamudServices;
 using ECommons.Throttlers;
+using FFXIVClientStructs.FFXIV.Client.Game;
 
 namespace AutoCollector.Automation;
 
@@ -366,8 +367,11 @@ public sealed class VentureWatcher(
         {
             case HomeTownService.TravelMethod.Return:
                 // ホームタウンと同じなのでデジョンで行ける。料金がかからない。
-                ReturnHome();
-                this.Detail = "デジョンで街へ戻っています";
+                if (this.TryReturnHome())
+                {
+                    this.Detail = "デジョンで街へ戻っています";
+                }
+
                 return;
 
             case HomeTownService.TravelMethod.Teleport:
@@ -425,19 +429,55 @@ public sealed class VentureWatcher(
     }
 
     /// <summary>
-    /// デジョン。
+    /// デジョンを撃つ。
     ///
-    /// ホームポイントへ戻る。経路も地形も高度も関係なく、どこに居ても戻れる。
+    /// <b>ExecuteCommand(200, 8) では飛べない。</b>
+    /// 以前はそれを使っていたが、記録を見ると座標が 1m も動いていなかった
+    /// （2026-09-26 実測。12:52 の脱出も 18:20 のベンチャー回収も、
+    ///  撃ったあと同じ座標に留まっていた）。
+    ///
+    /// デジョンは**詠唱のある通常アクション（ActionType.Action の 6 番）**。
+    /// AutoDuty も同じものを使っている（AutoDuty.cs:1500-1509）。
+    ///
+    /// <b>撃てるか先に確かめる。</b>
+    /// GetActionStatus が 0 以外なら、いまは撃てない（リキャスト中、
+    /// 戦闘中、詠唱中など）。送っても弾かれるだけなので次の機会を待つ。
     /// </summary>
-    private static unsafe void ReturnHome()
+    /// <returns>撃てたら true。撃てない状態なら false。</returns>
+    private unsafe bool TryReturnHome()
     {
         try
         {
-            FFXIVClientStructs.FFXIV.Client.Game.GameMain.ExecuteCommand(200, 8, 0, 0, 0);
+            var am = ActionManager.Instance();
+            if (am is null)
+            {
+                return false;
+            }
+
+            // すでに詠唱している。重ねて撃たない。
+            if (am->CastActionId == ReturnActionId)
+            {
+                return true;
+            }
+
+            var status = am->GetActionStatus(ActionType.Action, ReturnActionId);
+
+            if (status != 0)
+            {
+                this.Detail = $"デジョンを撃てるのを待っています（状態 {status}）";
+                return false;
+            }
+
+            am->UseAction(ActionType.Action, ReturnActionId);
+            return true;
         }
-        catch
+        catch (Exception ex)
         {
-            // 撃てなくても、次の機会に撃ち直す。
+            this.anomalyLog.Warn("Venture", $"デジョンを撃てませんでした: {ex.Message}");
+            return false;
         }
     }
+
+    /// <summary>デジョン（帰還）のアクション ID。</summary>
+    private const uint ReturnActionId = 6;
 }

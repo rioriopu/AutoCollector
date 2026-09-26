@@ -884,6 +884,21 @@ public sealed class FateRunner(
             return false;
         }
 
+        // **ベンチャー回収で動いている間は見張らない。**
+        //
+        // デジョンにも詠唱があり、そのあいだ足は止まる。
+        // 動いていないからと引っ張ると詠唱が中断され、撃ち直しては
+        // また中断される、を繰り返して永久に飛べない。
+        // テレポで同じことを踏んでいる（上のコメント）。
+        //
+        // 呼び鈴へ歩く移動も、こちらの見張りの管轄ではない。
+        // 進まないときは VentureWatcher 側の上限が面倒を見る。
+        if (ventures.Interrupting)
+        {
+            this.watchdogSince = DateTime.MinValue;
+            return false;
+        }
+
         // **報酬待ちを理由に、見張りを丸ごと止めない。**
         //
         // 以前は報酬待ちが 1 件でもあれば、どの段階でも見張りを止めていた。
@@ -2373,9 +2388,12 @@ public sealed class FateRunner(
         // **最後は帰還する。**
         //
         // 動かして抜けられないなら、座標ごと外へ出すしかない。
-        // 帰還（ExecuteCommand 200/8）は経路も地形も高度も関係なく、
-        // どこに居ても必ずホームポイントへ運んでくれる。
+        // 帰還（デジョン＝ActionType.Action の 6 番）は経路も地形も高度も
+        // 関係なく、どこに居てもホームポイントへ運んでくれる。
         // 入り組んだ地形に入り込んでしまったときの、確実な逃げ道。
+        //
+        // ただし詠唱があり、戦闘中やリキャスト中は撃てない。
+        // 撃てたかどうかは ReturnHome の戻り値で見る。
         //
         // 手で助けてもらうことはしない。連れてきたのはこちらなので、
         // こちらで出す。
@@ -2414,10 +2432,28 @@ public sealed class FateRunner(
             this.teleportStartedUtc = now;
             this.escapeAttempts = 0;
 
-            ReturnHome();
-            this.anomalyLog.Warn(
-                "Fate",
-                "地形から抜け出せなかったため帰還しました。周回は続けます");
+            // **撃てたかどうかを、そのまま書く。**
+            //
+            // 以前は結果を見ずに「帰還しました」と書いていた。
+            // そのため、実際には何も起きていないのに記録だけが残り、
+            // 効いていないことに気づけなかった（2026-09-26 実測）。
+            if (ReturnHome())
+            {
+                this.anomalyLog.Warn(
+                    "Fate",
+                    "地形から抜け出せなかったため帰還します。周回は続けます");
+            }
+            else
+            {
+                this.anomalyLog.Warn(
+                    "Fate",
+                    "地形から抜け出せず、帰還も撃てませんでした（戦闘中・リキャスト中など）。" +
+                    "次の機会に撃ち直します");
+
+                // 撃てなかったので、詰まりの回数は戻す。次のフレームでまた試す。
+                this.escapeAttempts = MaxEscapeAttempts;
+            }
+
             return;
         }
 
@@ -2866,6 +2902,14 @@ public sealed class FateRunner(
             this.target = null;
             this.prefetched = null;
             this.moveIssued = false;
+
+            // **段階を移す。**
+            //
+            // MovingToFate のままにしていたため、画面には
+            // 「FATE へ向かっています」と出たまま街へ向かっていた。
+            // 見張りも「FATE へ移動中なのに動かない」と読んで引っ張り、
+            // デジョンの詠唱を中断させていた（2026-09-26 実測）。
+            this.SetStep(FateStep.Traveling, "ベンチャー回収のため街へ向かっています");
         }
 
         this.StatusDetail = ventures.Detail;
@@ -4476,18 +4520,56 @@ public sealed class FateRunner(
     }
 
     /// <summary>ホームポイントへ戻る（戦闘不能からの復帰）。</summary>
-    private static unsafe void ReturnHome()
+    /// <summary>
+    /// 帰還（デジョン）を撃つ。
+    ///
+    /// <b>ExecuteCommand(200, 8) では飛べない。</b>
+    /// 以前はそれを使っていたが、記録を見ると座標が 1m も動いていなかった
+    /// （2026-09-26 実測。12:52 の詰まり脱出も 18:20 のベンチャー回収も、
+    ///  撃ったあと同じ座標に留まっていた。「帰還しました」と書いていたが
+    ///  実際には何も起きていなかった）。
+    ///
+    /// 帰還は<b>詠唱のある通常アクション（ActionType.Action の 6 番）</b>。
+    /// AutoDuty も同じものを使っている（AutoDuty.cs:1500-1509）。
+    ///
+    /// <b>撃てるか先に確かめる。</b>
+    /// GetActionStatus が 0 以外なら、いまは撃てない（リキャスト中、
+    /// 戦闘中、詠唱中など）。送っても弾かれるだけ。
+    /// </summary>
+    /// <returns>撃てたら true。</returns>
+    private static unsafe bool ReturnHome()
     {
         try
         {
-            // ExecuteCommand 200 / param 8 が「帰還」。
-            FFXIVClientStructs.FFXIV.Client.Game.GameMain.ExecuteCommand(200, 8, 0, 0, 0);
+            var am = FFXIVClientStructs.FFXIV.Client.Game.ActionManager.Instance();
+            if (am is null)
+            {
+                return false;
+            }
+
+            // すでに詠唱している。重ねて撃たない。
+            if (am->CastActionId == ReturnActionId)
+            {
+                return true;
+            }
+
+            if (am->GetActionStatus(FFXIVClientStructs.FFXIV.Client.Game.ActionType.Action, ReturnActionId) != 0)
+            {
+                return false;
+            }
+
+            am->UseAction(FFXIVClientStructs.FFXIV.Client.Game.ActionType.Action, ReturnActionId);
+            return true;
         }
         catch
         {
             // 失敗しても次のフレームで呼び直される。
+            return false;
         }
     }
+
+    /// <summary>帰還（デジョン）のアクション ID。</summary>
+    private const uint ReturnActionId = 6;
 
     private void SetStep(FateStep step, string detail)
     {
