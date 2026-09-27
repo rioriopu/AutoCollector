@@ -10,8 +10,8 @@
 |---|---|---|
 | 1 | `EUi.Initialize` / `EUi.Shutdown` | 済・実機確認 |
 | 2 | ウィンドウを `EuWindow` へ | 済・実機確認（0.1.3.5） |
-| 3 | タブバーを `EUi.TabBar` へ | **API 待ち** |
-| 4 | 各タブの中身を移す | 3 の後 |
+| **3** | タブバーを `EUi.TabBar` へ | **済**（0.1.5.4） |
+| 4 | 各タブの中身を移す | **ここから。1 枚ずつ** |
 | 5 | 設定の多い画面を属性バインディングへ | 4 の後 |
 
 段 2 まで入れた時点で、**枠・タイトルバー・スクロールバーは EstellUtils の描画**になる。
@@ -210,3 +210,73 @@ if (x + width > rowRect.Max.X && i > 0)
 `ImGui.TableSetupScrollFreeze`（見出し行を固定したまま中身だけ送る）に当たるものが
 `EUi.TableHeader` / `TableRow` にあるか。交換候補の一覧で使っている。
 無くても移せるが、長い一覧で見出しが流れる。
+
+## 段 3 を入れた（0.1.5.4）
+
+### 何が変わったか
+
+| | 以前 | いま |
+|---|---|---|
+| タブバー | `ImRaii.TabBar`（生 ImGui） | `EUi.TabBar` |
+| 入り切らないタブ | 見出しが省略され、後ろへ行けない | **折り返して全部出る** |
+| 中身の囲み | `Draw()` で 1 回まとめて | **タブごとに開く** |
+| プリセットへ飛ぶ | `ImGuiTabItemFlags.SetSelected` | `EUi.SelectTab(id, "プリセット")` |
+
+### 囲みをタブごとにした理由
+
+**中身を 1 枚ずつ移せるようにするため。**
+
+以前は `Draw()` の先頭で `RawImGui` を 1 回開き、その中で全タブを描いていた。
+この形だと、あるタブだけ EstellUtils へ移そうとしても、
+そのタブも生 ImGui の囲みの中に居続けることになる。
+
+いまは各タブが自分で `RawTabScope.Open()` を呼ぶ。
+
+```csharp
+private void DrawStatusTab()
+{
+    // 中身はまだ生の ImGui。移し終えたらこの 1 行を外す。
+    using var raw = RawTabScope.Open();
+    ...
+}
+```
+
+**移し終えたタブから、この 1 行を外していける。**
+全部外れたら `RawTabScope.cs` ごと消す。
+
+### `RawTabScope` を作った理由
+
+生 ImGui を描くには 2 つ要り、どちらも対で閉じる必要がある。
+
+```
+EUi.RawImGui()        ImGui 側に同じ大きさの領域を用意する
+PushTextWrapPos(0f)   生 ImGui の文字は既定で折り返さない
+```
+
+9 枚のタブそれぞれに `try / finally` を書くと読みにくい。
+`using` 1 行で済むようにまとめた。
+
+### 飛び先をラベルで指す
+
+「プリセットへ飛ぶ」は状況タブに 3 か所ある。
+
+添字で指すと、**デバッグモードでタブが 2 枚増減したときに飛び先がずれる。**
+`EUi.SelectTab(id, "プリセット")` のラベル版を使う
+（提言 F-2 で足してもらったもの）。
+
+### 次（段 4）
+
+中身を 1 枚ずつ移す。`RichLabel` が入ったので、
+`TextColored` → `SameLine` → `TextColored` の連なりが 1 行で書ける。
+
+| ファイル | `TextColored` | `SameLine` |
+|---|---|---|
+| `PresetTab.cs` | 103 | 27 |
+| `MainWindow.cs` | 72 | 13 |
+| `MainWindow.DebugTab.cs` | 46 | 15 |
+| `MainWindow.CraftPlanTab.cs` | 44 | 9 |
+| `MainWindow.StatusTab.cs` | 30 | 12 |
+| `FateTab.cs` | 24 | 2 |
+| `MainWindow.SetupGuide.cs` | 15 | 3 |
+
+**`FateTab.cs` は当面触らない。**別マシンで作業中のため。

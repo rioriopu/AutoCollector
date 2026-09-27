@@ -26,11 +26,8 @@ public sealed class FateTab(Plugin plugin)
 
     public void Draw()
     {
-        using var tab = ImRaii.TabItem("FATE 周回");
-        if (!tab)
-        {
-            return;
-        }
+        // 中身はまだ生の ImGui。移し終えたらこの 1 行を外す。
+        using var raw = RawTabScope.Open();
 
         var cfg = Plugin.C;
         var runner = this.plugin.FateRunner;

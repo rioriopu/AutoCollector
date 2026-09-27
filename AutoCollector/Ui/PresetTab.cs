@@ -204,16 +204,16 @@ public sealed class PresetTab(Plugin plugin)
         return builder.Length > 10 ? builder.ToString(0, 10) : builder.ToString();
     }
 
-    public void Draw(ref bool select)
+    /// <summary>
+    /// プリセットのタブを描く。
+    ///
+    /// 「ここへ飛ぶ」は呼ぶ側が <c>EUi.SelectTab</c> で行う。
+    /// 添字ではなくラベルで指すので、タブが増減しても飛び先がずれない。
+    /// </summary>
+    public void Draw()
     {
-        var flags = select ? ImGuiTabItemFlags.SetSelected : ImGuiTabItemFlags.None;
-        select = false;
-
-        using var tab = ImRaii.TabItem("プリセット", flags);
-        if (!tab)
-        {
-            return;
-        }
+        // 中身はまだ生の ImGui。移し終えたらこの 1 行を外す。
+        using var raw = RawTabScope.Open();
 
         // 写したことの知らせは 1 画面に 1 度だけ。
         // 出す場所が 2 か所あるため、ここで戻さないと同じ行が 2 つ並ぶ。

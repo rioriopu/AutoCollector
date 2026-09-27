@@ -18,11 +18,8 @@ public sealed partial class MainWindow
 
     private void DrawDonationTab()
     {
-        using var tab = ImRaii.TabItem("寄付");
-        if (!tab)
-        {
-            return;
-        }
+        // 中身はまだ生の ImGui。移し終えたらこの 1 行を外す。
+        using var raw = RawTabScope.Open();
 
         ImGui.Spacing();
 

@@ -88,11 +88,8 @@ public sealed partial class MainWindow
 
     private void DrawStatusTab()
     {
-        using var tab = ImRaii.TabItem("状況");
-        if (!tab)
-        {
-            return;
-        }
+        // 中身はまだ生の ImGui。移し終えたらこの 1 行を外す。
+        using var raw = RawTabScope.Open();
 
         var snap = this.plugin.MonitorService.Snapshot;
 

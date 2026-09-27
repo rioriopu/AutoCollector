@@ -65,77 +65,85 @@ public sealed partial class MainWindow : EuWindow
 
     public override void Draw()
     {
-        // **生の ImGui は必ず RawImGui のスコープで囲む。**
+        // **タブバーは EstellUtils が描く。**
         //
-        // EstellUtils は独自のカーソルで位置を決めるため、
-        // 囲まずに ImGui を呼ぶと画面の外へ描かれ、窓が空に見える。
-        // 実際そうなった（窓枠だけ出て中身が何も無い）。
+        // 入り切らないぶんは折り返すので、窓を狭めても
+        // 後ろのタブ（寄付・デバッグ）へ辿り着ける。
+        // 生の ImGui では省略されて行き先が消えていた。
         //
-        // 高さを指定しないと残り高さをちょうど埋めるので、
-        // 外側の送りと二重にならない。幅も折り返しもこのスコープが合わせる。
-        //
-        // 中身をひとつずつ EstellUtils へ移していくあいだ、
-        // まだ移していない部分はこのスコープの中に置く。
-        using var raw = EUi.RawImGui();
-
-        // **折り返す位置を決めておく。**
-        //
-        // 生 ImGui の文字は、TextWrapped 以外は折り返さない。
-        // 以前の窓は横に送れたので端まで読めたが、
-        // 領域に収まるようになったぶん、はみ出した文字が読めなくなる。
-        //
-        // 0 は「描いてよい幅の右端で折り返す」という意味。
-        // 表の中では桁の幅で折り返るので、桁ごとの説明もそのまま読める。
-        //
-        // これは見せ方の選択で、ライブラリの不足ではない。
-        // 中身を EstellUtils へ移し終えたら要らなくなる。
-        ImGui.PushTextWrapPos(0f);
-
-        try
-        {
-            this.DrawTabs();
-        }
-        finally
-        {
-            ImGui.PopTextWrapPos();
-        }
-    }
-
-    /// <summary>タブと、その中身を描く。まだ生 ImGui のまま。</summary>
-    private void DrawTabs()
-    {
-        // **入り切らないタブへ辿り着けるようにする。**
-        //
-        // タブは 8 枚、デバッグモードでは 10 枚になる。
-        // 既定のままだと幅に入らないぶんは見出しが省略され、
-        // 窓を狭めた利用者は後ろのタブ（寄付・デバッグ）へ行けない。
-        //
-        // 中身を EstellUtils へ移し終えたら EUi.TabBar（折り返し対応）へ替える。
-        using var tabs = ImRaii.TabBar(
-            "##autocollector_tabs",
-            ImGuiTabBarFlags.FittingPolicyScroll);
-        if (!tabs)
-        {
-            return;
-        }
-
-        this.DrawStatusTab();
-        this.presetTab.Draw(ref this.jumpToPresetTab);
-        this.fateTab.Draw();
+        // 中身はタブごとに RawTabScope を開いて、まだ生の ImGui で描く。
+        // 移し終えたタブから、その囲みを外していく。
+        var labels = new List<string> { "状況", "プリセット", "FATE 周回" };
 
         // 開発・調査用のタブはデバッグモードのときだけ出す。
         if (Plugin.C.DebugMode)
         {
-            this.DrawExchangeTab();
-            this.DrawShopTab();
+            labels.Add("交換候補");
+            labels.Add("ショップ照合");
         }
 
-        this.DrawDiagnosticsTab();
-        this.DrawSettingsTab();
-        this.DrawCraftPlanTab();
-        this.DrawDebugTab();
-        this.DrawDonationTab();
+        labels.Add("診断");
+        labels.Add("設定");
+        labels.Add("製作計画");
+        labels.Add("デバッグ");
+        labels.Add("寄付");
+
+        // **「プリセットへ飛ぶ」はラベルで指す。**
+        //
+        // 添字で指すと、デバッグモードでタブが 2 枚増減したときに
+        // 飛び先がずれる。ラベルなら並びが変わっても当たる。
+        if (this.jumpToPresetTab)
+        {
+            this.jumpToPresetTab = false;
+            EUi.SelectTab(TabBarId, "プリセット");
+        }
+
+        var tabs = EUi.TabBar(TabBarId, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(labels));
+
+        if (tabs.IsSelected("状況"))
+        {
+            this.DrawStatusTab();
+        }
+        else if (tabs.IsSelected("プリセット"))
+        {
+            this.presetTab.Draw();
+        }
+        else if (tabs.IsSelected("FATE 周回"))
+        {
+            this.fateTab.Draw();
+        }
+        else if (tabs.IsSelected("交換候補"))
+        {
+            this.DrawExchangeTab();
+        }
+        else if (tabs.IsSelected("ショップ照合"))
+        {
+            this.DrawShopTab();
+        }
+        else if (tabs.IsSelected("診断"))
+        {
+            this.DrawDiagnosticsTab();
+        }
+        else if (tabs.IsSelected("設定"))
+        {
+            this.DrawSettingsTab();
+        }
+        else if (tabs.IsSelected("製作計画"))
+        {
+            this.DrawCraftPlanTab();
+        }
+        else if (tabs.IsSelected("デバッグ"))
+        {
+            this.DrawDebugTab();
+        }
+        else if (tabs.IsSelected("寄付"))
+        {
+            this.DrawDonationTab();
+        }
     }
+
+    /// <summary>タブバーを覚えておくための名前。飛び先の指定にも使う。</summary>
+    private const string TabBarId = "##autocollector_tabs";
 
     /// <summary>
     /// 手動で開いた交換ショップの中身を読み取り、ゲームデータと照合する。
@@ -145,11 +153,8 @@ public sealed partial class MainWindow : EuWindow
     /// </summary>
     private void DrawShopTab()
     {
-        using var tab = ImRaii.TabItem("ショップ照合");
-        if (!tab)
-        {
-            return;
-        }
+        // 中身はまだ生の ImGui。移し終えたらこの 1 行を外す。
+        using var raw = RawTabScope.Open();
 
         ImGui.TextColored(ImGuiColors.DalamudGrey, "交換ショップを手動で開いた状態で確認してください。このタブは交換を実行しません。");
         ImGui.Spacing();
@@ -649,11 +654,8 @@ public sealed partial class MainWindow : EuWindow
     /// </summary>
     private void DrawExchangeTab()
     {
-        using var tab = ImRaii.TabItem("交換候補");
-        if (!tab)
-        {
-            return;
-        }
+        // 中身はまだ生の ImGui。移し終えたらこの 1 行を外す。
+        using var raw = RawTabScope.Open();
 
         var slots = this.plugin.TomestoneService.ListSlots();
         if (slots.Count == 0)
@@ -1059,11 +1061,8 @@ public sealed partial class MainWindow : EuWindow
 
     private void DrawDiagnosticsTab()
     {
-        using var tab = ImRaii.TabItem("診断");
-        if (!tab)
-        {
-            return;
-        }
+        // 中身はまだ生の ImGui。移し終えたらこの 1 行を外す。
+        using var raw = RawTabScope.Open();
 
         if (ImGui.Button("セルフチェックを実行"))
         {
@@ -1197,11 +1196,8 @@ public sealed partial class MainWindow : EuWindow
 
     private void DrawSettingsTab()
     {
-        using var tab = ImRaii.TabItem("設定");
-        if (!tab)
-        {
-            return;
-        }
+        // 中身はまだ生の ImGui。移し終えたらこの 1 行を外す。
+        using var raw = RawTabScope.Open();
 
         var changed = false;
 

@@ -38,11 +38,8 @@ public sealed partial class MainWindow
             return;
         }
 
-        using var tab = ImRaii.TabItem("製作計画");
-        if (!tab)
-        {
-            return;
-        }
+        // 中身はまだ生の ImGui。移し終えたらこの 1 行を外す。
+        using var raw = RawTabScope.Open();
 
         ImGui.TextColored(
             ImGuiColors.DalamudGrey,
