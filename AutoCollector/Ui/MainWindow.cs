@@ -891,11 +891,11 @@ public sealed partial class MainWindow : EuWindow
             return;
         }
 
-        var keeper = this.plugin.AutoDutyKeeper;
-        if (keeper.RestartCount > 0 && !keeper.GaveUp)
+        var combat = this.plugin.Combat;
+        if (combat.RestartCount > 0 && !combat.KeeperGaveUp)
         {
-            var status = string.IsNullOrEmpty(keeper.Status) ? string.Empty : $" / {keeper.Status}";
-            ImGui.TextColored(ImGuiColors.DalamudGrey, $"周回の維持: 再開 {keeper.RestartCount} 回{status}");
+            var status = string.IsNullOrEmpty(combat.KeeperStatus) ? string.Empty : $" / {combat.KeeperStatus}";
+            ImGui.TextColored(ImGuiColors.DalamudGrey, $"周回の維持: 再開 {combat.RestartCount} 回{status}");
         }
 
         using var table = ImRaii.Table("##automation", 4, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp);

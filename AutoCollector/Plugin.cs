@@ -163,7 +163,13 @@ public sealed class Plugin : IDalamudPlugin
 
     internal MonitorService MonitorService { get; private set; } = null!;
 
-    internal AutoDutyKeeper AutoDutyKeeper { get; private set; } = null!;
+    /// <summary>
+    /// 周回の維持。**戦闘の稼ぎ手へ渡すためだけに持つ。**
+    ///
+    /// 触るのは <c>Combat</c> ごし（TickKeeper / SuspendKeeper / ResumeKeeper）。
+    /// ここから直接触らない。触ると、稼ぎ手が知らないところで止まったり戻ったりする。
+    /// </summary>
+    private AutoDutyKeeper AutoDutyKeeper { get; set; } = null!;
 
     internal AutoDutySetup AutoDutySetup { get; private set; } = null!;
 
@@ -638,8 +644,7 @@ public sealed class Plugin : IDalamudPlugin
             this.ExchangeExecutor,
             this.CurrencyService,
             this.CollectableRewardService,
-            this.Earners,
-            this.Crafter);
+            this.Earners);
 
         this.AutoDutySetup = new AutoDutySetup(this.AutoDuty, this.AnomalyLog);
         this.AutoDutyKeeper = new AutoDutyKeeper(
@@ -649,6 +654,11 @@ public sealed class Plugin : IDalamudPlugin
             this.ExchangeExecutor,
             this.AutoDutySetup,
             this.MonitorService);
+
+        // **周回の維持は戦闘の稼ぎ手の持ち物にする。**
+        // 依存が循環する（維持は交換の実行役を要り、実行役は稼ぎ手を要る）ため、
+        // 生成のあとに繋ぐ。以後、維持を触るのは稼ぎ手ごしだけ。
+        this.Combat.AttachKeeper(this.AutoDutyKeeper);
 
         Svc.Framework.Update += this.OnFrameworkUpdate;
 
@@ -808,7 +818,7 @@ public sealed class Plugin : IDalamudPlugin
 
             this.ExchangeExecutor.Tick();
             this.MonitorService.Tick();
-            this.AutoDutyKeeper.Tick();
+            this.Combat.TickKeeper();
             this.CollectableCycle.Tick();
             this.RetainerRestock.Tick();
             this.CraftRunner.Tick();
@@ -845,7 +855,7 @@ public sealed class Plugin : IDalamudPlugin
     /// 止めたものを全部戻す。
     ///
     /// **止めるときに立てた旗は、1 か所で全部下ろす。**
-    /// 停止は 2 つの旗を立てる。周回の維持（AutoDutyKeeper.Suspended）と、
+    /// 停止は 2 つの旗を立てる。周回の維持（Combat.KeeperSuspended）と、
     /// 交換の封鎖（ExchangeExecutor の aborted）。
     ///
     /// 戻す側が維持しか見ていなかったため、止めたあとに周回だけが動き出し、
@@ -858,7 +868,7 @@ public sealed class Plugin : IDalamudPlugin
     /// </summary>
     internal void ResumeAfterStop()
     {
-        this.AutoDutyKeeper?.Resume();
+        this.Combat?.ResumeKeeper();
 
         // **止めたぶんは必ず戻す。**
         // 立てた旗を下ろし損なうと、周回は回るのに交換が弾かれ続ける（F-60）。
@@ -919,7 +929,7 @@ public sealed class Plugin : IDalamudPlugin
         // ここを通していなかったため、止めても AutoDuty が周回を終えるたびに
         // こちらから再開させ続けていた。利用者から見ると
         // 「オートコレクターを止めても周回が止まらない」。
-        this.AutoDutyKeeper?.Suspend(reason);
+        this.Combat?.SuspendKeeper(reason);
 
         // **いま走っている周回も止める。**
         //

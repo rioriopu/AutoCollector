@@ -45,6 +45,14 @@ public sealed class CombatEarner(AutoDutyIpc autoDuty, AnomalyLog anomalyLog, To
     /// <summary>いま各スロットに入っているトームストーンの ItemId。空なら未取得。</summary>
     private readonly HashSet<uint> tomestoneItemIds = [];
 
+    /// <summary>
+    /// 周回の維持。**この稼ぎ手の持ち物。**
+    ///
+    /// 生成の順で循環する（維持は交換の実行役を要り、実行役はこの稼ぎ手を要る）ため、
+    /// 生成のあとに <see cref="AttachKeeper"/> で繋ぐ。
+    /// </summary>
+    private AutoCollector.Automation.AutoDutyKeeper? keeper;
+
     private DateTime lastRunningUtc = DateTime.MinValue;
 
     /// <summary>Duty 中に見たエリア。再開先の第一候補。</summary>
@@ -150,6 +158,40 @@ public sealed class CombatEarner(AutoDutyIpc autoDuty, AnomalyLog anomalyLog, To
             return false;
         }
     }
+
+    /// <summary>
+    /// 周回の維持を繋ぐ。**生成の直後に 1 回だけ呼ぶ。**
+    ///
+    /// 依存が循環するため、コンストラクタでは受け取れない。
+    /// </summary>
+    public void AttachKeeper(AutoCollector.Automation.AutoDutyKeeper value) => this.keeper = value;
+
+    /// <summary>周回を維持するために何回再開させたか。画面に出す。</summary>
+    public int RestartCount => this.keeper?.RestartCount ?? 0;
+
+    /// <summary>維持を諦めたか。画面に出す。</summary>
+    public bool KeeperGaveUp => this.keeper?.GaveUp ?? false;
+
+    /// <summary>維持のいまの様子。画面に出す。</summary>
+    public string KeeperStatus => this.keeper?.Status ?? string.Empty;
+
+    /// <summary>維持を止めているか。</summary>
+    public bool KeeperSuspended => this.keeper?.Suspended ?? false;
+
+    /// <summary>
+    /// 周回の維持を進める。**毎フレーム呼ぶ。**
+    ///
+    /// 以前は束ねている側が維持を直接回していた。
+    /// 稼ぎ手が増えるたびに Tick の列が伸び、どれを回せばよいかが
+    /// 呼ぶ側の知識になっていた。稼ぎ手の中へ畳む。
+    /// </summary>
+    public void TickKeeper() => this.keeper?.Tick();
+
+    /// <summary>周回の維持を止める。</summary>
+    public void SuspendKeeper(string reason) => this.keeper?.Suspend(reason);
+
+    /// <summary>周回の維持を戻す。</summary>
+    public void ResumeKeeper() => this.keeper?.Resume();
 
     /// <summary>直前に記録した再開先。UI から手動で再開するときにも使う。</summary>
     public uint ResumeTerritoryId => this.Interrupt?.ResumeTerritoryId ?? this.observedDutyTerritoryId;

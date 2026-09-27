@@ -60,7 +60,7 @@ public sealed partial class MainWindow
         // 周回の維持（Suspended）だけを見ていた。交換側の封鎖（IsAborted）が
         // 残っていても「止めています」が出ず、再開ボタンも出ない。
         // その状態では製作と取り出しだけが動き、納品と交換は弾かれ続ける。
-        if (this.plugin.AutoDutyKeeper.Suspended || executor.IsAborted)
+        if (this.plugin.Combat.KeeperSuspended || executor.IsAborted)
         {
             ImGui.TextColored(ImGuiColors.DalamudYellow, "  止めています");
 
@@ -520,14 +520,14 @@ public sealed partial class MainWindow
         var autoDutyIdle = this.plugin.AutoDuty.IsLoaded &&
                            this.plugin.AutoDuty.TryIsStopped(out var stopped) && stopped;
 
-        if (executor.LastResumeTerritoryId != 0 && autoDutyIdle && !this.plugin.AutoDutyKeeper.GaveUp)
+        if (executor.LastResumeTerritoryId != 0 && autoDutyIdle && !this.plugin.Combat.KeeperGaveUp)
         {
             var name = Game.NpcLocationService.GetTerritoryName(executor.LastResumeTerritoryId);
             Row(ImGuiColors.DalamudYellow, $"AutoDuty が止まったままです（最後に周回していたのは {name}）。");
             this.DrawResumeAutoDutyButton(sameLine: false);
         }
 
-        if (this.plugin.AutoDutyKeeper.GaveUp)
+        if (this.plugin.Combat.KeeperGaveUp)
         {
             Row(ImGuiColors.DalamudYellow, "AutoDuty の周回維持をやめています（手動で止めたと判断しました）。");
 
@@ -540,7 +540,7 @@ public sealed partial class MainWindow
         // **止めたことが画面に出ないと、戻し方が分からない。**
         // 止めたあと AutoDuty を手で動かしても、維持が止まったままなので 1 周で終わる。
         // その理由がどこにも出ていなかった。
-        if (this.plugin.AutoDutyKeeper.Suspended)
+        if (this.plugin.Combat.KeeperSuspended)
         {
             Row(ImGuiColors.DalamudYellow, "周回の維持を止めています。1 周したらそこで終わります。");
 
@@ -815,8 +815,8 @@ public sealed partial class MainWindow
                 : $"呼び鈴: このエリア（{territory}）ではまだ覚えていません" +
                   $" / 全 {this.plugin.BellLocations.Count} エリア");
 
-        var keeper = this.plugin.AutoDutyKeeper;
-        ImGui.TextUnformatted($"周回の維持: 再開 {keeper.RestartCount} 回 / {keeper.Status} / 維持停止={keeper.GaveUp}");
+        var combat = this.plugin.Combat;
+        ImGui.TextUnformatted($"周回の維持: 再開 {combat.RestartCount} 回 / {combat.KeeperStatus} / 維持停止={combat.KeeperGaveUp}");
         ImGui.TextUnformatted($"スナップショット: 更新 {snap.AtUtc.ToLocalTime():HH:mm:ss} / 外部自動化 {snap.AutomationDetail}");
 
         ImGui.Spacing();

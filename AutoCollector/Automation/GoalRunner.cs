@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.Linq;
 using AutoCollector.Diagnostics;
 using AutoCollector.Earning;
+using AutoCollector.Earning.Combat;
 using AutoCollector.Earning.Crafter;
+using AutoCollector.Earning.Gatherer;
 using AutoCollector.Game;
 using Dalamud.Game.ClientState.Conditions;
 using ECommons.DalamudServices;
@@ -86,12 +88,10 @@ public sealed class GoalRunner(
     ExchangeExecutor executor,
     CurrencyService currency,
     CollectableRewardService rewards,
-    EarnerRegistry earners,
-    CrafterEarner crafter)
+    EarnerRegistry earners)
 {
     private readonly EarnerRegistry earners = earners;
 
-    private readonly CrafterEarner crafter = crafter;
 
     /// <summary>
     /// 暴走への歯止め。これを超えたら理由に関わらず打ち切る。
@@ -589,8 +589,8 @@ public sealed class GoalRunner(
             this.Note($"納品へ進めませんでした: {cycleReason}");
         }
 
-        // 4 と 5. 作る。
-        if (this.BeginCraft(preset, goal, out var craftReason))
+        // 4 と 5. 自分で増やす（作る／採る）。
+        if (this.TryBeginProduction(preset, goal, out var craftReason))
         {
             return true;
         }
@@ -629,17 +629,46 @@ public sealed class GoalRunner(
     }
 
     /// <summary>足りないぶんを作る。素材が足りなければ先に取り出す。</summary>
+    /// <summary>
+    /// この通貨を自分で増やす段取りを始める。
+    ///
+    /// <b>どの稼ぎ方で増やすかは、通貨で決まっている。</b>
+    /// 利用者に申告させず、稼ぎ手に聞く（<c>CanEarn</c>）。
+    ///
+    /// <b>ここが、稼ぎ方を足すときに触る唯一の場所。</b>
+    /// 以前は製作の段取りを直接呼んでいたため、
+    /// ギャザラースクリップのプリセットが製作の入口へ入り、
+    /// <b>「製作では増えません。周回で貯まるのを待ちます」</b>という
+    /// 事実と違う理由で止まっていた（採集で増えるものを、周回で待たせていた）。
+    /// </summary>
+    private bool TryBeginProduction(ExchangePreset preset, ScripGoal goal, out string reason)
+    {
+        var earner = this.earners.FindFor(goal.CurrencyItemId);
+
+        switch (earner)
+        {
+            case CrafterEarner:
+                return this.BeginCraft(preset, goal, out reason);
+
+            case GathererEarner:
+                // 採集の段取りはまだ無い。**「作れません」とは言わない。**
+                // 何が足りないのかを、そのまま書く。
+                reason = $"{goal.CurrencyName} は採集で増やしますが、採集の段取りはまだありません";
+                return false;
+
+            case CombatEarner:
+                reason = $"{goal.CurrencyName} は周回で増えます。貯まるのを待ちます";
+                return false;
+
+            default:
+                reason = $"{goal.CurrencyName} を自分で増やす手段がありません";
+                return false;
+        }
+    }
+
     private bool BeginCraft(ExchangePreset preset, ScripGoal goal, out string reason)
     {
         reason = string.Empty;
-
-        // **この通貨を製作で稼げないなら、製作へ進まない。**
-        // トームストーンは収集品の納品では増えない。周回で貯まるのを待つ。
-        if (!this.crafter.CanEarn(preset.CurrencyItemId))
-        {
-            reason = $"{goal.CurrencyName} は製作では増えません。周回で貯まるのを待ちます";
-            return false;
-        }
 
         if (preset.CraftCollectableItemId == 0)
         {

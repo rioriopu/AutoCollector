@@ -909,7 +909,7 @@ public sealed class PresetTab(Plugin plugin)
     {
         ImGui.Separator();
 
-        var keeper = this.plugin.AutoDutyKeeper;
+        var combat = this.plugin.Combat;
         var autoDuty = this.plugin.AutoDuty;
 
         // 画面用の問い合わせを使う。判定用のものは読めないたびに警告を書くため、
@@ -993,7 +993,7 @@ public sealed class PresetTab(Plugin plugin)
         {
             ImGui.TextColored(ImGuiColors.DalamudGrey, "  ほかの処理が動いています");
         }
-        else if (keeper.Suspended)
+        else if (combat.KeeperSuspended)
         {
             ImGui.TextColored(ImGuiColors.DalamudYellow, "  止めています。「周回を開始する」で戻せます");
         }
