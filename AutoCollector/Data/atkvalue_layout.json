@@ -6,6 +6,7 @@
     "誤った index で別のアイテムを購入することはない。復旧はこのファイルの数値を直すだけでよい。",
     "既定値は ECommons 3.2.1.17 (2026-08-08) 時点の配置。"
   ],
+  "verifiedGameVersion": "2026.09.15",
   "ShopExchangeCurrency": {
     "NumEntries": 4,
     "CurrencyAmount": 86,
@@ -14,6 +15,6 @@
     "EntryItemId": 1066,
     "EntryIndex": 1310,
     "EntryStride": 1,
-    "MaxEntries": 240
+    "MaxEntries": 200
   }
 }

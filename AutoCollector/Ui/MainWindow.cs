@@ -104,7 +104,16 @@ public sealed partial class MainWindow : EuWindow
     /// <summary>タブと、その中身を描く。まだ生 ImGui のまま。</summary>
     private void DrawTabs()
     {
-        using var tabs = ImRaii.TabBar("##autocollector_tabs");
+        // **入り切らないタブへ辿り着けるようにする。**
+        //
+        // タブは 8 枚、デバッグモードでは 10 枚になる。
+        // 既定のままだと幅に入らないぶんは見出しが省略され、
+        // 窓を狭めた利用者は後ろのタブ（寄付・デバッグ）へ行けない。
+        //
+        // 中身を EstellUtils へ移し終えたら EUi.TabBar（折り返し対応）へ替える。
+        using var tabs = ImRaii.TabBar(
+            "##autocollector_tabs",
+            ImGuiTabBarFlags.FittingPolicyScroll);
         if (!tabs)
         {
             return;

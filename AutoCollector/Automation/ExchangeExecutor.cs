@@ -6,6 +6,7 @@ using AutoCollector.Diagnostics;
 using AutoCollector.Earning;
 using AutoCollector.Earning.Combat;
 using AutoCollector.Earning.Crafter;
+using AutoCollector.Earning.Fate;
 using AutoCollector.Game;
 using AutoCollector.Ipc;
 using ECommons;
@@ -302,6 +303,7 @@ public sealed unsafe class ExchangeExecutor(
     AetheryteService aetheryte,
     LifestreamIpc lifestream,
     CombatEarner combat,
+    FateEarner fate,
     EarnerRegistry earners,
     AutoRetainerIpc autoRetainer,
     CrafterEarner crafter,
@@ -429,6 +431,8 @@ public sealed unsafe class ExchangeExecutor(
     private readonly AetheryteService aetheryte = aetheryte;
     private readonly LifestreamIpc lifestream = lifestream;
     private readonly CombatEarner combat = combat;
+
+    private readonly FateEarner fate = fate;
 
     private readonly EarnerRegistry earners = earners;
 
@@ -695,7 +699,7 @@ public sealed unsafe class ExchangeExecutor(
         this.StatusDetail = string.Empty;
         this.aborted = false;
 
-        this.autoRetainer.Release();
+        this.autoRetainer.Release("交換");
         this.crafter.ResumeAfterStop();
     }
 
@@ -713,7 +717,7 @@ public sealed unsafe class ExchangeExecutor(
 
         // ここへ来る経路によっては抑制が残っている可能性がある。
         // 抑制したまま放置すると AutoRetainer が動かなくなるため、必ず解く。
-        this.autoRetainer.Release();
+        this.autoRetainer.Release("交換");
         this.crafter.ResumeAfterStop();
 
         if (this.Step == ExchangeStep.Error)
@@ -816,7 +820,7 @@ public sealed unsafe class ExchangeExecutor(
         // 7. 外部抑制の解除。自分が立てた場合だけ外す。
         try
         {
-            this.autoRetainer.Release();
+            this.autoRetainer.Release("交換");
             this.crafter.ResumeAfterStop();
         }
         catch (Exception ex)
@@ -825,6 +829,7 @@ public sealed unsafe class ExchangeExecutor(
         }
 
         this.combat.ForgetInterrupt();
+        this.fate.ForgetInterrupt();
         this.ownership.Clear();
     }
 
@@ -1313,7 +1318,7 @@ public sealed unsafe class ExchangeExecutor(
         // 2 段目: 先に抑制を立ててから、もう一度確認する。
         if (!this.autoRetainer.SuppressedByUs)
         {
-            if (!this.autoRetainer.Suppress())
+            if (!this.autoRetainer.Suppress("交換"))
             {
                 this.Fail(ExchangeFailure.AutoRetainerIpcBroken, "AutoRetainer の抑制を設定できませんでした");
                 return;
@@ -1381,6 +1386,31 @@ public sealed unsafe class ExchangeExecutor(
             return;
         }
 
+        // **FATE 周回を先に止める。**
+        //
+        // 止めないまま移動を始めると、交換所へ向かう経路と
+        // 次の FATE へ向かう経路が、同じ vnavmesh へ交互に積まれて
+        // どちらの行き先にも着かなくなる。
+        //
+        // ここで止めることで、戻る先（エリアと座標）も控えられる。
+        // 控えていないと、交換のあと元のマップへ戻れない。
+        var fateResult = this.fate.TickSuspend();
+
+        if (fateResult.Progress == EarnerProgress.InProgress)
+        {
+            if (fateResult.Detail.Length > 0)
+            {
+                this.StatusDetail = fateResult.Detail;
+            }
+
+            if (DateTime.UtcNow > this.stepDeadlineUtc)
+            {
+                this.Fail(ExchangeFailure.Aborted, "FATE 周回を止められませんでした");
+            }
+
+            return;
+        }
+
         var result = this.combat.TickSuspend();
 
         // **止めていない相手のぶんまで待たない。**
@@ -1408,6 +1438,21 @@ public sealed unsafe class ExchangeExecutor(
     /// </summary>
     private bool ReturnToWaitIfUnsafe()
     {
+        // **稼ぎ手が切れ目にいるかも見る。**
+        //
+        // FATE の最中に止めると、それまでの貢献が無駄になる。
+        // 納品 FATE なら、報酬が入る前に離れると報酬そのものを失う。
+        //
+        // 誰に聞くかを書き並べない。登録簿が全員に聞く。
+        // 稼ぎ手が増えたときに、ここを直し忘れて素通りするのを防ぐ。
+        if (!this.earners.AllAtSafeBreak(out var breakReason))
+        {
+            this.Step = ExchangeStep.WaitingSafeWindow;
+            this.StatusDetail = $"待機中: {breakReason}";
+            this.lastWaitLogUtc = DateTime.MinValue;
+            return true;
+        }
+
         if (SafetyGuard.IsSafeToStart(out var reason))
         {
             return false;
@@ -1625,8 +1670,31 @@ public sealed unsafe class ExchangeExecutor(
             // 稼ぎ手を動かす前に抑制を解く。
             // AutoDuty はループ間処理で AutoRetainer を呼ぶため、抑制したまま再開すると
             // リテイナー処理が動かないまま次の周回に入る。
-            this.autoRetainer.Release();
+            this.autoRetainer.Release("交換");
             this.crafter.ResumeAfterStop();
+        }
+
+        // **FATE 周回を先に戻す。**
+        //
+        // AutoDuty の再開より先に通す。両方を止めていた場合、
+        // 戻す順が逆だと AutoDuty が動き出してから FATE が経路を積み、
+        // 止めたときと同じ取り合いが起きる。
+        var fateResult = this.fate.TickResume();
+
+        if (fateResult.Progress == EarnerProgress.InProgress)
+        {
+            if (fateResult.Detail.Length > 0)
+            {
+                this.StatusDetail = fateResult.Detail;
+            }
+
+            return;
+        }
+
+        if (fateResult.Progress == EarnerProgress.Failed)
+        {
+            // 戻せなくても交換は終わっている。記録に残して先へ進む。
+            this.anomalyLog.Warn("Fate", $"FATE 周回を再開できませんでした: {fateResult.Detail}");
         }
 
         var result = this.combat.TickResume();
@@ -1660,9 +1728,10 @@ public sealed unsafe class ExchangeExecutor(
         this.CloseOwned("ShopExchangeCurrency", useCloseFirst: true);
         this.CloseOwned("InclusionShop", useCloseFirst: true);
 
-        this.autoRetainer.Release();
+        this.autoRetainer.Release("交換");
         this.crafter.ResumeAfterStop();
         this.combat.ForgetInterrupt();
+        this.fate.ForgetInterrupt();
 
         // session を片付ける前に控える。片付けたあとは交換回数を出す手段が無くなる。
         this.LastSessionCompleted = this.session?.Completed ?? 0;
@@ -4260,7 +4329,7 @@ public sealed unsafe class ExchangeExecutor(
 
         try
         {
-            this.autoRetainer.Release();
+            this.autoRetainer.Release("交換");
             this.crafter.ResumeAfterStop();
         }
         catch (Exception ex)

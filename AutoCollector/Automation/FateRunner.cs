@@ -281,6 +281,15 @@ public sealed class FateRunner(
     private const float LandFromHeightMeters = 8f;
 
     /// <summary>
+    /// 着地点より下にいてよい距離。
+    ///
+    /// 自分が着地点より下にいると「降りた」の判定が負になる。
+    /// 下限を置かないと、洞窟や下層など階層の違う場所でも
+    /// FATE に入ったことにしてしまう。
+    /// </summary>
+    private const float LandBelowMeters = 2f;
+
+    /// <summary>
     /// 降りる判定と、降りるのをやめる判定の差。
     ///
     /// 同じ値で往復させないために置く。敵は動くので、
@@ -588,6 +597,15 @@ public sealed class FateRunner(
     private int zoneIndex;
     /// <summary>いまの目的地へ経路を引いたか。乗ってから引くので旗で覚える。</summary>
     private bool moveIssued;
+
+    /// <summary>止めた時点で向かっていた場所。見張りが「自分の経路か」を見分けるために使う。</summary>
+    private Vector3? stopGuardDestination;
+
+    /// <summary>最後に自分が vnavmesh へ頼んだ行き先。</summary>
+    private Vector3? lastMoveDestination;
+
+    /// <summary>経路の終点が行き先とどれだけ離れていても同じとみなすか。</summary>
+    private const float StopGuardMatchRadius = 8f;
 
     /// <summary>経路を引いたとき飛んでいたか。地面に触れて解けたのを見分ける。</summary>
     private bool flyingWhenIssued;
@@ -933,14 +951,55 @@ public sealed class FateRunner(
             return;
         }
 
-        // 経路を持っていたら捨てる。止めたはずなので、持っているのは
-        // 止めたあとに積まれたもの。
-        if (this.vnavmesh.TryNumWaypoints(out var waypoints) && waypoints > 0)
+        if (!this.vnavmesh.TryNumWaypoints(out var waypoints) || waypoints <= 0)
         {
-            this.vnavmesh.TryStop();
-            this.trace.Decision("止めたあとの経路を捨てた", $"経路点 {waypoints} 個");
+            return;
         }
+
+        // **自分が積んだ経路だけ捨てる。**
+        //
+        // vnavmesh の経路は 1 本しかなく、交換の移動・リテイナーの呼び鈴への移動・
+        // 納品窓口への移動・AutoDuty のダンジョン内の移動が、同じ 1 本を使う。
+        //
+        // 以前は持ち主を見ずに捨てていた。そのため FATE を止めた直後の 20 秒間、
+        // **他の処理の移動が毎フレーム止められ**、「歩き出してすぐ止まる」を
+        // 繰り返して移動そのものが失敗した。
+        //
+        // 終点が、止めたとき向かっていた場所と合うものだけを捨てる。
+        if (!this.IsOurPath())
+        {
+            return;
+        }
+
+        this.vnavmesh.TryStop();
+        this.trace.Decision("止めたあとの経路を捨てた", $"経路点 {waypoints} 個");
     }
+
+    /// <summary>
+    /// いま積まれている経路が、自分が止める直前に頼んだものか。
+    ///
+    /// 終点を比べる。判断がつかないときは <b>false</b>（＝捨てない）に倒す。
+    /// 他人の経路を捨てるほうが、自分の経路を捨て損なうより害が大きい。
+    /// </summary>
+    private bool IsOurPath()
+    {
+        if (this.stopGuardDestination is not { } mine)
+        {
+            return false;
+        }
+
+        if (!this.vnavmesh.TryListWaypoints(out var points) || points is not { Count: > 0 })
+        {
+            return false;
+        }
+
+        // 終点どうしを比べる。経路は目的地の近くで終わるので、多少の幅を持たせる。
+        return Vector3.DistanceSquared(points[^1], mine) <= StopGuardMatchRadius * StopGuardMatchRadius;
+    }
+
+    /// <summary>最後に自分が向かおうとした場所。分からなければ null。</summary>
+    private Vector3? LastRequestedDestination()
+        => this.moveIssued ? this.lastMoveDestination : null;
 
     /// <summary>
     /// 段階に関係なく、動けなくなっていないかを見張る。
@@ -1171,6 +1230,11 @@ public sealed class FateRunner(
         //
         // 探索が終わるのを待って、積まれたら捨てる。
         this.stopGuardUntil = DateTime.UtcNow + StopGuardWindow;
+
+        // **どこへ向かっていたかを控える。**
+        // 見張りはこの行き先へ向かう経路だけを捨てる。
+        // 控えないと、他の処理が積んだ経路まで巻き添えにする。
+        this.stopGuardDestination = this.LastRequestedDestination();
 
         // 頼んである経路探索の結果も捨てる。
         // 残しておくと、止めたあとに出来上がって積まれてしまう。
@@ -1660,16 +1724,7 @@ public sealed class FateRunner(
                     $"{NpcLocationService.GetTerritoryName(destination)} へテレポートできるのを待っています";
 
                 // 待っている間もタイムアウトは進める。
-                if (DateTime.UtcNow - this.teleportStartedUtc > TeleportTimeout)
-                {
-                    this.anomalyLog.Warn(
-                        "Fate",
-                        $"{NpcLocationService.GetTerritoryName(destination)} へテレポートできないため、次のマップへ移ります");
-
-                    this.teleportStartedUtc = DateTime.MinValue;
-                    this.teleportRejectedUtc = DateTime.MinValue;
-                    this.AdvanceZone(cfg);
-                }
+                this.GiveUpTeleport(cfg, destination);
 
                 return;
             }
@@ -1703,16 +1758,7 @@ public sealed class FateRunner(
                 // ここで return していたため、下のタイムアウト判定に
                 // 一度も届かなかった。拒否され続けると永久に待つ。
                 // 猶予を過ぎたら、次のマップへ送る。
-                if (DateTime.UtcNow - this.teleportStartedUtc > TeleportTimeout)
-                {
-                    this.anomalyLog.Warn(
-                        "Fate",
-                        $"{NpcLocationService.GetTerritoryName(destination)} へテレポートできないため、次のマップへ移ります");
-
-                    this.teleportStartedUtc = DateTime.MinValue;
-                    this.teleportRejectedUtc = DateTime.MinValue;
-                    this.AdvanceZone(cfg);
-                }
+                this.GiveUpTeleport(cfg, destination);
 
                 return;
             }
@@ -1724,12 +1770,37 @@ public sealed class FateRunner(
 
         this.StatusDetail = $"{NpcLocationService.GetTerritoryName(destination)} へ移動しています";
 
-        if (DateTime.UtcNow - this.teleportStartedUtc > TeleportTimeout)
+        this.GiveUpTeleport(cfg, destination, "テレポートが終わりませんでした");
+    }
+
+    /// <summary>
+    /// テレポを諦めて次のマップへ送る。時間切れのときだけ動く。
+    ///
+    /// **番兵に <c>DateTime.MinValue</c> を使わない。**
+    ///
+    /// 以前は諦めたあと <c>teleportStartedUtc</c> に <c>MinValue</c> を入れていた。
+    /// <c>AdvanceZone</c> が「移れる別のマップがありません」で戻ってくると、
+    /// 次のフレームも <c>UtcNow - MinValue</c> が時間切れになり、
+    /// **毎フレーム テレポを撃ち直し、間引きの無い警告を出し続けた。**
+    /// 記録は 200 件の輪なので、数秒で本来見るべき警告が全部押し出される。
+    ///
+    /// 諦めたら必ず現在時刻へ測り直す。次の判定まで猶予の時間が空く。
+    /// </summary>
+    private void GiveUpTeleport(Config cfg, uint destination, string reason = "テレポートできないため、次のマップへ移ります")
+    {
+        if (DateTime.UtcNow - this.teleportStartedUtc <= TeleportTimeout)
         {
-            this.anomalyLog.Warn("Fate", $"{NpcLocationService.GetTerritoryName(destination)} へのテレポートが終わりませんでした");
-            this.teleportStartedUtc = DateTime.MinValue;
-            this.AdvanceZone(cfg);
+            return;
         }
+
+        this.anomalyLog.Warn("Fate", $"{NpcLocationService.GetTerritoryName(destination)} へ{reason}");
+
+        // **測り直す。**MinValue に戻すと次のフレームも時間切れになる。
+        this.teleportStartedUtc = DateTime.UtcNow;
+        this.teleportRejectedUtc = DateTime.MinValue;
+
+        // 移れたなら AdvanceZone 側が控え直す。
+        this.AdvanceZone(cfg);
     }
 
     private void TickSeek(Config cfg)
@@ -2253,6 +2324,9 @@ public sealed class FateRunner(
             this.moveIssued = true;
             this.flyingWhenIssued = flying;
             this.moveStartedUtc = DateTime.UtcNow;
+
+            // 止めたあとの見張りが「自分の経路か」を見分けるために控える。
+            this.lastMoveDestination = destination;
         }
 
         // **外周では降りない。中心の地上へ斜めに降りる。**
@@ -2280,7 +2354,15 @@ public sealed class FateRunner(
             // 高いうちに降りると、そこから垂直落下になってしまう。
             var height = Player.Position.Y - landing.Y;
 
-            if (flat <= LandOnSpotMeters && height <= LandFromHeightMeters)
+            // **下限も見る。**
+            //
+            // height は「自分 − 着地点」なので、自分が着地点より**下**にいると
+            // 負になる。上限しか見ていなかったため、洞窟や下層など
+            // 着地点の真下にいるときも「降りた」と判断していた。
+            // 階層の違う場所で FATE に入ったことにしてしまう。
+            if (flat <= LandOnSpotMeters
+                && height <= LandFromHeightMeters
+                && height >= -LandBelowMeters)
             {
                 this.navigation.Stop();
                 this.EnterFate(cfg, live);

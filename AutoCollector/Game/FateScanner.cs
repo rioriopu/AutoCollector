@@ -349,7 +349,17 @@ public sealed unsafe class FateScanner(AnomalyLog anomalyLog)
                 return null;
             }
 
-            return inventory->GetInventoryItemCount(item);
+            // **FATE の収集品はキーアイテムに入る。鞄には入らない。**
+            //
+            // GetInventoryItemCount は通常の持ち物とアーマリーを見るので、
+            // ここで数えると**何個集めても必ず 0 が返る**。
+            // その結果「まだ集まっていない」と判断し続け、
+            // 納品の段取りへ一度も入れなかった。
+            //
+            // BossMod Reborn も InventoryType.KeyItems を直接見ている
+            // （WorldStateGameSync.cs:1027）。
+            return inventory->GetItemCountInContainer(
+                item, FFXIVClientStructs.FFXIV.Client.Game.InventoryType.KeyItems);
         }
         catch (Exception ex)
         {

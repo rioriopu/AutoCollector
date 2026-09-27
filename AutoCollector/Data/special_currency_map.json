@@ -9,12 +9,32 @@
     "",
     "MVP（Phase 1）では使用しない。Phase 4 のスクリップ対応で有効化する。"
   ],
-  "verifiedGameVersion": null,
+  "verifiedGameVersion": "2026.09.15",
   "buckets": [
-    { "index": 1, "itemId": 28,    "name": "アラガントームストーン:詩学" },
-    { "index": 2, "itemId": 33913, "name": "クラフタースクリップ:紫貨" },
-    { "index": 4, "itemId": 33914, "name": "ギャザラースクリップ:紫貨" },
-    { "index": 6, "itemId": 41784, "name": "クラフタースクリップ:橙貨" },
-    { "index": 7, "itemId": 41785, "name": "ギャザラースクリップ:橙貨" }
+    {
+      "index": 1,
+      "itemId": 28,
+      "name": "アラガントームストーン:詩学"
+    },
+    {
+      "index": 2,
+      "itemId": 33913,
+      "name": "クラフタースクリップ:紫貨"
+    },
+    {
+      "index": 4,
+      "itemId": 33914,
+      "name": "ギャザラースクリップ:紫貨"
+    },
+    {
+      "index": 6,
+      "itemId": 41784,
+      "name": "クラフタースクリップ:橙貨"
+    },
+    {
+      "index": 7,
+      "itemId": 41785,
+      "name": "ギャザラースクリップ:橙貨"
+    }
   ]
 }

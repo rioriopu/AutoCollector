@@ -122,11 +122,58 @@ public sealed class SharedFateRankService(AnomalyLog anomalyLog)
     /// <summary>
     /// F.A.T.E達成度の画面に出てくるマップを、拡張ごとにまとめて返す。
     ///
+    /// 列 0 = TerritoryType、列 1〜3 = ReqFatesToRank2/3/4（0 ならそのランクは無い）。
+    ///
     /// シートは拡張ごとに 6 件ずつ並んでいる（漆黒 / 暁月 / 黄金）。
     /// 並び順に 6 件ずつ切るのではなく、TerritoryType の番号帯で切る。
     /// 番号帯が離れているところが拡張の境目になる。
     /// </summary>
-    public IReadOnlyList<IReadOnlyList<uint>> ZoneGroups => this.zoneGroups ??= this.BuildGroups();
+    public IReadOnlyList<IReadOnlyList<uint>> ZoneGroups
+    {
+        get
+        {
+            if (this.zoneGroups is { Count: > 0 })
+            {
+                return this.zoneGroups;
+            }
+
+            // **空は控えない。**
+            //
+            // 起動直後やエリア移動中は、シートが null か 0 件で返ることがある。
+            // ??= だと空の結果まで控えてしまい、**二度と作り直されない。**
+            // その 1 回で、交換エリアの画面がプラグインを読み込み直すまで出なくなる。
+            //
+            // 同じ罠を FateTokenService と CollectableSourceService でも避けている。
+            var built = this.BuildGroups();
+
+            if (built.Count > 0)
+            {
+                this.zoneGroups = built;
+            }
+
+            return built;
+        }
+    }
+
+    /// <summary>
+    /// このマップの上限ランク。読めなければ null。
+    ///
+    /// <b>上限を知りたいところは全部ここを通す。</b>
+    /// 2 か所で別々に数えていたため、画面の文と解放の判定が食い違っていた。
+    ///
+    /// 順番は シート → エージェント。
+    /// エージェントの MaxRank は 0 のままのことがあるので当てにしない
+    /// （実機 2026-09-27 に確認）。
+    /// </summary>
+    private byte? MaxRankOf(SharedFateZoneRank zone)
+    {
+        if (this.maxRankByZone.TryGetValue(zone.TerritoryId, out var fromSheet) && fromSheet > 0)
+        {
+            return fromSheet;
+        }
+
+        return zone.HasMaxRank ? zone.MaxRank : null;
+    }
 
     private IReadOnlyList<IReadOnlyList<uint>> BuildGroups()
     {
@@ -323,21 +370,16 @@ public sealed class SharedFateRankService(AnomalyLog anomalyLog)
         //
         // エージェントの MaxRank は 0 のことがあるので当てにしない。
         // シート側が引けたときは、そちらを優先する。
-        var allFromSheet = inGroup.All(x => this.maxRankByZone.ContainsKey(x.TerritoryId));
+        var allFromSheet = inGroup.All(x => this.MaxRankOf(x) is not null);
 
         if (allFromSheet)
         {
-            return inGroup.All(x => x.CurrentRank >= this.maxRankByZone[x.TerritoryId]);
+            return inGroup.All(x => x.CurrentRank >= this.MaxRankOf(x)!.Value);
         }
 
-        // シートからも取れない（新しい拡張で列が増えた等）。
-        // エージェントが上限を持っていれば、それで判定する。
-        if (inGroup.All(x => x.HasMaxRank))
-        {
-            return inGroup.All(x => x.IsMaxed);
-        }
-
-        // どちらも取れない。分からないので解放されていない側に倒す。
+        // シートもエージェントも上限を持っていない。
+        // 分からないので解放されていない側に倒す。
+        // （シート → エージェント の順は MaxRankOf が受け持っている）
         return false;
     }
 
@@ -376,17 +418,20 @@ public sealed class SharedFateRankService(AnomalyLog anomalyLog)
             .Select(t => ranks[t])
             .ToList();
 
-        int maxed;
-        if (inGroup.Count == group.Count && inGroup.All(x => x.HasMaxRank))
+        // **解放の判定とまったく同じ入口を通す。**
+        //
+        // 以前はここだけシートの上限を見ず、「到達しているいちばん高いランク」を
+        // 上限とみなしていた。そのため全マップが同じランク（例: 全部 RANK2、
+        // シート上限は 3）のとき、画面には「ランク最大 6/6 マップ」と出るのに
+        // 解放判定は false になり、
+        // 『達成度が足りないため選べません（いま ランク最大 6/6 マップ）』という
+        // 自分で矛盾した文が出ていた。利用者からは不具合と区別がつかない。
+        if (inGroup.Count != group.Count || inGroup.Any(x => this.MaxRankOf(x) is null))
         {
-            maxed = inGroup.Count(x => x.IsMaxed);
+            return "達成度の上限を読めません";
         }
-        else
-        {
-            // 上限が読めないので、到達しているいちばん高いランクを上限とみなす。
-            var highest = inGroup.Count > 0 ? inGroup.Max(x => x.CurrentRank) : (byte)0;
-            maxed = highest == 0 ? 0 : inGroup.Count(x => x.CurrentRank >= highest);
-        }
+
+        var maxed = inGroup.Count(x => x.CurrentRank >= this.MaxRankOf(x)!.Value);
 
         return $"ランク最大 {maxed}/{group.Count} マップ";
     }

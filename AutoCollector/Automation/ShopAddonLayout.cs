@@ -144,9 +144,12 @@ public static class DataFileLoader
                 return;
             }
 
-            // 文字列の比較で足りる。印は「2026.09.15」の形なので、
-            // 辞書順がそのまま新しい順になる。
-            if (string.CompareOrdinal(embeddedVersion, installedVersion) <= 0)
+            // **数値で比べる。文字列の比較では足りない。**
+            //
+            // 印は「2026.09.15」の形だが、同じ日に 2 回直すと
+            // 「2026.09.15.2」「2026.09.15.10」のような 4 桁目が付く。
+            // 辞書順だと "10" < "2" になり、**新しいほうが古いと判定される。**
+            if (CompareVersions(embeddedVersion, installedVersion) <= 0)
             {
                 return;
             }
@@ -260,10 +263,41 @@ public static class DataFileLoader
         }
     }
 
+    /// <summary>
+    /// 「2026.09.15.2」の形の印を、桁ごとに数値で比べる。
+    /// 左が新しければ正、古ければ負、同じなら 0。
+    /// 桁数が違う場合は、足りないほうを 0 として扱う。
+    /// </summary>
+    private static int CompareVersions(string left, string right)
+    {
+        var a = left.Split('.');
+        var b = right.Split('.');
+
+        for (var i = 0; i < Math.Max(a.Length, b.Length); i++)
+        {
+            var x = i < a.Length && int.TryParse(a[i], out var xv) ? xv : 0;
+            var y = i < b.Length && int.TryParse(b[i], out var yv) ? yv : 0;
+
+            if (x != y)
+            {
+                return x.CompareTo(y);
+            }
+        }
+
+        return 0;
+    }
+
     /// <summary>ShopExchangeCurrency の配置を読む。JSON はアドオン名をキーに持つ。</summary>
     public static ShopAddonLayout LoadShopLayout(AnomalyLog anomalyLog)
     {
         var path = Path.Combine(GetDataDirectory(), "atkvalue_layout.json");
+
+        // **このファイルだけ入れ替えを通していなかった。**
+        //
+        // 展開したあとは設定ディレクトリの中身を読む作りなので、
+        // 同梱の JSON を直して配っても、一度でも起動した利用者には届かない。
+        // パッチで AtkValue の配置がずれたときに直せない。
+        UpgradeIfOutdated(path, "atkvalue_layout.json", anomalyLog);
 
         try
         {

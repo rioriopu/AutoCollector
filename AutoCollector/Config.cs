@@ -401,11 +401,12 @@ public sealed class Config
     /// <summary>ギサールの野菜がこれを切ったら買いに行く。</summary>
     public int FateGysahlMinCount { get; set; } = 10;
 
-    /// <summary>一度に買うギサールの野菜の数。</summary>
-    public int FateGysahlBuyQuantity { get; set; } = 99;
-
-    /// <summary>ギサールの野菜を自動で買うか。</summary>
-    public bool FateGysahlAutoBuy { get; set; } = true;
+    // **買い出しの設定は置いていない。**
+    //
+    // 「自動で買う」「一度に買う数」を器だけ用意していたが、
+    // 買いに行く実装が無く、読み手が 1 つも無かった。
+    // 画面に出ていない設定が残っていると、あると思って触られる。
+    // 買い出しを作るときに、そのとき要る形で足す。
 
     /// <summary>交換のあと、元いた座標まで戻るか。エリアまでは必ず戻る。</summary>
     public bool FateReturnToExactSpot { get; set; }

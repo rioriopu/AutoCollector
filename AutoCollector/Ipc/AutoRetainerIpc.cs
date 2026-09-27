@@ -15,8 +15,27 @@ namespace AutoCollector.Ipc;
 /// </summary>
 public sealed class AutoRetainerIpc(AnomalyLog anomalyLog) : IpcGateBase("AutoRetainer", anomalyLog)
 {
-    /// <summary>自分が抑制を立てたかどうか。他人が立てた抑制を勝手に解除しないために持つ。</summary>
-    public bool SuppressedByUs { get; private set; }
+    /// <summary>
+    /// いま抑制を握っている持ち主。空なら誰も握っていない。
+    ///
+    /// **bool 1 本にしない。**
+    ///
+    /// このプラグインの中に、抑制を立てる場所が 3 つある
+    /// （交換・リテイナーからの取り出し・ベンチャー回収）。
+    /// 「自分が立てたか」を bool 1 本で持つと、
+    /// **交換が握っているものをベンチャー回収が横から外せてしまう。**
+    /// 外されると交換の最中に AutoRetainer が動き出し、同じ呼び鈴で操作を取り合う。
+    /// しかも交換が最後に解除しようとしても、旗が既に倒れているので空振りする。
+    ///
+    /// 持ち主を覚えておけば、立てた本人しか解除できない。
+    /// </summary>
+    private string suppressOwner = string.Empty;
+
+    /// <summary>自分（このプラグイン）が抑制を立てているか。</summary>
+    public bool SuppressedByUs => this.suppressOwner.Length > 0;
+
+    /// <summary>いま抑制を握っている持ち主。記録に出す。</summary>
+    public string SuppressOwner => this.suppressOwner;
 
     /// <summary>
     /// AutoRetainer が処理中か。取得できない場合は「処理中」とみなす。
@@ -118,22 +137,25 @@ public sealed class AutoRetainerIpc(AnomalyLog anomalyLog) : IpcGateBase("AutoRe
         return available ? VentureState.Collectable : VentureState.None;
     }
 
-    /// <summary>
-    /// AutoRetainer の処理を中断させる。
-    /// こちらから呼び鈴を閉じる前に呼び、AutoRetainer が動いたままにならないようにする。
-    /// </summary>
-    public bool TryAbort()
-        => this.TryAction(
-            "PluginState.AbortAllTasks",
-            () => this.Func<object>("AutoRetainer.PluginState.AbortAllTasks").InvokeAction());
-
     public bool TryGetSuppressed(out bool suppressed)
         => this.TryInvoke("GetSuppressed", () => this.Func<bool>("AutoRetainer.GetSuppressed").InvokeFunc(), out suppressed);
 
-    /// <summary>抑制を立てる。成功したら自分が立てたことを記録する。</summary>
-    public bool Suppress()
+    /// <summary>
+    /// 抑制を立てる。成功したら**誰が立てたか**を覚える。
+    ///
+    /// すでに別の持ち主が握っているなら、横取りせずに true を返す
+    /// （抑制はもう立っているので、呼んだ側の目的は果たされている）。
+    /// </summary>
+    /// <param name="owner">立てる側の名前。解除できるのはこの名前だけ。</param>
+    public bool Suppress(string owner)
     {
         if (!this.IsLoaded)
+        {
+            return true;
+        }
+
+        // 誰かが既に握っている。立て直さず、持ち主も変えない。
+        if (this.suppressOwner.Length > 0)
         {
             return true;
         }
@@ -143,25 +165,59 @@ public sealed class AutoRetainerIpc(AnomalyLog anomalyLog) : IpcGateBase("AutoRe
             return false;
         }
 
-        this.SuppressedByUs = true;
+        this.suppressOwner = owner;
         return true;
     }
 
     /// <summary>
-    /// 抑制を解除する。自分が立てた場合だけ解除する。
-    /// 他プラグインやユーザーが立てた抑制を勝手に外さない。
+    /// 抑制を解除する。**立てた本人だけが解除できる。**
+    ///
+    /// 他プラグインやユーザーが立てた抑制を勝手に外さないのはもちろん、
+    /// このプラグインの中でも、別の持ち主が握っているものは外さない。
     /// </summary>
-    public void Release()
+    /// <param name="owner">解除する側の名前。持ち主と違えば何もしない。</param>
+    public void Release(string owner)
     {
-        if (!this.IsLoaded || !this.SuppressedByUs)
+        if (!this.IsLoaded || this.suppressOwner.Length == 0)
+        {
+            return;
+        }
+
+        if (this.suppressOwner != owner)
+        {
+            // **黙って見送らない。**
+            // 外せなかったことが分からないと、
+            // 「解除したつもりなのに抑制が残っている」を追えない。
+            this.AnomalyLog.Info(
+                "Ipc",
+                $"[AutoRetainer] {owner} が抑制を解除しようとしましたが、持ち主は {this.suppressOwner} です。触りません");
+            return;
+        }
+
+        if (this.TryAction("SetSuppressed", () => this.Func<bool, object>("AutoRetainer.SetSuppressed").InvokeAction(false)))
+        {
+            this.suppressOwner = string.Empty;
+            this.AnomalyLog.Info("Ipc", $"[AutoRetainer] 抑制を解除しました（{owner}）");
+        }
+    }
+
+    /// <summary>
+    /// 持ち主に関わらず解除する。**プラグインの終了と緊急停止だけで使う。**
+    ///
+    /// 抑制を立てたまま終わると、利用者の AutoRetainer が止まったままになる。
+    /// 持ち主の確認より、確実に戻すことを優先する場面がここ。
+    /// </summary>
+    public void ReleaseForShutdown()
+    {
+        if (!this.IsLoaded || this.suppressOwner.Length == 0)
         {
             return;
         }
 
         if (this.TryAction("SetSuppressed", () => this.Func<bool, object>("AutoRetainer.SetSuppressed").InvokeAction(false)))
         {
-            this.SuppressedByUs = false;
-            this.AnomalyLog.Info("Ipc", "[AutoRetainer] 抑制を解除しました");
+            this.AnomalyLog.Info("Ipc", $"[AutoRetainer] 抑制を解除しました（終了時 / 持ち主 {this.suppressOwner}）");
+            this.suppressOwner = string.Empty;
         }
     }
 }

@@ -564,6 +564,7 @@ public sealed class Plugin : IDalamudPlugin
             this.AetheryteService,
             this.Lifestream,
             this.Combat,
+            this.Fate,
             this.Earners,
             this.AutoRetainer,
             this.Crafter,
@@ -1059,7 +1060,9 @@ public sealed class Plugin : IDalamudPlugin
         // 抑制を立てたまま終了すると AutoRetainer が止まったままになる。最優先で解除する。
         try
         {
-            this.AutoRetainer?.Release();
+            // **持ち主を問わず外す。**
+            // ここは終了処理。立てたまま終わると利用者の AutoRetainer が止まったままになる。
+            this.AutoRetainer?.ReleaseForShutdown();
             this.Artisan?.Release();
         }
         catch (Exception ex)

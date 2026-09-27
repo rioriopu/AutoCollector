@@ -345,14 +345,23 @@ public sealed class FateShopRankMap(AnomalyLog anomalyLog)
                         continue;
                     }
 
-                    if (seen.Add(reward))
+                    // **枠ごとに記録する。「初めて出たとき」だけにしない。**
+                    //
+                    // 同じ品が複数の枠に載っていることがある
+                    // （ランク 2 の枠とランク 3 の枠の両方に、など）。
+                    // 以前は seen で「初めて出た枠」にしか書かなかったため、
+                    // 2 枠目以降が「条件なし」として残った。
+                    //
+                    // 画面は品ごとに「いちばん低いランクの定義」を選ぶので、
+                    // 条件なしに見える上位枠が選ばれ、**出かけてから空振りした**。
+                    //
+                    // その枠で買うのに要るランクを、枠ごとにそのまま入れる。
+                    // 品ごとの必要ランクは、読む側が最小を取れば出る。
+                    seen.Add(reward);
+
+                    if (requiredRank > 1)
                     {
-                        // この段階で初めて出てきた品。
-                        // 1 段階目（ランク 1）は最初から買えるので条件なし。
-                        if (requiredRank > 1)
-                        {
-                            this.rankByEntry![(shopId, reward)] = requiredRank;
-                        }
+                        this.rankByEntry![(shopId, reward)] = requiredRank;
                     }
                 }
             }

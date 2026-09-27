@@ -41,6 +41,7 @@ public sealed partial class MainWindow
                       this.plugin.RetainerRestock.IsRunning ||
                       this.plugin.CraftRunner.IsRunning ||
                       this.plugin.CollectableCycle.IsRunning ||
+                      this.plugin.FateRunner.IsRunning ||
                       this.plugin.AutoDuty.IsRunningForDisplay() == true;
 
         using (ImRaii.PushColor(ImGuiCol.Button, running ? 0xFF2222CCu : 0xFF333333u))

@@ -73,6 +73,13 @@ public sealed class PresetTab(Plugin plugin)
     private IReadOnlyList<(InclusionCategory Category, InclusionSeries Series, InclusionOffer Offer)>? searchResults;
 
     /// <summary>逆算した結果の控え。計算は重いので 1 秒は使い回す。</summary>
+    /// <summary>交換エリアの一覧。毎フレーム作り直さないよう控える。</summary>
+    private List<FateArea>? areaCache;
+
+    private uint areaCacheCurrency;
+
+    private DateTime areaCacheUntilUtc;
+
     private ScripGoal? goalCache;
     private Guid goalCachePresetId;
     private DateTime goalCacheUntilUtc;
@@ -1423,6 +1430,39 @@ public sealed class PresetTab(Plugin plugin)
     ///
     /// 並びは都市を先頭にし、あとはマップを続ける。
     /// </summary>
+    /// <summary>
+    /// 交換エリアの一覧を、少しのあいだ控えて返す。
+    ///
+    /// <b>画面は毎フレーム描かれる。</b>
+    /// この組み立ては、通貨で買える品の解決・NPC ごとのまとめ・
+    /// 達成度の読み取りを通るので、毎フレーム作り直すと描画だけで重くなる。
+    ///
+    /// 達成度は周回で変わるが、1 秒遅れて困るものではない。
+    /// </summary>
+    private List<FateArea> CachedAreas(uint currencyItemId)
+    {
+        if (this.areaCache is not null
+            && this.areaCacheCurrency == currencyItemId
+            && DateTime.UtcNow < this.areaCacheUntilUtc)
+        {
+            return this.areaCache;
+        }
+
+        var built = this.BuildAreas(currencyItemId);
+
+        // **空は控えない。**
+        // 索引がまだ出来ていないあいだは空で返る。
+        // そこで控えると、出来上がったあとも 1 秒は空のままになる。
+        if (built.Count > 0)
+        {
+            this.areaCache = built;
+            this.areaCacheCurrency = currencyItemId;
+            this.areaCacheUntilUtc = DateTime.UtcNow.AddSeconds(1);
+        }
+
+        return built;
+    }
+
     private List<FateArea> BuildAreas(uint currencyItemId)
     {
         var resolver = this.plugin.ExchangeResolver;
@@ -1559,7 +1599,7 @@ public sealed class PresetTab(Plugin plugin)
 
         resolver.BeginBuild(currencyItemId);
 
-        var areas = this.BuildAreas(currencyItemId);
+        var areas = this.CachedAreas(currencyItemId);
         if (areas.Count == 0)
         {
             // **なぜ出ないのかを追えるようにする。**
@@ -2286,6 +2326,7 @@ public sealed class PresetTab(Plugin plugin)
     private void InvalidateCaches()
     {
         this.goalCacheUntilUtc = DateTime.MinValue;
+        this.areaCacheUntilUtc = DateTime.MinValue;
         this.planCacheUntilUtc = DateTime.MinValue;
     }
 

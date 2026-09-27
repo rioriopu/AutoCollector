@@ -59,6 +59,12 @@ public sealed unsafe class BuddyService(AnomalyLog anomalyLog)
     private readonly AnomalyLog anomalyLog = anomalyLog;
 
     private DateTime requestedAtUtc = DateTime.MinValue;
+
+    /// <summary>諦めた時刻。これから <see cref="RetryAfterFailure"/> のあいだは試さない。</summary>
+    private DateTime failedAtUtc = DateTime.MinValue;
+
+    /// <summary>諦めてから、もう一度試すまでの間。</summary>
+    private static readonly TimeSpan RetryAfterFailure = TimeSpan.FromMinutes(10);
     private int attempts;
     private float timeLeftAtRequest;
 
@@ -240,6 +246,26 @@ public sealed unsafe class BuddyService(AnomalyLog anomalyLog)
             return false;
         }
 
+        // **諦めたあとは、しばらく試さない。**
+        //
+        // 以前はここが `Step != Summoning` だけだったため、
+        // Failed へ落ちた次のフレームでこの分岐に入り直し、
+        // attempts が 1 に戻って**また野菜を使った**。
+        // 「3 回で諦める」が一度も効かず、持っているだけ使い切る。
+        //
+        // 厩舎から出し直すなど状況が変わることはあるので、
+        // 永久にやめるのではなく、間を置いてから試し直す。
+        if (this.Step == BuddyStep.Failed)
+        {
+            if (DateTime.UtcNow - this.failedAtUtc < RetryAfterFailure)
+            {
+                return false;
+            }
+
+            this.anomalyLog.Info("Buddy", "時間を置いたので、バディの呼び出しをもう一度試します");
+            this.Step = BuddyStep.Idle;
+        }
+
         // まだ一度も試していない。使う。
         if (this.Step != BuddyStep.Summoning)
         {
@@ -285,6 +311,7 @@ public sealed unsafe class BuddyService(AnomalyLog anomalyLog)
         this.Step = BuddyStep.Failed;
         this.StatusDetail = "バディを呼び出せませんでした";
         this.requestedAtUtc = DateTime.MinValue;
+        this.failedAtUtc = DateTime.UtcNow;
         return false;
     }
 

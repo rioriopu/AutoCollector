@@ -148,10 +148,18 @@ public sealed unsafe class VentureBellRunner(
         this.retainerStarted = false;
         this.moveIssued = false;
 
-        // **AutoRetainer の抑制を外す。**
+        // **AutoRetainer の抑制を外す。ただし自分が立てたものだけ。**
+        //
         // 周回中は交換との競合を避けるために抑制していることがある。
         // 抑制したままでは AutoRetainer が回収を始めない。
-        this.retainer.Release();
+        //
+        // 以前はここで持ち主を見ずに外していた。
+        // **交換が立てた抑制まで外れ**、交換の最中に AutoRetainer が
+        // 動き出して同じ呼び鈴で操作を取り合った。
+        // しかも交換が最後に外そうとしても、旗が既に倒れていて空振りした。
+        //
+        // 持ち主が違えば Release は何もしない（記録には残る）。
+        this.retainer.Release("ベンチャー回収");
     }
 
     /// <summary>やめる。呼び鈴の画面が開いていれば閉じる。</summary>
@@ -166,16 +174,17 @@ public sealed unsafe class VentureBellRunner(
         this.navigation.Stop();
         this.moveIssued = false;
 
-        // 開いている途中で止めたなら、AutoRetainer を止めてから閉じる。
-        // 止めずに閉じると、相手が動いたまま画面だけ消える。
+        // 開いている途中で止めたなら、新しい処理が始まらないようにしてから閉じる。
+        // ここも強制停止は使わない（BeginClosing と同じ理由）。
         if (IsBellOpen())
         {
-            this.retainer.TryAbort();
+            this.retainer.Suppress("ベンチャー回収");
             this.SendCancel();
         }
 
         this.Step = VentureBellStep.Idle;
         this.Detail = string.Empty;
+        this.FinishUp();
     }
 
     /// <summary>終わったか。</summary>
@@ -391,6 +400,7 @@ public sealed unsafe class VentureBellRunner(
             this.trace.State("呼び鈴が閉じた", "回収が終わったとみなします");
             this.Step = VentureBellStep.Done;
             this.Detail = "回収が終わりました";
+            this.FinishUp();
             return;
         }
 
@@ -463,9 +473,20 @@ public sealed unsafe class VentureBellRunner(
         this.Detail = "呼び鈴の画面を閉じています";
         this.stepSinceUtc = DateTime.UtcNow;
 
-        // **閉じる前に AutoRetainer を止める。**
-        // 止めずに閉じると、相手が動いたまま画面だけ消える。
-        this.retainer.TryAbort();
+        // **閉じる前に、新しい処理が始まらないようにする。**
+        //
+        // 以前はここで AbortAllTasks を撃っていた。
+        // これは**強制停止**で、こちらが頼んだ回収だけでなく、
+        // AutoRetainer が自分の判断で積んでいた処理
+        // （別リテイナーの再出発・潜水艦・GC 納品・修理）まで一緒に落ちる。
+        // 切られた側に戻す手段が無い。
+        //
+        // プロジェクト指示は「外部プラグインを強制停止しない。
+        // AutoRetainer は SetSuppressed による協調的な抑制のみ」と定めている。
+        //
+        // 抑制なら、走っている処理は終わらせたうえで次が始まらなくなる。
+        // 解除は Cancel / Done のどちらの経路でも通る。
+        this.retainer.Suppress("ベンチャー回収");
 
         // **その場で 1 枚目を閉じる。**
         // 次のフレームを待つと、間引きの分だけ開いたまま残る。
@@ -480,6 +501,7 @@ public sealed unsafe class VentureBellRunner(
         {
             this.Step = VentureBellStep.Done;
             this.Detail = "回収が終わりました";
+            this.FinishUp();
             return;
         }
 
@@ -489,6 +511,7 @@ public sealed unsafe class VentureBellRunner(
             // 周回へ戻れないほうが困るので、成功として扱い記録に残す。
             this.anomalyLog.Warn("Venture", "呼び鈴の画面を閉じられませんでした");
             this.Step = VentureBellStep.Done;
+            this.FinishUp();
             return;
         }
 
@@ -560,6 +583,18 @@ public sealed unsafe class VentureBellRunner(
         return false;
     }
 
+    /// <summary>
+    /// 終わったときの後始末。**どの終い方でも必ず通す。**
+    ///
+    /// 閉じる前に立てた抑制を戻す。戻さないと、
+    /// 回収が終わったあとも AutoRetainer が新しい処理を始められないままになる。
+    /// 自分が立てたものだけが外れる（持ち主が違えば Release は何もしない）。
+    /// </summary>
+    private void FinishUp()
+    {
+        this.retainer.Release("ベンチャー回収");
+    }
+
     private void Fail(string why)
     {
         this.navigation.Stop();
@@ -567,6 +602,7 @@ public sealed unsafe class VentureBellRunner(
         this.FailureReason = why;
         this.Step = VentureBellStep.Failed;
         this.Detail = why;
+        this.FinishUp();
         this.anomalyLog.Warn("Venture", why);
     }
 }

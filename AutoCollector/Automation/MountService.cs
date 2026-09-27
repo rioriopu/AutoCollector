@@ -497,9 +497,23 @@ public sealed unsafe class MountService(AnomalyLog anomalyLog, FateTrace trace)
                 var takeoff = me + TakeoffMargin;
 
                 // 飛べると分かっている高さを超えない。
+                //
+                // **ただし、自分より下へは下げない。**
+                //
+                // KnownCeiling はそのエリアで実際に飛べた**絶対の高さ**で、
+                // 低地で記録した値がそのまま残る。
+                // 高低差の大きいマップ（コザマル・カ、ヤクテル樹海など）で
+                // 先に低地を回ると、その低い値で高台の離陸点まで押し下げられ、
+                // 「次の点が自分より高い」が成立しなくなる。
+                //
+                // そうなると飛ばずに地上を走り、遠い FATE へ延々と歩いて
+                // 時間切れ → 5 分見送り、を繰り返す。
+                //
+                // 記録は「そこまでは飛べた」という下限の証拠であって、
+                // 上限の保証ではない。自分の高さは必ず超えさせる。
                 if (KnownCeiling is { } ceiling)
                 {
-                    takeoff = MathF.Min(takeoff, ceiling);
+                    takeoff = MathF.Max(me + (TakeoffMargin * 0.5f), MathF.Min(takeoff, ceiling));
                 }
 
                 return destination with { Y = MathF.Max(destination.Y, takeoff) };

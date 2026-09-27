@@ -395,7 +395,7 @@ public sealed unsafe class RetainerRestockRunner(
         this.deadlineUtc = DateTime.UtcNow.Add(OverallLimit);
 
         // AutoRetainer が同じ呼び鈴を使おうとすると操作を取り合う。先に抑制する。
-        this.autoRetainer.Suppress();
+        this.autoRetainer.Suppress("リテイナーからの取り出し");
 
         this.anomalyLog.Info("Restock", $"リテイナーから取り出します（{targets.Count} 種）");
         this.Note($"AutoRetainer を抑制しました。{string.Join(" / ", targets.Select(x => $"{x.Name}×{x.Remaining}"))}");
@@ -2006,7 +2006,7 @@ public sealed unsafe class RetainerRestockRunner(
 
         try
         {
-            this.autoRetainer.Release();
+            this.autoRetainer.Release("リテイナーからの取り出し");
         }
         catch (Exception ex)
         {
