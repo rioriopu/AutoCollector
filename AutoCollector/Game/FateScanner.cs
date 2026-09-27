@@ -10,29 +10,55 @@ using FFXIVClientStructs.FFXIV.Client.Game.Fate;
 
 namespace AutoCollector.Game;
 
-/// <summary>FATE の種別。FateContext.Rule の値をそのまま持つ。</summary>
+/// <summary>
+/// FATE の種別。<see cref="FateContext"/>.Rule の値をそのまま持つ。
+///
+/// <b>値の意味は実データで確かめてある（2026-09-27）。</b>
+/// 以前は Boss=2 / Collect=3 / Escort=5 としていたが、これは誤りだった。
+/// そのため納品 FATE（Rule=2）を納品と認識できず、
+/// 納品の段取りが一度も動いていなかった。
+///
+/// 確かめた根拠は 3 つ。
+///   1. Fate シートの Rule=2 は 96 件あり、<b>96/96 件が EventItem を持つ</b>。
+///      Rule=3 は 21 件あり、<b>21/21 件が LGBGuardNPCLocation（護衛対象）を持つ</b>
+///   2. Rule=2 の目的文は「〜に速やかに納品せよ」。
+///      目的に「納品」を含む 92 件は<b>すべて Rule=2</b>で、他の Rule には 1 件も無い
+///   3. 実際に動いている bozjalone も Rule==2 を納品判定に使っている
+///      （bozjalone.Modules.Fates/Fate.cs の IsDeliveryFate）
+///
+/// 一覧は C:\ソース\FF14_FATE一覧\ にある。
+/// </summary>
 public enum FateRule : byte
 {
-    /// <summary>不明・未分類。</summary>
+    /// <summary>不明・未分類（演習など）。</summary>
     None = 0,
 
     /// <summary>討伐。敵を倒すと達成度が上がる。</summary>
     Slay = 1,
 
-    /// <summary>ボス討伐。</summary>
-    Boss = 2,
+    /// <summary>納品。集めた品を NPC へ渡すと達成度が上がる。</summary>
+    Collect = 2,
 
-    /// <summary>納品。アイテムを NPC へ渡すと達成度が上がる。</summary>
-    Collect = 3,
+    /// <summary>護衛。対象の NPC に話しかけて始める。</summary>
+    Escort = 3,
 
-    /// <summary>防衛。</summary>
+    /// <summary>防衛・迎撃。</summary>
     Defend = 4,
 
-    /// <summary>護衛。</summary>
-    Escort = 5,
+    /// <summary>季節イベント。</summary>
+    Seasonal = 5,
 
-    /// <summary>特殊。</summary>
+    /// <summary>特殊討伐。</summary>
     Special = 6,
+
+    /// <summary>蒼天街復興。</summary>
+    Ishgard = 7,
+
+    /// <summary>蒼天街復興祝祭。</summary>
+    IshgardFestival = 8,
+
+    /// <summary>コスモ探索（基地建設）。</summary>
+    Cosmic = 9,
 }
 
 /// <summary>
@@ -87,8 +113,24 @@ public sealed record FateInfo(
         }
     }
 
-    /// <summary>納品 FATE か。</summary>
-    public bool IsCollect => this.Rule == FateRule.Collect;
+    /// <summary>
+    /// 納品 FATE か。
+    ///
+    /// <b>Rule だけで決めない。</b>
+    /// 集める品（EventItem）を持っているかも見る。
+    /// 実データでは Rule=2 と EventItem の有無が 96/96 件で一致するので
+    /// どちらでも同じ結果になるが、両方見ておけば
+    /// 片方の解釈が外れても、もう片方で拾える。
+    ///
+    /// 個数を数える <see cref="FateScanner.CountHandInItems"/> は
+    /// もともと EventItem を見ており、そちらは正しく動いていた。
+    /// 入口のこの判定だけが Rule の取り違えで false になり、
+    /// 納品の段取りへ進めなくなっていた。
+    /// </summary>
+    public bool IsCollect => this.Rule == FateRule.Collect || this.HasHandInItem;
+
+    /// <summary>集める品を持つ FATE か（＝納品 FATE）。</summary>
+    public bool HasHandInItem { get; init; }
 
     /// <summary>同じ FATE の同じ湧きかを判定するための鍵。</summary>
     public (ushort Id, int Start) SpawnKey => (this.Id, this.StartTimeEpoch);
@@ -247,6 +289,39 @@ public sealed unsafe class FateScanner(AnomalyLog anomalyLog)
     /// </summary>
     public bool HasHandInItems(ushort fateId, int required = 10)
         => this.CountHandInItems(fateId) is { } held && held >= required;
+
+    /// <summary>FateId → 集める品を持つか。シートは変わらないので覚えておく。</summary>
+    private static readonly Dictionary<ushort, bool> EventItemCache = [];
+
+    /// <summary>
+    /// この FATE が「集める品」を持つか（＝納品 FATE か）。
+    ///
+    /// Rule の値とは別に、シートの EventItem を直接見る。
+    /// 実データでは Rule=2 の 96 件すべてが EventItem を持ち、
+    /// 他の Rule は 1 件も持たない。
+    /// </summary>
+    private static bool HasEventItem(ushort fateId)
+    {
+        if (EventItemCache.TryGetValue(fateId, out var cached))
+        {
+            return cached;
+        }
+
+        var has = false;
+
+        try
+        {
+            has = Svc.Data.GetExcelSheet<Lumina.Excel.Sheets.Fate>()
+                ?.GetRowOrDefault(fateId)?.EventItem.RowId is > 0;
+        }
+        catch
+        {
+            // 読めなければ false。Rule のほうで拾う。
+        }
+
+        EventItemCache[fateId] = has;
+        return has;
+    }
 
     /// <summary>
     /// 納品 FATE で集めた品の数。
@@ -663,7 +738,12 @@ public sealed unsafe class FateScanner(AnomalyLog anomalyLog)
             StartTimeEpoch: ctx->StartTimeEpoch,
             Duration: ctx->Duration,
             HandInCount: ctx->HandInCount,
-            TurnInEventItem: ctx->TurnInEventItem);
+            TurnInEventItem: ctx->TurnInEventItem)
+        {
+            // 集める品を持つかは、シートを引いて覚えておく。
+            // 毎フレーム引くと重いので、読み取った時点で 1 回だけ。
+            HasHandInItem = HasEventItem(id),
+        };
 
         return true;
     }
