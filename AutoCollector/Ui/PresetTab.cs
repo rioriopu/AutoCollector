@@ -1011,9 +1011,6 @@ public sealed class PresetTab(Plugin plugin)
             return;
         }
 
-        ImGui.TextColored(
-            ImGuiColors.DalamudGrey,
-            "  交換は周回に相乗りして行います。周回が動いていないあいだは交換も待機します");
     }
 
     /// <summary>
@@ -1099,19 +1096,16 @@ public sealed class PresetTab(Plugin plugin)
     /// </summary>
     private void DrawSpecialShopRewardPicker(ExchangePreset preset, uint currencyItemId, ref bool changed)
     {
-        // 一覧そのものが空なのか、この通貨に該当が無いだけなのかを分けて出す。
-        // 同じ見た目にすると、シートを読めていない不具合を見逃す。
+        // **一覧そのものを作れていないときだけ知らせる。**
+        // これはシートを読めていない不具合なので、黙って進めてはいけない。
+        //
+        // 「この通貨は窓口で扱われない」ほうは消した。
+        // 正常な状態であり、画面を操作するうえで知る必要がない。
         if (this.plugin.InclusionShopCatalog.ListCategories().Count == 0)
         {
             ImGui.TextColored(
                 ImGuiColors.DalamudYellow,
                 "  「アイテム交換」窓口の一覧を作れていません。交換所を直接調べます");
-        }
-        else
-        {
-            ImGui.TextColored(
-                ImGuiColors.DalamudGrey,
-                "  この通貨は「アイテム交換」窓口では扱われないため、交換所を直接調べます");
         }
 
         var resolver = this.plugin.ExchangeResolver;
@@ -2836,7 +2830,6 @@ public sealed class PresetTab(Plugin plugin)
 
         if (preset.Rewards.Count == 0)
         {
-            ImGui.TextColored(ImGuiColors.DalamudGrey, "  下の一覧から品を選ぶと、ここに並びます");
             return;
         }
 
