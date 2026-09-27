@@ -136,7 +136,17 @@ public sealed class VentureWatcher(
 
         this.Step = VentureStep.Watching;
         this.Detail = "ベンチャーを見張っています";
-        this.checkedUtc = DateTime.MinValue;
+
+        // **始めた直後に判定しない。**
+        //
+        // MinValue を入れていたため、周回を始めた**次のフレーム**で
+        // 判定が走り、回収可能なら即座に周回を奪っていた。
+        // 実測では開始の 19〜21 ミリ秒後に持っていかれ、
+        // FATE の探索へ一度も到達しなかった（「開始しても全く動かない」）。
+        //
+        // 最初の判定まで 1 回ぶんの間を置く。
+        // 回収は待てる。周回が始まらないほうが困る。
+        this.checkedUtc = DateTime.UtcNow;
         this.Collected = 0;
         this.destinationTerritory = 0;
         this.travelAnnounced = false;

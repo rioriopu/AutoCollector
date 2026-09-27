@@ -735,6 +735,14 @@ public sealed class Plugin : IDalamudPlugin
     {
         try
         {
+            // **FATE 周回は索引の構築より先に回す。**
+            //
+            // 下に置いていたため、NpcLocationService と ExchangeResolver の
+            // 構築が終わるまで false で return され、
+            // **索引が出来上がるまで周回が 1 度も進まなかった。**
+            // FATE 周回はこれらの索引を使わないので、待つ理由が無い。
+            this.FateRunner.Tick();
+
             // 索引構築だけは毎フレーム進める。1 フレームあたりの処理量を制限してあるため、
             // 呼ぶ回数を減らすとその分だけ完成が遅れる。完成後は即座に戻る。
             if (!this.NpcLocationService.TickBuild())
@@ -773,7 +781,7 @@ public sealed class Plugin : IDalamudPlugin
             // 達成度 100% を見た瞬間に離れることが、この機能の要になっている。
             // 100 ミリ秒ごとにしか見ないと、そのぶん離脱が遅れてその場に留まる。
             // 走っていなければ即座に戻るので、ふだんの負荷は増えない。
-            this.FateRunner.Tick();
+
 
             var now = DateTime.UtcNow;
             if (now < this.nextTickUtc)

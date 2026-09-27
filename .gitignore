@@ -24,3 +24,4 @@ tools/fetch_rank_tables.py
 # 番号なしの作業メモ。相談用・振り返り用で、設計資料ではない
 docs/【知見】*.md
 docs/【相談】*.md
+scratch_*
