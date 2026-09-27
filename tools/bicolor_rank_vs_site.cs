@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Linq;
 using System.Collections.Generic;
 using System.IO;
@@ -102,7 +102,7 @@ class P {
             }
         }
 
-        foreach(var exp in new[]{"暁月","漆黒"}){
+        foreach(var exp in new[]{"暁月","漆黒","黄金"}){
             foreach(JArray tbl in json[exp]){
                 var hdr=tbl[0].ToObject<List<string>>();
                 int ci=hdr.FindIndex(h=>h.Contains("ランク")); if(ci<0)continue;

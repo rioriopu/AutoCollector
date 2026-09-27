@@ -330,8 +330,13 @@ public sealed class FateShopRankMap(AnomalyLog anomalyLog)
                     //
                     //   3023「広域交易商の味方：サベネア島」
                     //        → サベネア島のF.A.T.E.達成度をRANK3にする
+                    //   3564「広域交易商の味方：リビング・メモリー」
+                    //        → リビング・メモリーのF.A.T.E.達成度をRANK4にする
                     //
                     // 説明文から数字を取れば、枠の位置より確かな値になる。
+                    // <b>黄金のランク 4 は枠が 3 つしかないので、これが無いと出せない。</b>
+                    // 交換サイトの表 96 件と突き合わせて、不一致 0 件を確認した
+                    // （tools/bicolor_rank_vs_site.cs）。
                     var fromAchievement = RankFromAchievement(entry.AchievementUnlock.RowId);
                     if (fromAchievement > 0)
                     {
