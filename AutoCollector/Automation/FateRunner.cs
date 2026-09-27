@@ -605,7 +605,7 @@ public sealed class FateRunner(
     private Vector3? lastMoveDestination;
 
     /// <summary>経路の終点が行き先とどれだけ離れていても同じとみなすか。</summary>
-    private const float StopGuardMatchRadius = 8f;
+    private const float StopGuardMatchRadius = 15f;
 
     /// <summary>経路を引いたとき飛んでいたか。地面に触れて解けたのを見分ける。</summary>
     private bool flyingWhenIssued;
@@ -968,6 +968,16 @@ public sealed class FateRunner(
         // 終点が、止めたとき向かっていた場所と合うものだけを捨てる。
         if (!this.IsOurPath())
         {
+            // **捨てなかったことを記録へ出す。**
+            //
+            // 黙って見送ると、「見張りが効いていない」のか
+            // 「他人の経路だから残した」のかが追えない。
+            // 毎フレーム通るので間引く。
+            if (EzThrottler.Throttle("AutoCollector.FateStopGuardKeep", 5000))
+            {
+                this.trace.Decision("止めたあとの経路を残した", $"自分の経路ではありません（経路点 {waypoints} 個）");
+            }
+
             return;
         }
 

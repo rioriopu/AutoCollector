@@ -421,8 +421,13 @@ public sealed class Config
     /// 周回中にベンチャーを見張り、回収できるようになったら街へ戻って回収するか。
     ///
     /// 回収が済んだら、離れたマップへ戻って周回を続ける。
+    ///
+    /// <b>いまは既定で切ってある。</b>
+    /// 周回の開始を奪う不具合（見張りが始めた直後に判定していた）と、
+    /// デジョンが成立せず街で棒立ちになる不具合が実機で出た。
+    /// 周回そのものが安定してから戻す。
     /// </summary>
-    public bool FateVentureCollectEnabled { get; set; } = true;
+    public bool FateVentureCollectEnabled { get; set; }
 
     /// <summary>
     /// ベンチャー回収で行く街のエリア番号。

@@ -599,6 +599,20 @@ public sealed class FateTab(Plugin plugin)
             EzConfig.Save();
         }
 
+        // **切ってあることを画面に出す。**
+        //
+        // 黙って既定を変えると、入れていた人には「設定が消えた」に見える。
+        // なぜ切ってあるのかと、戻せることを書いておく。
+        if (!enabled)
+        {
+            ImGui.TextColored(
+                ImGuiColors.DalamudYellow,
+                "  いまは切ってあります（周回そのものが安定するまでの措置です）");
+            ImGui.TextColored(
+                ImGuiColors.DalamudGrey,
+                "  周回の開始を奪う不具合と、街で棒立ちになる不具合が実機で出たため。上の印で戻せます");
+        }
+
         if (ImGui.IsItemHovered())
         {
             ImGui.SetTooltip(

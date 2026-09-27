@@ -426,6 +426,21 @@ public sealed class Plugin : IDalamudPlugin
             changed = true;
         }
 
+        if (C.ConfigVersion < 5)
+        {
+            // **ベンチャー自動回収をいったん切る。**
+            //
+            // 既定値を false にするだけでは効かない。
+            // すでに true が保存されているので、読み込んだ時点で有効に戻る。
+            // 保存済みの値も落とす。
+            //
+            // 設定項目そのものは残してある。周回が安定したら画面から戻せる。
+            C.FateVentureCollectEnabled = false;
+
+            C.ConfigVersion = 5;
+            changed = true;
+        }
+
         if (changed)
         {
             EzConfig.Save();
