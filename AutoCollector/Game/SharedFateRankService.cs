@@ -59,7 +59,8 @@ public sealed record SharedFateZoneRank(uint TerritoryId, byte CurrentRank, byte
 ///
 /// <b>どこから読むか。</b>
 /// マップの顔ぶれと上限ランクは <c>FateProgressUI</c> シートにある。
-/// 18 行あり、列 0 が TerritoryType、列 1 が上限ランク。
+/// 18 行あり、列 0 が TerritoryType、列 1〜3 が
+/// 各ランクに要る FATE 数（0 ならそのランクは無い）。
 /// ここから拡張ごとの区切りを作るので、マップ番号は埋め込まない
 /// （docs/00_設計決定.md の D-2）。
 ///
@@ -78,12 +79,39 @@ public sealed class SharedFateRankService(AnomalyLog anomalyLog)
 {
     /// <summary>FateProgressUI の列。0 = TerritoryType、1 = 上限ランク。</summary>
     private const int ColumnTerritory = 0;
-    private const int ColumnMaxRank = 1;
+
+    /// <summary>
+    /// 各ランクに到達するのに要る FATE の数。0 なら、そのランクが存在しない。
+    ///
+    /// <b>列の意味を取り違えていた。</b>
+    /// 以前は列 1 を「上限ランク」と読んでいたが、実際は
+    /// <c>ReqFatesToRank2 / ReqFatesToRank3 / ReqFatesToRank4</c>（EXDSchema の定義）。
+    /// どのマップも列 1 が 6 なのは「ランク2 に 6 件要る」という意味で、
+    /// 上限が 6 ということではなかった。
+    ///
+    /// <b>0 でない列を数えれば上限ランクが出る。</b>実データ（ver 2026.09.15）：
+    ///
+    ///   漆黒・暁月 … 6 / 60 /  0  → RANK3
+    ///   黄金       … 6 / 20 / 40  → RANK4
+    ///
+    /// 実機の画面表示（漆黒3 / 暁月3 / 黄金4）と一致する。
+    /// </summary>
+    private const int ColumnReqRank2 = 1;
+    private const int ColumnReqRank3 = 2;
+    private const int ColumnReqRank4 = 3;
 
     private readonly AnomalyLog anomalyLog = anomalyLog;
 
     /// <summary>拡張の区切り（シートの並び順）→ そのマップ群。</summary>
     private IReadOnlyList<IReadOnlyList<uint>>? zoneGroups;
+
+    /// <summary>
+    /// マップ → 上限ランク。<c>FateProgressUI</c> シートから作る。
+    ///
+    /// エージェントの <c>MaxRank</c> は 0 のことがあるが、
+    /// <b>こちらはシートから確実に取れる</b>のでいつでも使える。
+    /// </summary>
+    private readonly Dictionary<uint, byte> maxRankByZone = [];
 
     /// <summary>ランクを覚えておく時間。</summary>
     private const long CacheMilliseconds = 1000;
@@ -115,11 +143,23 @@ public sealed class SharedFateRankService(AnomalyLog anomalyLog)
             foreach (var row in sheet)
             {
                 var territory = Convert.ToUInt32(row.ReadColumn(ColumnTerritory));
-                var maxRank = Convert.ToByte(row.ReadColumn(ColumnMaxRank));
-                if (territory != 0)
+                if (territory == 0)
                 {
-                    zones.Add((territory, maxRank));
+                    continue;
                 }
+
+                // 0 でないランク列を数える。ランク 1 は必ずあるので 1 から始める。
+                byte maxRank = 1;
+                foreach (var column in new[] { ColumnReqRank2, ColumnReqRank3, ColumnReqRank4 })
+                {
+                    if (Convert.ToInt64(row.ReadColumn(column)) > 0)
+                    {
+                        maxRank++;
+                    }
+                }
+
+                zones.Add((territory, maxRank));
+                this.maxRankByZone[territory] = maxRank;
             }
 
             // 番号帯で拡張を切る。漆黒は 813 台、暁月は 956 台、黄金は 1187 台と
@@ -275,32 +315,30 @@ public sealed class SharedFateRankService(AnomalyLog anomalyLog)
             return false;
         }
 
-        // **上限が読めているならそれで判定する。**
+        // **上限はシートから取る。**
+        //
+        // FateProgressUI の ReqFatesToRank2/3/4 のうち 0 でない列を数えれば、
+        // そのマップの上限ランクが出る（漆黒3 / 暁月3 / 黄金4）。
+        // 実機の画面表示と一致することを確認済み。
+        //
+        // エージェントの MaxRank は 0 のことがあるので当てにしない。
+        // シート側が引けたときは、そちらを優先する。
+        var allFromSheet = inGroup.All(x => this.maxRankByZone.ContainsKey(x.TerritoryId));
+
+        if (allFromSheet)
+        {
+            return inGroup.All(x => x.CurrentRank >= this.maxRankByZone[x.TerritoryId]);
+        }
+
+        // シートからも取れない（新しい拡張で列が増えた等）。
+        // エージェントが上限を持っていれば、それで判定する。
         if (inGroup.All(x => x.HasMaxRank))
         {
             return inGroup.All(x => x.IsMaxed);
         }
 
-        // **上限が読めないときの逃げ道。**
-        //
-        // 実機（2026-09-27）で MaxRank が 0 のまま埋まらないことがあった。
-        // 上限はシートにも無い（FateProgressUI の列 1 はどのマップも 6 だが、
-        // 実際は 漆黒 3 / 暁月 3 / 黄金 4）。
-        //
-        // ただしシェアF.A.T.E の上限は拡張の中で共通なので、
-        // <b>その拡張で到達しているいちばん高いランク</b>を上限とみなせる。
-        // 全マップがその値に届いていれば「全マップ最大」と判断してよい。
-        //
-        // これで誤るのは「全マップが同じランクで、まだ上限に届いていない」
-        // ときだけ。その場合は都市へ行って空振りするが、
-        // 逆に「本当は最大なのに一生解放されない」よりは実害が小さい。
-        var highest = inGroup.Max(x => x.CurrentRank);
-        if (highest == 0)
-        {
-            return false;
-        }
-
-        return inGroup.All(x => x.CurrentRank >= highest);
+        // どちらも取れない。分からないので解放されていない側に倒す。
+        return false;
     }
 
     /// <summary>
