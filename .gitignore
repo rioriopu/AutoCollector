@@ -4,3 +4,23 @@ obj/
 *.user
 *.suo
 .vs/
+
+# --- 公開しないもの ---
+
+# 配置スクリプト。共有マシンの名前（\\rio-pc\...）が入っている
+tools/deploy.ps1
+
+# 外部サイトから取った表。照合に使っただけで、再配布するものではない
+tools/site_tables.json
+
+# 検証用のスクリプト。手元で数を確かめるための使い捨て。
+# docs の番号つき資料と違い、読み手に向けたものではない
+tools/*_check.py
+tools/*_verify.cs
+tools/*_probe.cs
+tools/bicolor_rank_vs_site.cs
+tools/fetch_rank_tables.py
+
+# 番号なしの作業メモ。相談用・振り返り用で、設計資料ではない
+docs/【知見】*.md
+docs/【相談】*.md
