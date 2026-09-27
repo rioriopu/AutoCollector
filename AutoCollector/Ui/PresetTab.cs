@@ -558,10 +558,6 @@ public sealed class PresetTab(Plugin plugin)
             ImGui.TextUnformatted("  選択中:");
             ImGui.SameLine(0f, 0f);
             DrawCurrencyName(choices[index].Name);
-
-            ImGui.TextColored(
-                ImGuiColors.DalamudGrey,
-                "  トームストーンはスロット番号で保存するため、パッチで入れ替わっても自動追従します");
         }
 
         // --- 交換エリア・交換先（バイカラージェムのように交易商が各地に居る通貨だけ） ---
