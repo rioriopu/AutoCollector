@@ -146,6 +146,18 @@ public sealed partial class MainWindow : EuWindow
     private const string TabBarId = "##autocollector_tabs";
 
     /// <summary>
+    /// 開いたときは、プリセットのタブから始める。
+    ///
+    /// いちばん触るのはプリセットなので、開くたびにそこを出す（2026-09-28 利用者の要望）。
+    /// 飛び先の旗を立てるだけにして、実際の切り替えは Draw の中の既存の経路に任せる。
+    /// </summary>
+    public override void OnOpen()
+    {
+        base.OnOpen();
+        this.jumpToPresetTab = true;
+    }
+
+    /// <summary>
     /// 手動で開いた交換ショップの中身を読み取り、ゲームデータと照合する。
     ///
     /// このタブは読み取りと照合だけを行い、交換は一切実行しない。
