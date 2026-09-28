@@ -368,6 +368,15 @@ public sealed class EarnerRegistry
         return names.Count == 0 ? "（止めた稼ぎ手はありません）" : string.Join(" / ", names);
     }
 
+    /// <summary>
+    /// 自分が止めて、まだ戻し終えていない稼ぎ手がいるか。
+    ///
+    /// 交換のために周回を止めているあいだは、周回そのものは止まって見える。
+    /// それを「動作が終わった」と読まないために使う。
+    /// </summary>
+    public bool HoldsAnySuspended
+        => this.suspendedByUs.Count > 0 || this.pendingSuspend.Count > 0 || this.pendingResume.Count > 0;
+
     /// <summary>自分がこの稼ぎ手を止めているか。</summary>
     public bool IsSuspendedByUs(string id) => this.suspendedByUs.Contains(id);
 }

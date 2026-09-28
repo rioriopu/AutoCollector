@@ -78,6 +78,8 @@ public sealed class Plugin : IDalamudPlugin
 
     internal GoalRunner GoalRunner { get; private set; } = null!;
 
+    internal PresetAutoRelease PresetAutoRelease { get; private set; } = null!;
+
     internal RetainerInventoryStore RetainerInventory { get; private set; } = null!;
 
     internal BellLocationStore BellLocations { get; private set; } = null!;
@@ -460,6 +462,12 @@ public sealed class Plugin : IDalamudPlugin
 
         this.AnomalyLog = new AnomalyLog();
         this.StartFileLog();
+
+        // **前回のチェックを持ち越さない。**
+        // 更新・入れ直し・ゲームの再起動のどれでも、読み込んだ直後に勝手に動き出さないようにする。
+        // 記録に残すため、記録の準備ができてから外す。
+        PresetAutoRelease.ReleaseAllOnLoad(this.AnomalyLog);
+
         this.TomestoneService = new TomestoneService(this.AnomalyLog);
         this.CurrencyService = new CurrencyService(this.AnomalyLog);
         this.SelfCheck = new SelfCheck(C, this.AnomalyLog, this.TomestoneService, this.CurrencyService);
@@ -646,6 +654,18 @@ public sealed class Plugin : IDalamudPlugin
             this.CollectableRewardService,
             this.Earners);
 
+        // 動作が終わったら、プリセットのチェックを外す。
+        // 入ったままだと、止まっているあいだに勝手に動き出す。
+        this.PresetAutoRelease = new PresetAutoRelease(
+            this.AnomalyLog,
+            this.GoalRunner,
+            this.ExchangeExecutor,
+            this.RetainerRestock,
+            this.CraftRunner,
+            this.CollectableCycle,
+            this.CollectableDelivery,
+            this.Earners);
+
         this.AutoDutySetup = new AutoDutySetup(this.AutoDuty, this.AnomalyLog);
         this.AutoDutyKeeper = new AutoDutyKeeper(
             this.AnomalyLog,
@@ -826,6 +846,9 @@ public sealed class Plugin : IDalamudPlugin
             // 束ねる側は、束ねられる側を全部動かしたあとに見る。
             // 先に見ると、いま終わったばかりの処理を「まだ動いている」と数える。
             this.GoalRunner.Tick();
+
+            // 動いている処理を全部見たあとで、動作が終わったかを判断する。
+            this.PresetAutoRelease.Tick();
             this.LearnRetainerInventory();
             this.LearnBellLocation();
 
