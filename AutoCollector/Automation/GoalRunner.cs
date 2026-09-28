@@ -1127,6 +1127,14 @@ public sealed class GoalRunner(
 
     private void Note(string text)
     {
+        // **記録にも残す。**
+        //
+        // 画面の経過表示にしか書いていなかったため、あとから記録を読んでも
+        // 「始めます」のあと何を選んだのかが分からなかった
+        // （2026-09-28 09:44：納品へも製作へも進まず、理由が 1 行も残っていなかった）。
+        // 呼ばれるのは判断のたびだけで、毎フレームではない。
+        this.anomalyLog.Info("Goal", text);
+
         this.trace.Add($"{DateTime.Now:HH:mm:ss}  {text}");
 
         if (this.trace.Count > 60)

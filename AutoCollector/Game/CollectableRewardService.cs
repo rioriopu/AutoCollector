@@ -67,6 +67,87 @@ public sealed class CollectableRewardService(AnomalyLog anomalyLog, SpecialCurre
 
     private Dictionary<uint, CollectableReward>? index;
 
+    private Dictionary<uint, uint>? jobIndex;
+
+    /// <summary>
+    /// この収集品を納品窓口のどのジョブのタブで渡すか（ClassJob の番号）。分からなければ false。
+    ///
+    /// <b>なぜ要るか。</b>
+    /// 納品窓口は、開いたときにいまのジョブのタブを出す。一覧に出るのはそのタブの品だけで、
+    /// 裁縫師のまま開くと調理師の収集品は一覧に無い。タブを切り替えないと渡せない
+    /// （2026-09-28 実機：裁縫師では 0 個、調理師に替えると同じ品を納品できた）。
+    ///
+    /// <code>
+    /// CollectablesShop.ShopItems[i]  →  i 番目のタブ = ClassJob (8 + i)
+    ///   └ CollectablesShopItem（サブ行）の Item
+    /// </code>
+    ///
+    /// タブの並び（slot 0 = 木工師 … slot 10 = 漁師）は docs/10 §1-1 で実データから確認済み。
+    /// </summary>
+    public bool TryResolveJob(uint collectableItemId, out uint classJob)
+        => this.BuildJobs().TryGetValue(collectableItemId, out classJob);
+
+    /// <summary>ShopItems の先頭のタブが表す ClassJob（木工師）。</summary>
+    private const uint FirstTabClassJob = 8;
+
+    private Dictionary<uint, uint> BuildJobs()
+    {
+        if (this.jobIndex is not null)
+        {
+            return this.jobIndex;
+        }
+
+        var result = new Dictionary<uint, uint>();
+
+        try
+        {
+            var shops = Svc.Data.GetExcelSheet<CollectablesShop>();
+
+            if (shops is null)
+            {
+                // 控えない。読めないのは一時的なことがある。
+                return result;
+            }
+
+            foreach (var shop in shops)
+            {
+                for (var slot = 0; slot < shop.ShopItems.Count; slot++)
+                {
+                    if (!shop.ShopItems[slot].TryGetValue(out var group))
+                    {
+                        continue;
+                    }
+
+                    foreach (var row in group)
+                    {
+                        var itemId = row.Item.RowId;
+                        if (itemId != 0)
+                        {
+                            result.TryAdd(itemId, FirstTabClassJob + (uint)slot);
+                        }
+                    }
+                }
+            }
+
+            this.anomalyLog.Info("Collectables", $"収集品を渡すジョブのタブを求めました（{result.Count} 件）");
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Error("Collectables", $"収集品を渡すジョブのタブを求められませんでした: {ex.Message}");
+
+            // 例外のあとも控えない。
+            return result;
+        }
+
+        // 空なら控えない。次に呼ばれたときにやり直す。
+        if (result.Count == 0)
+        {
+            return result;
+        }
+
+        return this.jobIndex = result;
+    }
+
     /// <summary>この収集品が生むスクリップ。分からなければ false。</summary>
     public bool TryResolve(uint collectableItemId, out CollectableReward reward)
         => this.Build().TryGetValue(collectableItemId, out reward!);

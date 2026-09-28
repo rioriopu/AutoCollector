@@ -12,6 +12,9 @@ public enum DeliveryStep
     Select,
     WaitTrade,
     Verify,
+
+    /// <summary>ジョブのタブを切り替え、目的の品が一覧に出るのを待っている。</summary>
+    SwitchTab,
     Done,
     Error,
 }
@@ -58,6 +61,15 @@ public sealed class CollectableDeliveryRunner(
     /// </summary>
     private static readonly TimeSpan VerifyLimit = TimeSpan.FromMilliseconds(2500);
 
+    /// <summary>
+    /// タブを切り替えてから、目的の品が一覧に出るのを待つ上限。
+    ///
+    /// 出たのを見た時点で進むので、これは「出なかった」と判断するまでの猶予でしかない。
+    /// 切り替え直後に一覧がどう作り直されるかは実測していない（docs/10 R-8）ため、
+    /// 長めに取る。
+    /// </summary>
+    private static readonly TimeSpan SwitchTabLimit = TimeSpan.FromSeconds(3);
+
     private readonly AnomalyLog anomalyLog = anomalyLog;
     private readonly CollectablesShopService shop = shop;
     private readonly CurrencyService currency = currency;
@@ -79,6 +91,20 @@ public sealed class CollectableDeliveryRunner(
 
     /// <summary>取りこぼしの可能性があるので、1 度だけ撃ち直す。</summary>
     private readonly HashSet<uint> retried = [];
+
+    /// <summary>
+    /// この実行で切り替えたジョブのタブ。同じタブへ何度も切り替えない。
+    ///
+    /// 切り替えても品が一覧に出ない場合（レベルや受注条件で並ばない等）に、
+    /// 同じタブを押し続けて止まらなくなるのを防ぐ。
+    /// </summary>
+    private readonly HashSet<uint> triedJobs = [];
+
+    /// <summary>タブを切り替えて待っている品と、その上限。</summary>
+    private uint switchItemId;
+    private string switchItemName = string.Empty;
+    private uint switchJob;
+    private DateTime switchUntilUtc;
 
     private CollectableOffer? target;
     private int ownedBefore;
@@ -146,6 +172,7 @@ public sealed class CollectableDeliveryRunner(
         this.observedReward.Clear();
         this.blocked.Clear();
         this.retried.Clear();
+        this.triedJobs.Clear();
         this.dumpedAfterSelect = false;
         this.Step = DeliveryStep.Select;
         this.StatusDetail = "納品する品を選んでいます";
@@ -191,6 +218,10 @@ public sealed class CollectableDeliveryRunner(
 
             case DeliveryStep.Verify:
                 this.TickVerify();
+                break;
+
+            case DeliveryStep.SwitchTab:
+                this.TickSwitchTab();
                 break;
         }
     }
@@ -288,6 +319,17 @@ public sealed class CollectableDeliveryRunner(
             return;
         }
 
+        // **いまのタブに無い品は、そのジョブのタブへ切り替えて渡す。**
+        //
+        // 窓口は開いたときにいまのジョブのタブを出すため、ここまでの一覧は
+        // そのタブの品だけ。以前はここで終わっていたので、裁縫師のまま開くと
+        // 調理師の収集品を 1 個も渡さなかった（docs/10 §10 で「当面やらない」と
+        // していた切り替え）。
+        if (this.TryBeginTabSwitch(addon, offers, held))
+        {
+            return;
+        }
+
         var blockedNote = this.blocked.Count > 0 ? $"。納品できなかった品が {this.blocked.Count} 種類あります" : string.Empty;
 
         var reason = !string.IsNullOrEmpty(skipped)
@@ -297,6 +339,123 @@ public sealed class CollectableDeliveryRunner(
                 : "納品できる収集品がなくなりました";
 
         this.Finish($"{reason}{blockedNote}");
+    }
+
+    /// <summary>
+    /// いまのタブに出ていない手持ちの収集品があれば、そのジョブのタブへ切り替える。
+    /// 切り替えを始めたら true。
+    ///
+    /// 納品してよい品だけを相手にする（収集価値が下限に届く・スクリップが溢れない・
+    /// この実行で渡せなかった品ではない）。いまのタブで納品するときと同じ条件。
+    /// </summary>
+    private unsafe bool TryBeginTabSwitch(
+        FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase* addon,
+        IReadOnlyList<CollectableOffer> offers,
+        IReadOnlyDictionary<uint, int> held)
+    {
+        var shown = new HashSet<uint>();
+        foreach (var offer in offers)
+        {
+            shown.Add(offer.ItemId);
+        }
+
+        foreach (var (itemId, name, count) in CollectablesShopReader.ListHeldCollectables())
+        {
+            if (count <= 0 || shown.Contains(itemId) || this.blocked.Contains(itemId))
+            {
+                continue;
+            }
+
+            if (!this.rewards.TryResolveJob(itemId, out var job) || this.triedJobs.Contains(job))
+            {
+                continue;
+            }
+
+            if (!this.MeetsCollectability(new CollectableOffer(-1, itemId, name), out _))
+            {
+                continue;
+            }
+
+            if (this.WouldOverflow(itemId, out _))
+            {
+                continue;
+            }
+
+            this.triedJobs.Add(job);
+
+            bool clicked;
+            try
+            {
+                clicked = new ECommons.UIHelpers.AddonMasterImplementations.AddonMaster.CollectablesShop(addon)
+                    .SelectDiscipleTab(job);
+            }
+            catch (Exception ex)
+            {
+                this.anomalyLog.Warn("Collect", $"{name} のジョブのタブ（ClassJob {job}）を押せませんでした: {ex.Message}");
+                continue;
+            }
+
+            if (!clicked)
+            {
+                // 押せないタブ（そのジョブを持っていない等）。ほかのジョブを試す。
+                this.anomalyLog.Info("Collect", $"{name} のジョブのタブ（ClassJob {job}）は押せない状態でした。飛ばします");
+                continue;
+            }
+
+            this.switchItemId = itemId;
+            this.switchItemName = name;
+            this.switchJob = job;
+            this.switchUntilUtc = DateTime.UtcNow.Add(SwitchTabLimit);
+            this.Step = DeliveryStep.SwitchTab;
+            this.StatusDetail = $"{name} を渡すため、ジョブのタブを切り替えています";
+            this.anomalyLog.Info(
+                "Collect",
+                $"{name} はいまのタブに無いため、ジョブのタブ（ClassJob {job}）へ切り替えます（手持ち {count} 個）");
+
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// タブを切り替えたあと、目的の品が一覧に出るのを待つ。時間ではなく一覧の中身で判断する。
+    /// </summary>
+    private unsafe void TickSwitchTab()
+    {
+        if (!this.shop.TryGetAddon(out var addon))
+        {
+            this.Fail("納品画面を掴めませんでした");
+            return;
+        }
+
+        // 切り替えの途中は一覧が読めないことがある。読めないだけでは失敗にしない。
+        if (this.shop.TryReadOffers(addon, out var offers, out _))
+        {
+            foreach (var offer in offers)
+            {
+                if (offer.ItemId == this.switchItemId)
+                {
+                    this.anomalyLog.Info("Collect", $"ジョブのタブ（ClassJob {this.switchJob}）に切り替わりました（一覧 {offers.Count} 件）");
+                    this.Step = DeliveryStep.Select;
+                    this.StatusDetail = "納品する品を選んでいます";
+                    return;
+                }
+            }
+        }
+
+        if (DateTime.UtcNow < this.switchUntilUtc)
+        {
+            return;
+        }
+
+        // 出なかった。このタブは試し済みなので、次の選択で別のジョブへ進むか終わる。
+        this.anomalyLog.Warn(
+            "Collect",
+            $"ジョブのタブ（ClassJob {this.switchJob}）へ切り替えましたが、{this.switchItemName} が一覧に出ませんでした");
+
+        this.Step = DeliveryStep.Select;
+        this.StatusDetail = "納品する品を選んでいます";
     }
 
     /// <summary>
