@@ -79,6 +79,9 @@ public sealed class NpcShopLinkMap
     /// <summary>都市の集約交易商の NPC 番号。</summary>
     private readonly HashSet<uint> cityNpcs = [];
 
+    /// <summary>結びつきに載っている NPC の番号。</summary>
+    private readonly HashSet<uint> linkedNpcs = [];
+
     /// <summary>都市の交易商 → 同じ拡張のマップ 1 つの territory。</summary>
     private readonly Dictionary<uint, uint> citySampleZone = [];
 
@@ -102,6 +105,14 @@ public sealed class NpcShopLinkMap
     /// true なら、その拡張の 6 マップすべてで F.A.T.E達成度が最大でないと利用できない。
     /// </summary>
     public bool IsCityNpc(uint npcId) => this.cityNpcs.Contains(npcId);
+
+    /// <summary>
+    /// この NPC が結びつき（npc_shop_links.json）に載っているか。
+    ///
+    /// 交換エリアの画面（バイカラージェムの交易商向け）を出してよい通貨かの
+    /// 判断に使う。載っている NPC が 1 人もいない通貨はその画面の対象ではない。
+    /// </summary>
+    public bool IsLinkedNpc(uint npcId) => this.linkedNpcs.Contains(npcId);
 
     /// <summary>
     /// 都市の交易商と同じ拡張にある、マップ 1 つの territory を返す。
@@ -141,6 +152,8 @@ public sealed class NpcShopLinkMap
                 {
                     continue;
                 }
+
+                this.linkedNpcs.Add(link.NpcId);
 
                 if (link.IsCityShop)
                 {

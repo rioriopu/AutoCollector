@@ -1599,6 +1599,18 @@ public sealed class PresetTab(Plugin plugin)
 
         resolver.BeginBuild(currencyItemId);
 
+        // **この画面の対象は、結びつきに載っている交易商がいる通貨だけ。**
+        //
+        // 条件を「エリアが 1 つでも作れるか」だけにしていたため、
+        // スクリップがこちらへ流れ、系統・種別の一覧の代わりに
+        // F.A.T.E の交換エリアが出ていた。索引が作られていない通貨は手前の
+        // IsBuiltFor で抜けるので、索引ができた通貨だけが壊れて見えた
+        // （2026-09-27 は橙貨 41784、2026-09-28 は紫貨で同じ形）。
+        if (!resolver.LiveResults.Any(x => links.IsLinkedNpc(x.NpcDataId)))
+        {
+            return false;
+        }
+
         var areas = this.CachedAreas(currencyItemId);
         if (areas.Count == 0)
         {
