@@ -97,7 +97,7 @@ public static class StatusText
         ExchangeFailure.AutoDutyStopFailed =>
             "AutoDuty を手動で一度止めてから、状態をリセットしてください。",
         ExchangeFailure.AutoDutyResumeFailed =>
-            "交換は終わっています。下のボタンから周回を再開できます。AutoDuty 側で開始しても構いません。",
+            "交換は終わっています。止めた周回を戻せませんでした。F.A.T.E 周回は F.A.T.E タブから、AutoDuty は下のボタンか AutoDuty 側で再開できます。",
         ExchangeFailure.AutoRetainerIpcBroken =>
             "AutoRetainer の抑制を解除できませんでした。AutoRetainer 側に抑制が残っていないか確認してください。",
         ExchangeFailure.ExternalPluginError =>

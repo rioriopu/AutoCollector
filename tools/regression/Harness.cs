@@ -97,7 +97,7 @@ static class Program
             npc.Position=new(4,0,0); GenericHelpers.DialogVisible=true; InteractionService.Attempts=0;
             starter.Tick(f,nav); Check(InteractionService.Attempts==0,"pre-existing dialogue cannot be claimed"); GenericHelpers.DialogVisible=false;
         }
-        Console.WriteLine($"{count} runtime assertions passed; 4 source integration guards passed.");
+        Console.WriteLine($"{count} runtime assertions passed; 6 source integration guards passed.");
     }
     static FateInfo Fate(FateState state)=>new(4,"test",new(1,0,0),100,0,100,100,FateRule.Slay,state,false,1,10,0,0);
     static bool Eligible(FateInfo f)=>FateScanner.IsEligible(f,120,90,false,100,10,10,false,null);

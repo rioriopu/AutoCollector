@@ -32,6 +32,8 @@ assert 'or ExchangeStep.SuppressExternal or ExchangeStep.ResumeEarners)' in read
 assert '!preset.CraftToEarn ||' in read('Automation/GoalRunner.cs'), 'FATE must not enter crafting goal runner'
 assert 'this.CurrencyCatalog.Invalidate();' in read('Plugin.cs')
 assert '"itemId": 25199' in read('Data/special_currency_map.json')
+assert 'or ExchangeFailure.AutoDutyResumeFailed)' in read('Automation/MonitorService.cs'), 'resume failure after a completed exchange must not disable the preset'
+assert 'AgentId.Return' in read('Automation/FateRunner.cs'), 'death return must confirm only the Return agent dialog'
 with tempfile.TemporaryDirectory(prefix='AutoCollector-regression-') as tmp:
     tmp=Path(tmp)
     (tmp/'Regression.csproj').write_text('<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><AllowUnsafeBlocks>true</AllowUnsafeBlocks><NoWarn>CS0649;CS0414</NoWarn></PropertyGroup></Project>')

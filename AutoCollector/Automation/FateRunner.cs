@@ -5090,7 +5090,43 @@ public sealed class FateRunner(
         }
     }
 
-    /// <summary>ホームポイントへ戻る（戦闘不能からの復帰）。</summary>
+    /// <summary>
+    /// 戦闘不能の画面からホームポイントへ戻る。
+    ///
+    /// <b>倒れている間は帰還（アクション 6）を撃てない。</b>戦闘不能の画面（DeathScreen）の
+    /// 「戻る」を押す（callback 1。bozjalone の DeathHelper.ReturnButtonValue と同じ値）。
+    ///
+    /// <b>押すと確認（SelectYesno）が出る。</b>「はい」を押さないと戻らない。
+    /// bozjalone の DeathHandler は確認があれば先に承諾し、無ければ「戻る」を押す。
+    /// ここでも同じ順にする。確認を押さずに「戻る」だけを押し続けると、
+    /// 確認が開いたまま倒れ続ける。
+    ///
+    /// <b>押してよい確認は、帰還の担当（AgentReturn）が開いたものだけ。</b>
+    /// 別の処理が出した はい/いいえ を承諾しない。担当の見分け方は
+    /// bundleoftweaks の InstantReturn と同じ（agent の AddonId と窓の Id を比べる）。
+    /// </summary>
+    private static unsafe void ReturnAfterDeath()
+    {
+        if (!EzThrottler.Throttle("AutoCollector.FateDeathReturn", 3000)) return;
+
+        if (ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>("SelectYesno", out var yesno) &&
+            ECommons.GenericHelpers.IsAddonReady(yesno))
+        {
+            var agent = FFXIVClientStructs.FFXIV.Client.UI.Agent.AgentModule.Instance()->GetAgentByInternalId(
+                FFXIVClientStructs.FFXIV.Client.UI.Agent.AgentId.Return);
+
+            if (agent is not null && agent->AddonId == yesno->Id)
+            {
+                ECommons.Automation.Callback.Fire(yesno, true, 0);
+                return;
+            }
+        }
+
+        if (ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>("DeathScreen", out var addon) &&
+            ECommons.GenericHelpers.IsAddonReady(addon))
+            ECommons.Automation.Callback.Fire(addon, true, 1);
+    }
+
     /// <summary>
     /// 帰還（デジョン）を撃つ。
     ///
@@ -5108,14 +5144,6 @@ public sealed class FateRunner(
     /// 戦闘中、詠唱中など）。送っても弾かれるだけ。
     /// </summary>
     /// <returns>撃てたら true。</returns>
-    private static unsafe void ReturnAfterDeath()
-    {
-        if (!EzThrottler.Throttle("AutoCollector.FateDeathReturn", 3000)) return;
-        if (ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>("DeathScreen", out var addon) &&
-            ECommons.GenericHelpers.IsAddonReady(addon))
-            ECommons.Automation.Callback.Fire(addon, true, 1);
-    }
-
     private static unsafe bool ReturnHome()
     {
         try

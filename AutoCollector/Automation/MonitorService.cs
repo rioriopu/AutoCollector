@@ -740,7 +740,16 @@ public sealed class MonitorService(
                 // アクセサリのプリセットが 2 周で自動的に無効化されていた。
                 or ExchangeFailure.IndexOutOfRange
                 or ExchangeFailure.IndexDuplicated
-                or ExchangeFailure.EntryCountMismatch)
+                or ExchangeFailure.EntryCountMismatch
+
+                // 交換は終わっていて、止めた周回を戻せなかっただけの失敗も数えない。
+                //
+                // 交換そのものが失敗していれば、その理由が Failure に残る
+                // （再開の失敗は Failure が None のときだけ書く）。ここに来るのは
+                // 「品は買えたが、AutoDuty や F.A.T.E 周回を戻せなかった」ときだけ。
+                // 以前は Step が Done で終わっていたので数えていなかった。
+                // Error で終わるようにしたため、数えると 2 回で正しい設定が消える。
+                or ExchangeFailure.AutoDutyResumeFailed)
             {
                 this.anomalyLog.Info(
                     "Monitor",

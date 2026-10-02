@@ -268,9 +268,22 @@ public sealed unsafe class FateTargetService(AnomalyLog anomalyLog)
         && npc.StatusFlags.HasFlag(StatusFlags.Hostile);
 
     /// <summary>
+    /// フォーローン（BNpcName 6738）・フォーローン・メイデン（6737）か。
+    ///
+    /// 番号は利用者が要件として指定したもの（docs/27 §4-3）。ハーム・フォーローン（12349）は別種なので含めない。
+    /// <c>NameId</c> は BNpcName の行番号なので、シートを引かずに比べられる。
+    /// 狙いを決める処理は毎フレーム通るため、ここでシートを引かない（docs/27 §4-3 の決まり）。
+    /// </summary>
+    public static bool IsForlorn(IGameObject obj)
+        => obj is IBattleNpc npc && npc.NameId is 6737 or 6738;
+
+    /// <summary>
     /// 狙う相手を選んで、ハードターゲットに置く。
     ///
-    /// <b>いまの相手が有効なら、変えない。</b>
+    /// <b>フォーローンが居れば、何より先にそれを狙う。</b>
+    /// いまの相手が生きていても切り替える（利用者の要件）。
+    ///
+    /// <b>それ以外は、いまの相手が有効なら変えない。</b>
     /// 毎フレーム選び直すと、撃破する前に別の敵へ移ってしまう。
     ///
     /// <b>選ぶ順は「大きい敵 → 近い敵」。</b>
@@ -278,10 +291,6 @@ public sealed unsafe class FateTargetService(AnomalyLog anomalyLog)
     /// 同じなら近いほうから。NorthHornAutoFates も同じ順で選んでいる。
     /// </summary>
     /// <returns>置いた相手。居なければ null。</returns>
-    // BNpcName の個別 ID。ハーム・フォーローン（12349）は別種。
-    public static bool IsForlorn(IGameObject obj)
-        => obj is IBattleNpc npc && npc.NameId is 6737 or 6738;
-
     public IGameObject? AcquireTarget(ushort fateId, Vector3 fateCentre, float fateRadius)
     {
         if (!Player.Available)
