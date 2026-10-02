@@ -1,15 +1,17 @@
 using System;
 using System.Diagnostics;
 using System.Numerics;
-using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Colors;
-using Dalamud.Interface.Utility.Raii;
 using ECommons.DalamudServices;
+using EstellUtils.UI;
 
 namespace AutoCollector.Ui;
 
 /// <summary>
 /// 寄付タブ。描画が独立しているため partial で分けている。
+///
+/// <b>EstellUtils へ移し終えたタブ。</b>生の ImGui は残っていないので
+/// <c>RawTabScope</c> で囲まない。囲むと二重に領域を取ることになる。
 /// </summary>
 public sealed partial class MainWindow
 {
@@ -18,63 +20,57 @@ public sealed partial class MainWindow
 
     private void DrawDonationTab()
     {
-        // 中身はまだ生の ImGui。移し終えたらこの 1 行を外す。
-        using var raw = RawTabScope.Open();
+        EUi.Spacing();
 
-        ImGui.Spacing();
+        EUi.WrapColored(
+            "Auto Collector をご利用いただき、誠にありがとうございます",
+            new Vector4(1f, 0.9f, 0.5f, 1f));
 
-        ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.9f, 0.5f, 1f));
-        ImGui.TextWrapped("Auto Collector をご利用いただき、誠にありがとうございます");
-        ImGui.PopStyleColor();
+        EUi.Spacing();
 
-        ImGui.Spacing();
-
-        ImGui.TextWrapped(
+        EUi.Paragraph(
             "皆さまの温かいご支援が、本プラグインの開発・メンテナンスを支える大きな力となっております。\n" +
             "頂いたサポートは新機能の開発、不具合修正、FFXIV のメジャーパッチへの追従に大切に使わせていただきます。\n" +
             "今後ともどうぞよろしくお願いいたします。");
 
-        ImGui.Spacing();
+        EUi.Spacing();
 
-        ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0.85f, 1f, 0.85f, 1f));
-        ImGui.TextWrapped("いつもご支援くださり、心より感謝申し上げます。");
-        ImGui.PopStyleColor();
+        EUi.WrapColored(
+            "いつもご支援くださり、心より感謝申し上げます。",
+            new Vector4(0.85f, 1f, 0.85f, 1f));
 
-        ImGui.Spacing();
-        ImGui.Separator();
-        ImGui.Spacing();
+        EUi.Spacing();
+        EUi.Separator();
+        EUi.Spacing();
 
-        if (ImGui.Button("Patreon で支援する##openpatreon", new Vector2(240, 36)))
+        // 横並びは SameLine ではなく HStack で囲む。
+        // 高さは EstellUtils が決めるので、以前の 36px 指定は渡さない。
+        using (EUi.HStack())
         {
-            OpenDonationPage();
+            if (EUi.Button("Patreon で支援する##openpatreon", width: 240f)
+                .Tip("ブラウザで Patreon ページを開きます。"))
+            {
+                OpenDonationPage();
+            }
+
+            if (EUi.Button("URL をコピー##copypatreon", width: 160f)
+                .Tip("Patreon の URL をクリップボードにコピーします。"))
+            {
+                EUi.SetClipboard(DonationUrl);
+            }
         }
 
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip("ブラウザで Patreon ページを開きます。");
-        }
+        EUi.Spacing();
+        EUi.Muted(DonationUrl);
+        EUi.Spacing();
+        EUi.Separator();
+        EUi.Spacing();
 
-        ImGui.SameLine();
-
-        if (ImGui.Button("URL をコピー##copypatreon", new Vector2(160, 36)))
-        {
-            ImGui.SetClipboardText(DonationUrl);
-        }
-
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip("Patreon の URL をクリップボードにコピーします。");
-        }
-
-        ImGui.Spacing();
-        ImGui.TextDisabled(DonationUrl);
-        ImGui.Spacing();
-        ImGui.Separator();
-        ImGui.Spacing();
-
-        ImGui.TextColored(
-            ImGuiColors.DalamudGrey,
-            "※ Patreon サイトの利用は外部サービスとして行われます。Auto Collector は寄付処理には一切関与しません。");
+        // 以前は TextColored だったが、折り返しは RawTabScope の
+        // PushTextWrapPos に頼っていた。囲みを外すので、折り返す版を明示する。
+        EUi.WrapColored(
+            "※ Patreon サイトの利用は外部サービスとして行われます。Auto Collector は寄付処理には一切関与しません。",
+            ImGuiColors.DalamudGrey);
     }
 
     private static void OpenDonationPage()

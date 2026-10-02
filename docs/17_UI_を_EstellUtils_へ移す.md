@@ -11,8 +11,61 @@
 | 1 | `EUi.Initialize` / `EUi.Shutdown` | 済・実機確認 |
 | 2 | ウィンドウを `EuWindow` へ | 済・実機確認（0.1.3.5） |
 | **3** | タブバーを `EUi.TabBar` へ | **済**（0.1.5.4） |
-| 4 | 各タブの中身を移す | **ここから。1 枚ずつ** |
+| **4** | 各タブの中身を移す | **3 / 10 枚**（0.1.5.5） |
 | 5 | 設定の多い画面を属性バインディングへ | 4 の後 |
+
+### 段 4 の進み
+
+| タブ | 行数 | 状態 |
+|---|---|---|
+| 寄付 | 95 | 済（0.1.5.5） |
+| 設定 | 157 | 済（0.1.5.5） |
+| 診断 | 134 | 済（0.1.5.5） |
+| ショップ照合 | 約 500 | 未 |
+| 交換候補 | 約 400 | 未 |
+| 製作計画 | 666 | 未 |
+| デバッグ | 801 | 未 |
+| 状況 | 880 | 未 |
+| プリセット | 3082 | 未 |
+| FATE 周回 | 786 | **触らない**（別マシンで作業中） |
+
+**移せる単位はタブ 1 枚。**メソッド単位では切れない。
+
+`MainWindow.SetupGuide.cs`（198 行）は小さいので最初に移そうとしたが、
+**状況タブの内側から呼ばれている**（`MainWindow.StatusTab.cs:104`）。
+状況タブが `RawTabScope` で囲まれているため、その中で `EUi.*` を呼ぶと
+レイアウトの持ち主が二人になる。**状況タブごと移すまで触れない。**
+
+移したタブからは `RawTabScope.Open()` の 1 行を外す。
+囲んだまま `EUi.*` を呼ぶと領域を二重に取る。
+
+### 段 4 で分かった移し方
+
+**入力欄はラベルを持たない。**`EUi.InputInt` / `TextInput` の第 1 引数は ID だけ。
+ラベルは `EUi.Field` で出す。`SliderFloat` だけはラベルを直接取る。
+
+```csharp
+using (EUi.Field("再開までの待ち（秒）"))
+    EUi.InputInt("##adrestartdelay", ref delay, min: 0, max: 120, width: 160f);
+```
+
+**折り返しは明示する。**`RawTabScope` を外すと `PushTextWrapPos` も消える。
+`TextColored` のままにすると、長い説明文が右端で切れる。
+`MutedParagraph` / `WrapColored` へ移すこと。
+
+**表の行の高さは先に測る。**`EUi.TableRow` は高さを固定で取るので、
+折り返して 2 行になる文を入れると次の行へはみ出す。
+
+```csharp
+// 最終列だけは「行の残り幅」がそのまま列幅になる（LayoutScope.PeekAvailable）。
+// だから先に幅を出して測れるし、行の中で Paragraph を呼べば同じ幅で折り返す。
+var width = EUi.AvailableWidth - fixedWidths - EUi.ColumnSpacing(columnCount);
+var height = MathF.Max(EUi.LineHeight, EUi.MeasureWrapped(text, width).Y);
+```
+
+`TableCell` は 1 行で切ってツールチップに逃がす。
+診断タブの詳細文は最長 85 字あり、切ると肝心の助言（「最初の交換は手動で確認してください」）が
+隠れる。**折り返しが要る列は `TableCell` ではなく `Paragraph`。**
 
 段 2 まで入れた時点で、**枠・タイトルバー・スクロールバーは EstellUtils の描画**になる。
 

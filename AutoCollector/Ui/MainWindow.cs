@@ -7,6 +7,7 @@ using AutoCollector.Game;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using EstellUtils.UI;
+using EstellUtils.UI.Layout;
 using EstellUtils.UI.Windowing;
 using Dalamud.Interface.Colors;
 using Dalamud.Interface.Utility.Raii;
@@ -1071,83 +1072,121 @@ public sealed partial class MainWindow : EuWindow
         }
     }
 
+    /// <summary>セルフチェックの表の列。見出しと行へ同じものを渡す。</summary>
+    private static readonly TableColumn[] SelfCheckColumns =
+    [
+        new("状態", 60f),
+        new("項目", 160f),
+        new("詳細", SizeSpec.Weight(1f)),
+    ];
+
+    /// <summary>記録の表の列。見出しは出さず、行だけを並べる。</summary>
+    private static readonly TableColumn[] AnomalyColumns =
+    [
+        new("時刻", 150f),
+        new("内容", SizeSpec.Weight(1f)),
+    ];
+
+    /// <summary>
+    /// 列を並べた行で、折り返す最終列に必要な高さを求める。
+    ///
+    /// <b>行の高さは先に決めないといけない。</b>
+    /// <see cref="EUi.TableRow"/> は行の高さを固定で取るため、
+    /// 折り返して 2 行になる文を入れると次の行へはみ出す。
+    ///
+    /// 最終列の幅は「行の幅 − 固定列の合計 − 列間の隙間」で求まる。
+    /// 最終列だけは、行の残り幅がそのまま列幅になるので、
+    /// 中で <see cref="EUi.Paragraph"/> を呼べば同じ幅で折り返す。
+    /// </summary>
+    private static float RowHeightFor(ReadOnlySpan<char> text, float fixedWidths, int columnCount)
+    {
+        var width = MathF.Max(80f, EUi.AvailableWidth - fixedWidths - EUi.ColumnSpacing(columnCount));
+        return MathF.Max(EUi.LineHeight, EUi.MeasureWrapped(text, width).Y);
+    }
+
+    /// <summary>
+    /// 診断タブ。
+    ///
+    /// <b>EstellUtils へ移し終えたタブ。</b><c>RawTabScope</c> で囲まない。
+    /// </summary>
     private void DrawDiagnosticsTab()
     {
-        // 中身はまだ生の ImGui。移し終えたらこの 1 行を外す。
-        using var raw = RawTabScope.Open();
+        var report = this.plugin.SelfCheck.Latest;
 
-        if (ImGui.Button("セルフチェックを実行"))
+        using (EUi.HStack())
         {
-            this.plugin.SelfCheck.RunAll();
-            EzConfig.Save();
+            if (EUi.Button("セルフチェックを実行"))
+            {
+                this.plugin.SelfCheck.RunAll();
+                EzConfig.Save();
+            }
+
+            if (report is not null)
+            {
+                EUi.Muted($"（{report.At:HH:mm:ss} 実行）");
+            }
         }
 
-        var report = this.plugin.SelfCheck.Latest;
         if (report is null)
         {
-            ImGui.TextUnformatted("まだ実行されていません。");
+            EUi.Label("まだ実行されていません。");
         }
         else
         {
-            ImGui.SameLine();
-            ImGui.TextUnformatted($"（{report.At:HH:mm:ss} 実行）");
-
             if (!report.CanExchange)
             {
-                ImGui.TextColored(ImGuiColors.DalamudRed, "失敗項目があるため、交換は実行できません。");
+                EUi.WrapColored("失敗項目があるため、交換は実行できません。", NoteKind.Danger);
             }
 
-            using var table = ImRaii.Table("##selfcheck", 3, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp);
-            if (table)
+            EUi.TableHeader(SelfCheckColumns);
+
+            for (var i = 0; i < report.Items.Count; i++)
             {
-                ImGui.TableSetupColumn("状態", ImGuiTableColumnFlags.WidthFixed, 60f);
-                ImGui.TableSetupColumn("項目", ImGuiTableColumnFlags.WidthFixed, 160f);
-                ImGui.TableSetupColumn("詳細");
-                ImGui.TableHeadersRow();
+                var item = report.Items[i];
 
-                foreach (var item in report.Items)
+                var kind = item.Status switch
                 {
-                    ImGui.TableNextRow();
+                    SelfCheckStatus.Ok => NoteKind.Success,
+                    SelfCheckStatus.Warning => NoteKind.Warning,
+                    _ => NoteKind.Danger,
+                };
 
-                    ImGui.TableNextColumn();
-                    var (color, label) = item.Status switch
-                    {
-                        SelfCheckStatus.Ok => (ImGuiColors.HealerGreen, "OK"),
-                        SelfCheckStatus.Warning => (ImGuiColors.DalamudYellow, "警告"),
-                        _ => (ImGuiColors.DalamudRed, "失敗"),
-                    };
-                    ImGui.TextColored(color, label);
+                var label = item.Status switch
+                {
+                    SelfCheckStatus.Ok => "OK",
+                    SelfCheckStatus.Warning => "警告",
+                    _ => "失敗",
+                };
 
-                    ImGui.TableNextColumn();
-                    ImGui.TextUnformatted(item.Name);
-
-                    ImGui.TableNextColumn();
-                    ImGui.TextWrapped(item.Detail);
+                using (EUi.TableRow(
+                    SelfCheckColumns, i, height: RowHeightFor(item.Detail, 60f + 160f, 3)))
+                {
+                    EUi.TableCell(label, color: EUi.NoteColor(kind));
+                    EUi.TableCell(item.Name);
+                    EUi.Paragraph(item.Detail);
                 }
             }
         }
 
-        ImGui.Spacing();
-        ImGui.Separator();
-        ImGui.TextUnformatted("記録");
-
-        if (ImGui.Button("記録を消去"))
-        {
-            this.plugin.AnomalyLog.Clear();
-        }
+        EUi.Spacing();
+        EUi.Separator();
+        EUi.Heading("記録");
 
         var entries = this.plugin.AnomalyLog.Snapshot();
 
-        ImGui.SameLine();
-
-        // **不具合の報告に、こちらの状態遷移を添えられるようにする。**
-        //
-        // これまでは画面で読むことしかできなかった。報告を受けても
-        // どの段で止まったのかが分からず、callback の記録から推測するしかなかった。
-        // 詳細ログをファイルへ出す設定は既定で切ってあるため、なおさら届かない。
-        using (ImRaii.Disabled(entries.Count == 0))
+        using (EUi.HStack())
         {
-            if (ImGui.Button("記録をコピー##anomalycopy"))
+            if (EUi.Button("記録を消去"))
+            {
+                this.plugin.AnomalyLog.Clear();
+            }
+
+            // **不具合の報告に、こちらの状態遷移を添えられるようにする。**
+            //
+            // これまでは画面で読むことしかできなかった。報告を受けても
+            // どの段で止まったのかが分からず、callback の記録から推測するしかなかった。
+            // 詳細ログをファイルへ出す設定は既定で切ってあるため、なおさら届かない。
+            if (EUi.Button("記録をコピー##anomalycopy", disabled: entries.Count == 0))
             {
                 var text = string.Join(
                     Environment.NewLine,
@@ -1163,7 +1202,7 @@ public sealed partial class MainWindow : EuWindow
                         $"監視の判断: {this.plugin.MonitorService.LastDecision}",
                         string.Empty);
 
-                    ImGui.SetClipboardText(header + Environment.NewLine + text);
+                    EUi.SetClipboard(header + Environment.NewLine + text);
 
                     this.anomalyCopyNote = $"{entries.Count} 件をコピーしました";
                 }
@@ -1172,99 +1211,107 @@ public sealed partial class MainWindow : EuWindow
                     this.anomalyCopyNote = $"コピーできませんでした: {ex.Message}";
                 }
             }
-        }
 
-        if (!string.IsNullOrEmpty(this.anomalyCopyNote))
-        {
-            ImGui.SameLine();
-            ImGui.TextColored(ImGuiColors.DalamudGrey, $"  {this.anomalyCopyNote}");
+            if (!string.IsNullOrEmpty(this.anomalyCopyNote))
+            {
+                EUi.Muted(this.anomalyCopyNote);
+            }
         }
 
         if (entries.Count == 0)
         {
-            ImGui.TextUnformatted("記録はありません。");
+            EUi.Label("記録はありません。");
             return;
         }
 
-        using var child = ImRaii.Child("##anomalies", new System.Numerics.Vector2(0, 200), true);
-        if (!child)
+        using (EUi.Scroll("##anomalies", 200f))
         {
-            return;
-        }
-
-        foreach (var entry in entries.Reverse())
-        {
-            var color = entry.Severity switch
+            // 新しいものから出す。Snapshot は IReadOnlyList を返すので、
+            // LINQ の Reverse で毎フレーム作り直さず、添字で逆から読む。
+            for (var i = 0; i < entries.Count; i++)
             {
-                AnomalySeverity.Error => ImGuiColors.DalamudRed,
-                AnomalySeverity.Warning => ImGuiColors.DalamudYellow,
-                _ => ImGuiColors.DalamudGrey,
-            };
-            ImGui.TextColored(color, $"{entry.At:HH:mm:ss} [{entry.Category}]");
-            ImGui.SameLine();
-            ImGui.TextWrapped(entry.Message);
+                var entry = entries[entries.Count - 1 - i];
+
+                var color = entry.Severity switch
+                {
+                    AnomalySeverity.Error => EUi.NoteColor(NoteKind.Danger),
+                    AnomalySeverity.Warning => EUi.NoteColor(NoteKind.Warning),
+                    _ => EUi.Colors.TextMuted,
+                };
+
+                using (EUi.TableRow(
+                    AnomalyColumns, i, height: RowHeightFor(entry.Message, 150f, 2)))
+                {
+                    EUi.TableCell($"{entry.At:HH:mm:ss} [{entry.Category}]", color: color);
+                    EUi.Paragraph(entry.Message);
+                }
+            }
         }
     }
 
+    /// <summary>
+    /// 設定タブ。
+    ///
+    /// <b>EstellUtils へ移し終えたタブ。</b><c>RawTabScope</c> で囲まない。
+    ///
+    /// 補足説明は <see cref="EUi.MutedParagraph"/> で出している。
+    /// 以前は <c>TextColored</c> で、折り返しは囲みの <c>PushTextWrapPos</c> に
+    /// 頼っていた。囲みを外すので、折り返す版を明示する必要がある。
+    /// 行頭の空白 2 つは、入れ子に見せるための従来どおりの字下げ。
+    /// </summary>
     private void DrawSettingsTab()
     {
-        // 中身はまだ生の ImGui。移し終えたらこの 1 行を外す。
-        using var raw = RawTabScope.Open();
-
         var changed = false;
 
         var keepLooping = Plugin.C.KeepAutoDutyLooping;
-        if (ImGui.Checkbox("AutoDuty が周回を終えたら再開させる", ref keepLooping))
+        if (EUi.Checkbox("AutoDuty が周回を終えたら再開させる", ref keepLooping))
         {
             Plugin.C.KeepAutoDutyLooping = keepLooping;
             changed = true;
         }
 
-        ImGui.TextColored(
-            ImGuiColors.DalamudGrey,
-            "  周回数を 1 にしていると、交換が起きなかった周回で AutoDuty が止まったままになります");
-        ImGui.TextColored(
-            ImGuiColors.DalamudGrey,
-            "  周回数の設定は書き換えません。再開時に渡すのは 0 です");
-        ImGui.TextColored(
-            ImGuiColors.DalamudGrey,
-            "  交換を行った周回は、交換の完了後にこちらから再開させます");
+        EUi.MutedParagraph("  周回数を 1 にしていると、交換が起きなかった周回で AutoDuty が止まったままになります");
+        EUi.MutedParagraph("  周回数の設定は書き換えません。再開時に渡すのは 0 です");
+        EUi.MutedParagraph("  交換を行った周回は、交換の完了後にこちらから再開させます");
 
         if (keepLooping)
         {
+            // 入力欄はラベルを持たないので、ラベルは Field 側で出す。
+            // 上下限は入力欄に渡してあるが、Clamp は残す。
+            // 範囲の判断を画面側だけに任せると、設定ファイルを手で書き換えた値が通る。
             var restartDelay = Plugin.C.AutoDutyRestartDelaySeconds;
-            ImGui.SetNextItemWidth(160f);
-            if (ImGui.InputInt("  再開までの待ち（秒）", ref restartDelay))
+            using (EUi.Field("  再開までの待ち（秒）"))
             {
-                Plugin.C.AutoDutyRestartDelaySeconds = Math.Clamp(restartDelay, 0, 120);
-                changed = true;
+                if (EUi.InputInt("##adrestartdelay", ref restartDelay, min: 0, max: 120, width: 160f))
+                {
+                    Plugin.C.AutoDutyRestartDelaySeconds = Math.Clamp(restartDelay, 0, 120);
+                    changed = true;
+                }
             }
 
             if (Plugin.C.LastDutyTerritoryId != 0)
             {
-                ImGui.TextColored(
-                    ImGuiColors.DalamudGrey,
-                    $"  再開先: {NpcLocationService.GetTerritoryName(Plugin.C.LastDutyTerritoryId)}");
+                EUi.Muted($"  再開先: {NpcLocationService.GetTerritoryName(Plugin.C.LastDutyTerritoryId)}");
             }
             else
             {
-                ImGui.TextColored(ImGuiColors.DalamudYellow, "  周回中のエリアをまだ記録していません");
+                EUi.TextColored("  周回中のエリアをまだ記録していません", NoteKind.Warning);
             }
         }
 
-        ImGui.Spacing();
+        EUi.Spacing();
 
         var resumeOnFailure = Plugin.C.ResumeAutoDutyOnFailure;
-        if (ImGui.Checkbox("交換に失敗した場合も AutoDuty を再開する", ref resumeOnFailure))
+        if (EUi.Checkbox("交換に失敗した場合も AutoDuty を再開する", ref resumeOnFailure))
         {
             Plugin.C.ResumeAutoDutyOnFailure = resumeOnFailure;
             changed = true;
         }
 
-        ImGui.TextColored(ImGuiColors.DalamudGrey, "  オフにすると、失敗時は停止したままになります");
+        EUi.MutedParagraph("  オフにすると、失敗時は停止したままになります");
 
         var debugMode = Plugin.C.DebugMode;
-        if (ImGui.Checkbox("デバッグモードを有効にする", ref debugMode))
+        if (EUi.Checkbox("デバッグモードを有効にする", ref debugMode))
         {
             Plugin.C.DebugMode = debugMode;
             changed = true;
@@ -1273,86 +1320,81 @@ public sealed partial class MainWindow : EuWindow
             this.plugin.StartFileLog();
         }
 
-        ImGui.TextColored(
-            ImGuiColors.DalamudGrey,
-            "  交換候補・ショップ照合・デバッグの各タブと、詳細ログの設定が表示されます");
+        EUi.MutedParagraph("  交換候補・ショップ照合・デバッグの各タブと、詳細ログの設定が表示されます");
 
-        ImGui.Separator();
-        ImGui.Spacing();
+        EUi.Separator();
+        EUi.Spacing();
 
         var requireExternal = Plugin.C.RequireExternalAutomationRunning;
-        if (ImGui.Checkbox("AutoDuty や Artisan が動作しているときだけ自動交換する", ref requireExternal))
+        if (EUi.Checkbox("AutoDuty や Artisan が動作しているときだけ自動交換する", ref requireExternal))
         {
             Plugin.C.RequireExternalAutomationRunning = requireExternal;
             changed = true;
         }
 
-        ImGui.TextColored(
-            ImGuiColors.DalamudGrey,
-            "  オフにすると、プリセットを有効にしただけで交換を始めます（手動操作中でも動きます）");
+        EUi.MutedParagraph("  オフにすると、プリセットを有効にしただけで交換を始めます（手動操作中でも動きます）");
 
         if (requireExternal)
         {
-            ImGui.SameLine();
+            // 以前は SameLine で説明文の右へ付けていたが、説明文が折り返すと
+            // 行末がどこになるか決まらない。独立した 1 行にする。
             var snapshot = this.plugin.MonitorService.Snapshot;
             if (snapshot.AutomationRunning)
             {
-                ImGui.TextColored(ImGuiColors.HealerGreen, $"いま: {snapshot.AutomationDetail}");
+                EUi.TextColored($"  いま: {snapshot.AutomationDetail}", NoteKind.Success);
             }
             else
             {
-                ImGui.TextColored(ImGuiColors.DalamudGrey, "いま: なし");
+                EUi.Muted("  いま: なし");
             }
         }
 
-        ImGui.Spacing();
+        EUi.Spacing();
 
         var suppress = Plugin.C.SuppressAutoRetainer;
-        if (ImGui.Checkbox("交換中は AutoRetainer の新規処理を抑制する", ref suppress))
+        if (EUi.Checkbox("交換中は AutoRetainer の新規処理を抑制する", ref suppress))
         {
             Plugin.C.SuppressAutoRetainer = suppress;
             changed = true;
         }
 
-        ImGui.TextColored(ImGuiColors.DalamudGrey, "  実行中のリテイナー処理は中断しません。交換が終わると自動的に解除します");
+        EUi.MutedParagraph("  実行中のリテイナー処理は中断しません。交換が終わると自動的に解除します");
 
         var stopArtisan = Plugin.C.StopArtisan;
-        if (ImGui.Checkbox("交換中は Artisan の製作を止める", ref stopArtisan))
+        if (EUi.Checkbox("交換中は Artisan の製作を止める", ref stopArtisan))
         {
             Plugin.C.StopArtisan = stopArtisan;
             changed = true;
         }
 
-        ImGui.TextColored(
-            ImGuiColors.DalamudGrey,
-            "  製作の合間に交換へ入ると操作を取り合うため、その間だけ止めます。交換が終わると元のモードへ戻します");
+        EUi.MutedParagraph("  製作の合間に交換へ入ると操作を取り合うため、その間だけ止めます。交換が終わると元のモードへ戻します");
 
-        ImGui.Spacing();
+        EUi.Spacing();
 
         var minAd = Plugin.C.MinimumAutoDutyVersion;
-        ImGui.SetNextItemWidth(160f);
-        if (ImGui.InputText("必要な AutoDuty の版", ref minAd, 32))
+        using (EUi.Field("必要な AutoDuty の版"))
         {
-            Plugin.C.MinimumAutoDutyVersion = minAd;
-            changed = true;
+            if (EUi.TextInput("##minadversion", ref minAd, maxLength: 32, width: 160f))
+            {
+                Plugin.C.MinimumAutoDutyVersion = minAd;
+                changed = true;
+            }
         }
 
-        ImGui.TextColored(
-            ImGuiColors.DalamudGrey,
-            "  これを下回るあいだは戦闘の自動周回を使えません。空にすると制限しません");
+        EUi.MutedParagraph("  これを下回るあいだは戦闘の自動周回を使えません。空にすると制限しません");
 
         // 更新をうながすのは状況タブの「はじめに」。設定はここで数を決めるだけ。
         // 両方に出すと、どちらで直すのか分からなくなる。
         if (this.plugin.AutoDuty.IsLoaded &&
             this.plugin.AutoDutySetup.InstalledVersion is { } adVersion)
         {
-            ImGui.TextColored(ImGuiColors.DalamudGrey, $"  いま入っているのは {adVersion} です");
+            EUi.Muted($"  いま入っているのは {adVersion} です");
         }
 
-        ImGui.Spacing();
+        EUi.Spacing();
 
         var range = Plugin.C.NpcApproachRange;
-        if (ImGui.SliderFloat("NPC への接近距離", ref range, 1.0f, 6.0f, "%.1f"))
+        if (EUi.SliderFloat("NPC への接近距離", ref range, 1.0f, 6.0f, decimals: 1))
         {
             Plugin.C.NpcApproachRange = range;
             changed = true;

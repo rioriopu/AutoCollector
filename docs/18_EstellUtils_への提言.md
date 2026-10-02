@@ -310,6 +310,55 @@ EUi.RichLabel(params (string Text, uint? Color)[] parts)
 **これが無いと、300 箇所の `TextColored` がすべて `HStack` のブロック化を伴う書き換えになり、
 移行の手数の大半をここが占めます。**
 
+### D-3. 表の行の高さを中身に合わせる口が無い
+
+`EUi.Table.cs` の `TableRow` は `height ?? Metrics.WidgetHeight` で
+**行の高さを開く前に固定**します。`Dispose` も `ctx.Allocate(this.rowRect.Size)` で
+その固定値を消費します。
+
+折り返す文を入れる列があると、呼び出し側が毎回こう書くことになります。
+
+```csharp
+// 最終列の幅を自分で逆算して、必要な高さを測ってから行を開く
+var width = EUi.AvailableWidth - fixedWidths - EUi.ColumnSpacing(columnCount);
+var height = MathF.Max(EUi.LineHeight, EUi.MeasureWrapped(text, width).Y);
+
+using (EUi.TableRow(columns, i, height: height))
+{
+    EUi.TableCell(state);
+    EUi.TableCell(name);
+    EUi.Paragraph(detail);   // 最終列なので「行の残り幅」= 列幅になり、たまたま正しく折り返す
+}
+```
+
+**「たまたま正しい」のが問題です。**
+`PeekAvailable()`（`LayoutScope.cs:129-139`）は行の残り幅を返すので、
+最終列では列幅と一致しますが、**途中の列では一致しません**（C-2 と同じ原因）。
+折り返す列を最後に置くという制約が、どこにも書かれていません。
+
+**提案。** 2 つあると助かります。
+
+1. `TableColumn` に `Wrap` を持たせ、`TableRow` が「その列の幅で測った高さ」の
+   最大値を行の高さに採る（呼び出し側の逆算が全部消えます）
+2. せめて `widgets.md` に「折り返す列は最後に置く」「行の高さは自分で測って渡す」と書く
+
+あわせて、`TableCell` は 1 行で切ってツールチップへ逃がす作りなので、
+**切ってはいけない文には使えません。**Auto Collector の診断タブの詳細文は最長 85 字あり、
+切ると肝心の助言（「最初の交換は手動で確認してください」）が隠れます。
+`TableCell` に `wrap: true` があれば、1 と 2 の両方が要らなくなります。
+
+### D-4. ボタンを表のセルへ入れると行が高くなる
+
+`ButtonStyle` は `Normal / Primary / Danger / Ghost / Link` で、
+**小さい版がありません。**`Button` の高さは
+`MathF.Max(Metrics.WidgetHeight, textSize.Y + WidgetPadding.TotalVertical)` 固定です。
+
+`ImGui.SmallButton` を使っていた箇所（Auto Collector では表のセルの中に 1 つ）は、
+移すと行の高さが `WidgetHeight` まで広がります。
+
+**提案。** `Button` に `height` を足すか、`ButtonStyle.Compact` を足してください。
+`ButtonWidth` と同じ考え方で、高さの求め方も 1 箇所に置けると思います。
+
 ---
 
 ## E. 文書の誤り
