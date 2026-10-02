@@ -7,6 +7,7 @@ using AutoCollector.Game;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using EstellUtils.UI;
+using EstellUtils.UI.Core;
 using EstellUtils.UI.Layout;
 using EstellUtils.UI.Windowing;
 using Dalamud.Interface.Colors;
@@ -164,38 +165,75 @@ public sealed partial class MainWindow : EuWindow
     /// このタブは読み取りと照合だけを行い、交換は一切実行しない。
     /// AtkValue の配置が現在のクライアントで正しいかを、交換を撃つ前に確認するための場所。
     /// </summary>
+    /// <summary>AtkValue 配置の診断表の列。</summary>
+    private static readonly TableColumn[] LayoutDiagColumns =
+    [
+        new("項目", 190f),
+        new("型", 90f),
+        new("値", 100f, Align.End),
+        new("判定", SizeSpec.Weight(1f)),
+    ];
+
+    /// <summary>交換ショップの読み取り結果の表の列。</summary>
+    private static readonly TableColumn[] ShopEntryColumns =
+    [
+        new("枠", 40f, Align.End),
+        new("ItemId", 70f, Align.End),
+        new("アイテム", SizeSpec.Weight(1f)),
+        new("画面コスト", 80f, Align.End),
+        new("index", 55f, Align.End),
+        new("ゲームデータとの照合", 200f),
+    ];
+
+    /// <summary>InclusionShop の読み取り結果の表の列。</summary>
+    private static readonly TableColumn[] InclusionEntryColumns =
+    [
+        new("枠", 40f, Align.End),
+        new("ItemId", 70f, Align.End),
+        new("アイテム", SizeSpec.Weight(1f)),
+        new("コスト", 80f, Align.End),
+        new("通貨値", 70f, Align.End),
+        new("index", 55f, Align.End),
+    ];
+
+    /// <summary>callback の記録の表の列。見出しは出さない。</summary>
+    private static readonly TableColumn[] CallbackColumns =
+    [
+        new("時刻", 70f),
+        new("内容", SizeSpec.Weight(1f)),
+    ];
+
+    /// <summary>
+    /// ショップ照合タブ（デバッグモードのみ）。
+    ///
+    /// <b>EstellUtils へ移し終えたタブ。</b><c>RawTabScope</c> で囲まない。
+    /// </summary>
     private void DrawShopTab()
     {
-        // 中身はまだ生の ImGui。移し終えたらこの 1 行を外す。
-        using var raw = RawTabScope.Open();
-
-        ImGui.TextColored(ImGuiColors.DalamudGrey, "交換ショップを手動で開いた状態で確認してください。このタブは交換を実行しません。");
-        ImGui.Spacing();
+        EUi.MutedParagraph("交換ショップを手動で開いた状態で確認してください。このタブは交換を実行しません。");
+        EUi.Spacing();
 
         var shop = this.plugin.ShopService;
 
         var layout = shop.Layout;
-        ImGui.TextUnformatted($"配置: NumEntries={layout.NumEntries} / CurrencyAmount={layout.CurrencyAmount} / Cost={layout.EntryCost} / ItemId={layout.EntryItemId} / Index={layout.EntryIndex}");
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip($"この数値は次の場所の JSON で変更できます:\n{DataFileLoader.GetDataDirectory()}\\atkvalue_layout.json");
-        }
+        EUi.Label($"配置: NumEntries={layout.NumEntries} / CurrencyAmount={layout.CurrencyAmount} / Cost={layout.EntryCost} / ItemId={layout.EntryItemId} / Index={layout.EntryIndex}")
+            .Tip($"この数値は次の場所の JSON で変更できます:\n{DataFileLoader.GetDataDirectory()}\\atkvalue_layout.json");
 
-        ImGui.Separator();
+        EUi.Separator();
 
         // InclusionShop（スクリップ交換など）は別アドオン。開いていればそちらを表示する。
         if (this.plugin.InclusionShopService.IsOpen())
         {
             this.DrawInclusionShop();
-            ImGui.Spacing();
-            ImGui.Separator();
+            EUi.Spacing();
+            EUi.Separator();
             this.DrawCallbackRecorder();
             return;
         }
 
         if (!shop.IsShopOpen())
         {
-            ImGui.TextColored(ImGuiColors.DalamudYellow, "交換ショップが開いていません。");
+            EUi.TextColored("交換ショップが開いていません。", NoteKind.Warning);
             return;
         }
 
@@ -220,43 +258,32 @@ public sealed partial class MainWindow : EuWindow
         var diagnostics = this.cachedDiagnostics;
         if (diagnostics.Count > 0)
         {
-            using var node = ImRaii.TreeNode("AtkValue 配置の診断");
-            if (node)
+            // TreeNode は閉じた状態から始まるので defaultOpen は false。
+            using var node = EUi.Section("AtkValue 配置の診断", defaultOpen: false);
+            if (node.IsVisible)
             {
-                using var table = ImRaii.Table("##layoutdiag", 4, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp);
-                if (table)
+                EUi.TableHeader(LayoutDiagColumns);
+
+                var row = 0;
+                foreach (var (label, probe) in diagnostics)
                 {
-                    ImGui.TableSetupColumn("項目", ImGuiTableColumnFlags.WidthFixed, 190f);
-                    ImGui.TableSetupColumn("型", ImGuiTableColumnFlags.WidthFixed, 90f);
-                    ImGui.TableSetupColumn("値", ImGuiTableColumnFlags.WidthFixed, 100f);
-                    ImGui.TableSetupColumn("判定");
-                    ImGui.TableHeadersRow();
-
-                    foreach (var (label, probe) in diagnostics)
+                    using (EUi.TableRow(LayoutDiagColumns, row++))
                     {
-                        ImGui.TableNextRow();
+                        EUi.TableCell(label);
+                        EUi.TableCell(probe.TypeName);
+                        EUi.TableCell(probe.Usable ? probe.Value.ToString("N0") : "-");
 
-                        ImGui.TableNextColumn();
-                        ImGui.TextUnformatted(label);
-
-                        ImGui.TableNextColumn();
-                        ImGui.TextUnformatted(probe.TypeName);
-
-                        ImGui.TableNextColumn();
-                        ImGui.TextUnformatted(probe.Usable ? probe.Value.ToString("N0") : "-");
-
-                        ImGui.TableNextColumn();
                         if (!probe.InRange)
                         {
-                            ImGui.TextColored(ImGuiColors.DalamudRed, "範囲外");
+                            EUi.TableCell("範囲外", color: EUi.NoteColor(NoteKind.Danger));
                         }
                         else if (probe.Usable)
                         {
-                            ImGui.TextColored(ImGuiColors.HealerGreen, "読める");
+                            EUi.TableCell("読める", color: EUi.NoteColor(NoteKind.Success));
                         }
                         else
                         {
-                            ImGui.TextColored(ImGuiColors.DalamudYellow, "整数として読めない");
+                            EUi.TableCell("整数として読めない", color: EUi.NoteColor(NoteKind.Warning));
                         }
                     }
                 }
@@ -265,27 +292,27 @@ public sealed partial class MainWindow : EuWindow
 
         if (!string.IsNullOrEmpty(this.cachedShopFailure))
         {
-            ImGui.TextColored(ImGuiColors.DalamudRed, this.cachedShopFailure);
+            EUi.WrapColored(this.cachedShopFailure, NoteKind.Danger);
             return;
         }
 
         var entries = this.cachedEntries;
         var header = this.cachedHeader;
 
-        ImGui.TextUnformatted($"申告エントリ数: {header.DeclaredEntryCount} / 実際に読めた件数: {entries.Count}");
+        EUi.Label($"申告エントリ数: {header.DeclaredEntryCount} / 実際に読めた件数: {entries.Count}");
         if (header.UnreadableEntries > 0)
         {
-            ImGui.TextColored(ImGuiColors.DalamudYellow, $"読み取れなかったエントリ: {header.UnreadableEntries} 件");
+            EUi.TextColored($"読み取れなかったエントリ: {header.UnreadableEntries} 件", NoteKind.Warning);
         }
 
         if (header.CurrencyIcon != 0)
         {
-            ImGui.TextUnformatted($"画面上の所持通貨: {header.CurrencyAmount:N0}（アイコン ID {header.CurrencyIcon}）");
+            EUi.Label($"画面上の所持通貨: {header.CurrencyAmount:N0}（アイコン ID {header.CurrencyIcon}）");
         }
         else
         {
-            ImGui.TextUnformatted($"画面上の所持通貨: {header.CurrencyAmount:N0}");
-            ImGui.TextColored(ImGuiColors.DalamudGrey, $"  アイコン ID は読めませんでした（型 {header.CurrencyIconType}）。補助情報のため交換には影響しません");
+            EUi.Label($"画面上の所持通貨: {header.CurrencyAmount:N0}");
+            EUi.MutedParagraph($"  アイコン ID は読めませんでした（型 {header.CurrencyIconType}）。補助情報のため交換には影響しません");
         }
 
         // 監視中の通貨と画面の所持数が一致するかを見ると、配置が正しいかの強い裏付けになる。
@@ -295,15 +322,15 @@ public sealed partial class MainWindow : EuWindow
         {
             if (actual == (int)header.CurrencyAmount)
             {
-                ImGui.TextColored(ImGuiColors.HealerGreen, $"所持数の一致を確認しました（インベントリ {actual:N0} = 画面 {header.CurrencyAmount:N0}）。配置は正しいと判断できます。");
+                EUi.WrapColored($"所持数の一致を確認しました（インベントリ {actual:N0} = 画面 {header.CurrencyAmount:N0}）。配置は正しいと判断できます。", NoteKind.Success);
             }
             else
             {
-                ImGui.TextColored(ImGuiColors.DalamudYellow, $"インベントリ {actual:N0} と画面 {header.CurrencyAmount:N0} が違います。別通貨のショップか、CurrencyAmount の位置がずれています。");
+                EUi.WrapColored($"インベントリ {actual:N0} と画面 {header.CurrencyAmount:N0} が違います。別通貨のショップか、CurrencyAmount の位置がずれています。", NoteKind.Warning);
             }
         }
 
-        ImGui.Spacing();
+        EUi.Spacing();
 
         // どのショップが開いているかを先に特定する。
         // 同じアイテムが複数のショップに別の値段で載っているため、
@@ -312,15 +339,15 @@ public sealed partial class MainWindow : EuWindow
 
         if (identification.IsConfident)
         {
-            ImGui.TextColored(ImGuiColors.HealerGreen, $"開いているショップを特定しました: Shop {identification.ShopId}（画面の {identification.TotalEntries} 件すべてが一致）");
+            EUi.WrapColored($"開いているショップを特定しました: Shop {identification.ShopId}（画面の {identification.TotalEntries} 件すべてが一致）", NoteKind.Success);
         }
         else if (identification.ShopId is not null)
         {
-            ImGui.TextColored(ImGuiColors.DalamudYellow, identification.Detail);
+            EUi.WrapColored(identification.Detail, NoteKind.Warning);
         }
         else
         {
-            ImGui.TextColored(ImGuiColors.DalamudRed, identification.Detail);
+            EUi.WrapColored(identification.Detail, NoteKind.Danger);
         }
 
         // ショップを特定できていないときは照合しない。
@@ -344,82 +371,70 @@ public sealed partial class MainWindow : EuWindow
         var mismatched = 0;
         var unknown = 0;
 
-        using (var table = ImRaii.Table("##shopentries", 6, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp | ImGuiTableFlags.ScrollY, new System.Numerics.Vector2(0, 400)))
+        // **見出しは送り領域の外に置いて固定する。**
+        //
+        // EstellUtils に ScrollFreeze に当たるものが無いため（docs/18 A-2）、
+        // 見出しを外、行を中に置く。送り領域はつまみが出ているとき内容の右端を削るので、
+        // reserveScrollbar で見出し側も同じだけ空けないと、行数が増えた瞬間に列がずれる。
+        EUi.TableHeader(ShopEntryColumns, reserveScrollbar: true);
+
+        using (EUi.Scroll("##shopentries", 400f))
         {
-            if (table)
+            for (var i = 0; i < entries.Count; i++)
             {
-                ImGui.TableSetupColumn("枠", ImGuiTableColumnFlags.WidthFixed, 40f);
-                ImGui.TableSetupColumn("ItemId", ImGuiTableColumnFlags.WidthFixed, 70f);
-                ImGui.TableSetupColumn("アイテム");
-                ImGui.TableSetupColumn("画面コスト", ImGuiTableColumnFlags.WidthFixed, 80f);
-                ImGui.TableSetupColumn("index", ImGuiTableColumnFlags.WidthFixed, 55f);
-                ImGui.TableSetupColumn("ゲームデータとの照合", ImGuiTableColumnFlags.WidthFixed, 200f);
-                ImGui.TableSetupScrollFreeze(0, 1);
-                ImGui.TableHeadersRow();
+                var entry = entries[i];
 
-                foreach (var entry in entries)
+                using (EUi.TableRow(ShopEntryColumns, i))
                 {
-                    ImGui.TableNextRow();
+                    EUi.TableCell(entry.Slot.ToString());
+                    EUi.TableCell(entry.ItemId.ToString());
+                    EUi.TableCell(entry.ItemName);
+                    EUi.TableCell(entry.CostAmount.ToString("N0"));
+                    EUi.TableCell(entry.Index.ToString());
 
-                    ImGui.TableNextColumn();
-                    ImGui.TextUnformatted(entry.Slot.ToString());
-
-                    ImGui.TableNextColumn();
-                    ImGui.TextUnformatted(entry.ItemId.ToString());
-
-                    ImGui.TableNextColumn();
-                    ImGui.TextUnformatted(entry.ItemName);
-
-                    ImGui.TableNextColumn();
-                    ImGui.TextUnformatted(entry.CostAmount.ToString("N0"));
-
-                    ImGui.TableNextColumn();
-                    ImGui.TextUnformatted(entry.Index.ToString());
-
-                    ImGui.TableNextColumn();
                     if (!definitionsByItem.TryGetValue(entry.ItemId, out var def))
                     {
                         unknown++;
-                        ImGui.TextColored(ImGuiColors.DalamudGrey, "このショップの定義になし");
+                        EUi.TableCell("このショップの定義になし", color: EUi.Colors.TextMuted);
                     }
                     else if (def.CurrencyCost == entry.CostAmount)
                     {
                         matched++;
-                        ImGui.TextColored(ImGuiColors.HealerGreen, $"一致 ({def.CurrencyCost:N0})");
+                        EUi.TableCell($"一致 ({def.CurrencyCost:N0})", color: EUi.NoteColor(NoteKind.Success));
                     }
                     else
                     {
                         mismatched++;
-                        ImGui.TextColored(ImGuiColors.DalamudRed, $"不一致 データ {def.CurrencyCost:N0}");
+                        EUi.TableCell($"不一致 データ {def.CurrencyCost:N0}", color: EUi.NoteColor(NoteKind.Danger));
                     }
                 }
             }
         }
 
-        ImGui.Spacing();
+        EUi.Spacing();
         if (resolver.Stage != ResolverBuildStage.Completed)
         {
-            ImGui.TextColored(ImGuiColors.DalamudYellow, "「交換候補」タブで通貨を選ぶと、ゲームデータとの照合結果が出ます。");
+            EUi.WrapColored("「交換候補」タブで通貨を選ぶと、ゲームデータとの照合結果が出ます。", NoteKind.Warning);
             return;
         }
 
-        ImGui.TextUnformatted($"照合: 一致 {matched} / 不一致 {mismatched} / 対象外 {unknown}");
+        EUi.Label($"照合: 一致 {matched} / 不一致 {mismatched} / 対象外 {unknown}");
 
         if (mismatched > 0)
         {
-            ImGui.TextColored(ImGuiColors.DalamudRed, "不一致があります。この状態では交換を実行してはいけません。");
+            EUi.WrapColored("不一致があります。この状態では交換を実行してはいけません。", NoteKind.Danger);
         }
         else if (matched > 0)
         {
-            ImGui.TextColored(ImGuiColors.HealerGreen, "コストがすべて一致しました。ID による照合が機能しています。");
+            EUi.WrapColored("コストがすべて一致しました。ID による照合が機能しています。", NoteKind.Success);
         }
 
-        ImGui.Spacing();
-        ImGui.Separator();
+        EUi.Spacing();
+        EUi.Separator();
         this.DrawExchangeExecution(identification, definitionsByItem, entries);
 
-        ImGui.Spacing();
-        ImGui.Separator();
+        EUi.Spacing();
+        EUi.Separator();
         this.DrawCallbackRecorder();
     }
 
@@ -432,18 +447,18 @@ public sealed partial class MainWindow : EuWindow
     {
         var service = this.plugin.InclusionShopService;
 
-        ImGui.TextColored(ImGuiColors.HealerGreen, "InclusionShop（アイテム交換）が開いています。");
+        EUi.TextColored("InclusionShop（アイテム交換）が開いています。", NoteKind.Success);
 
         if (service.TryGetSelection(out var selection) && selection is not null)
         {
-            ImGui.TextUnformatted(
+            EUi.Label(
                 $"InclusionShop {selection.InclusionShopId} / 系統 {selection.SelectedCategoryIndex + 1}・{selection.CategoryCount} " +
                 $"(行 {selection.SelectedCategoryRowId} / シリーズ {selection.SelectedSeriesId})");
-            ImGui.TextUnformatted($"種別 タブ {selection.SelectedSubCategoryTab} / 表示 {selection.VisibleSubCategoryCount}");
+            EUi.Label($"種別 タブ {selection.SelectedSubCategoryTab} / 表示 {selection.VisibleSubCategoryCount}");
         }
         else
         {
-            ImGui.TextColored(ImGuiColors.DalamudYellow, "選択状態を読めませんでした。");
+            EUi.TextColored("選択状態を読めませんでした。", NoteKind.Warning);
         }
 
         if (!service.TryGetAddon(out var addon))
@@ -453,55 +468,40 @@ public sealed partial class MainWindow : EuWindow
 
         if (!service.TryReadEntries(addon, out var entries, out var currency, out var failure))
         {
-            ImGui.TextColored(ImGuiColors.DalamudRed, failure);
+            EUi.WrapColored(failure, NoteKind.Danger);
             return;
         }
 
-        ImGui.TextUnformatted($"画面上の通貨: {currency:N0} / エントリ {entries.Count} 件");
+        EUi.Label($"画面上の通貨: {currency:N0} / エントリ {entries.Count} 件");
 
         if (entries.Count == 0)
         {
-            ImGui.TextColored(ImGuiColors.DalamudYellow, "種別が選ばれていないため、品目が表示されていません。");
+            EUi.WrapColored("種別が選ばれていないため、品目が表示されていません。", NoteKind.Warning);
             return;
         }
 
-        using var table = ImRaii.Table("##inclusionentries", 6, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp | ImGuiTableFlags.ScrollY, new System.Numerics.Vector2(0, 320));
-        if (!table)
+        // 見出しは送り領域の外。つまみのぶんを空けないと列がずれる（docs/18 A-2）。
+        EUi.TableHeader(InclusionEntryColumns, reserveScrollbar: true);
+
+        using (EUi.Scroll("##inclusionentries", 320f))
         {
-            return;
-        }
+            for (var i = 0; i < entries.Count; i++)
+            {
+                var entry = entries[i];
 
-        ImGui.TableSetupColumn("枠", ImGuiTableColumnFlags.WidthFixed, 40f);
-        ImGui.TableSetupColumn("ItemId", ImGuiTableColumnFlags.WidthFixed, 70f);
-        ImGui.TableSetupColumn("アイテム");
-        ImGui.TableSetupColumn("コスト", ImGuiTableColumnFlags.WidthFixed, 80f);
-        ImGui.TableSetupColumn("通貨値", ImGuiTableColumnFlags.WidthFixed, 70f);
-        ImGui.TableSetupColumn("index", ImGuiTableColumnFlags.WidthFixed, 55f);
-        ImGui.TableSetupScrollFreeze(0, 1);
-        ImGui.TableHeadersRow();
+                using (EUi.TableRow(InclusionEntryColumns, i))
+                {
+                    EUi.TableCell(entry.Slot.ToString());
+                    EUi.TableCell(entry.ItemId.ToString());
+                    EUi.TableCell(entry.ItemName);
+                    EUi.TableCell(entry.CostAmount.ToString("N0"));
 
-        foreach (var entry in entries)
-        {
-            ImGui.TableNextRow();
+                    // 8 未満なら特殊通貨のインデックス。ItemId ではない点が分かるように出す。
+                    EUi.TableCell(entry.CostItemId < 8 ? $"idx {entry.CostItemId}" : entry.CostItemId.ToString());
 
-            ImGui.TableNextColumn();
-            ImGui.TextUnformatted(entry.Slot.ToString());
-
-            ImGui.TableNextColumn();
-            ImGui.TextUnformatted(entry.ItemId.ToString());
-
-            ImGui.TableNextColumn();
-            ImGui.TextUnformatted(entry.ItemName);
-
-            ImGui.TableNextColumn();
-            ImGui.TextUnformatted(entry.CostAmount.ToString("N0"));
-
-            ImGui.TableNextColumn();
-            // 8 未満なら特殊通貨のインデックス。ItemId ではない点が分かるように出す。
-            ImGui.TextUnformatted(entry.CostItemId < 8 ? $"idx {entry.CostItemId}" : entry.CostItemId.ToString());
-
-            ImGui.TableNextColumn();
-            ImGui.TextUnformatted(entry.Index.ToString());
+                    EUi.TableCell(entry.Index.ToString());
+                }
+            }
         }
     }
 
@@ -516,21 +516,21 @@ public sealed partial class MainWindow : EuWindow
     {
         var executor = this.plugin.ExchangeExecutor;
 
-        ImGui.TextUnformatted("交換の実行（1 個のみ）");
+        EUi.Heading("交換の実行（1 個のみ）");
 
         // 結果未確認の記録が残っている間は、新しい交換を一切受け付けない
         if (executor.InFlight is { } pending)
         {
-            ImGui.TextColored(ImGuiColors.DalamudRed, "前回の交換の結果が未確認です。");
-            ImGui.TextUnformatted($"  {pending.RewardName} × {pending.RewardQuantity} / コスト {pending.CurrencyCost} / index {pending.CallbackIndex}");
-            ImGui.TextUnformatted($"  発火時: 通貨 {pending.CurrencyBefore:N0} / 報酬 {pending.RewardBefore:N0}");
+            EUi.TextColored("前回の交換の結果が未確認です。", NoteKind.Danger);
+            EUi.Label($"  {pending.RewardName} × {pending.RewardQuantity} / コスト {pending.CurrencyCost} / index {pending.CallbackIndex}");
+            EUi.Label($"  発火時: 通貨 {pending.CurrencyBefore:N0} / 報酬 {pending.RewardBefore:N0}");
             if (!string.IsNullOrEmpty(pending.Outcome))
             {
-                ImGui.TextWrapped($"  結果: {pending.Outcome}");
+                EUi.Paragraph($"  結果: {pending.Outcome}");
             }
 
-            ImGui.TextColored(ImGuiColors.DalamudGrey, "  ゲーム内で実際の所持数を確認してからクリアしてください。");
-            if (ImGui.Button("確認したのでクリアする##clearinflight"))
+            EUi.MutedParagraph("  ゲーム内で実際の所持数を確認してからクリアしてください。");
+            if (EUi.Button("確認したのでクリアする##clearinflight"))
             {
                 executor.ClearInFlight();
             }
@@ -540,18 +540,18 @@ public sealed partial class MainWindow : EuWindow
 
         if (!string.IsNullOrEmpty(executor.StatusDetail))
         {
-            var color = executor.Step switch
+            var kind = executor.Step switch
             {
-                ExchangeStep.Done => ImGuiColors.HealerGreen,
-                ExchangeStep.Error => ImGuiColors.DalamudRed,
-                _ => ImGuiColors.DalamudYellow,
+                ExchangeStep.Done => NoteKind.Success,
+                ExchangeStep.Error => NoteKind.Danger,
+                _ => NoteKind.Warning,
             };
-            ImGui.TextColored(color, $"{StatusText.StepLabel(executor.Step)}: {executor.StatusDetail}");
+            EUi.WrapColored($"{StatusText.StepLabel(executor.Step)}: {executor.StatusDetail}", kind);
         }
 
         if (!identification.IsConfident)
         {
-            ImGui.TextColored(ImGuiColors.DalamudYellow, "ショップを特定できていないため、交換は実行できません。");
+            EUi.WrapColored("ショップを特定できていないため、交換は実行できません。", NoteKind.Warning);
             return;
         }
 
@@ -563,40 +563,42 @@ public sealed partial class MainWindow : EuWindow
 
         if (selectable.Count == 0)
         {
-            ImGui.TextColored(ImGuiColors.DalamudYellow, "照合が一致したエントリがありません。");
+            EUi.WrapColored("照合が一致したエントリがありません。", NoteKind.Warning);
             return;
         }
 
         var names = selectable.Select(e => $"{e.ItemName}（{e.CostAmount:N0}）").ToArray();
         this.exchangeChoice = Math.Clamp(this.exchangeChoice, 0, names.Length - 1);
 
-        ImGui.SetNextItemWidth(320f);
-        ImGui.Combo("交換対象##exchangetarget", ref this.exchangeChoice, names, names.Length);
+        using (EUi.Field("交換対象"))
+        {
+            EUi.Combo("##exchangetarget", ref this.exchangeChoice, names, width: 320f);
+        }
 
         var chosen = selectable[this.exchangeChoice];
         var definition = definitionsByItem[chosen.ItemId];
 
-        ImGui.TextColored(ImGuiColors.DalamudGrey,
+        EUi.MutedParagraph(
             $"  {chosen.ItemName} を 1 回交換します（コスト {chosen.CostAmount:N0} / 取得 {definition.RewardQuantity} 個 / index {chosen.Index}）");
 
         if (!executor.CanRequest)
         {
-            ImGui.BeginDisabled();
-            ImGui.Button("交換する##doexchange");
-            ImGui.EndDisabled();
+            EUi.Button("交換する##doexchange", disabled: true);
             return;
         }
 
-        if (ImGui.Button("交換する##doexchange"))
+        using (EUi.HStack())
         {
-            if (!executor.Request(definition, out var reason))
+            if (EUi.Button("交換する##doexchange"))
             {
-                this.plugin.AnomalyLog.Warn("Exchange", reason);
+                if (!executor.Request(definition, out var reason))
+                {
+                    this.plugin.AnomalyLog.Warn("Exchange", reason);
+                }
             }
-        }
 
-        ImGui.SameLine();
-        ImGui.TextColored(ImGuiColors.DalamudGrey, "通貨を消費します");
+            EUi.Muted("通貨を消費します");
+        }
     }
 
     /// <summary>
@@ -609,207 +611,218 @@ public sealed partial class MainWindow : EuWindow
     {
         var recorder = this.plugin.CallbackRecorder;
 
-        ImGui.TextUnformatted("callback の記録（S5 実装前の実測用）");
-        ImGui.TextColored(ImGuiColors.DalamudGrey, "記録を開始してから、手動で 1 個だけ交換してください。押した操作の引数がそのまま出ます。");
+        EUi.Heading("callback の記録（S5 実装前の実測用）");
+        EUi.MutedParagraph("記録を開始してから、手動で 1 個だけ交換してください。押した操作の引数がそのまま出ます。");
 
         // AddonFilter を空にすると全アドオンを記録する。
         // ショップ以外（確認ダイアログ等）が飛んでいるかを調べるには空にする必要がある。
         var filter = recorder.AddonFilter;
-        ImGui.SetNextItemWidth(260f);
-        if (ImGui.InputTextWithHint("記録対象アドオン##callbackfilter", "空にすると全アドオンを記録", ref filter, 64))
+        using (EUi.Field("記録対象アドオン"))
         {
-            recorder.AddonFilter = filter;
-        }
-
-        var recording = recorder.IsRecording;
-        if (ImGui.Checkbox("記録する##callbackrec", ref recording))
-        {
-            if (recording)
+            if (EUi.TextInput(
+                "##callbackfilter", ref filter,
+                hint: "空にすると全アドオンを記録", maxLength: 64, width: 260f))
             {
-                recorder.Start();
-            }
-            else
-            {
-                recorder.Stop();
+                recorder.AddonFilter = filter;
             }
         }
 
-        ImGui.SameLine();
-        if (ImGui.Button("記録を消去##callbackclear"))
+        using (EUi.HStack())
         {
-            recorder.Clear();
+            var recording = recorder.IsRecording;
+            if (EUi.Checkbox("記録する##callbackrec", ref recording))
+            {
+                if (recording)
+                {
+                    recorder.Start();
+                }
+                else
+                {
+                    recorder.Stop();
+                }
+            }
+
+            if (EUi.Button("記録を消去##callbackclear"))
+            {
+                recorder.Clear();
+            }
         }
 
         var records = recorder.Snapshot();
         if (records.Count == 0)
         {
-            ImGui.TextColored(ImGuiColors.DalamudGrey, "まだ記録はありません。");
+            EUi.Muted("まだ記録はありません。");
             return;
         }
 
-        using var child = ImRaii.Child("##callbackrecords", new System.Numerics.Vector2(0, 160), true);
-        if (!child)
+        using (EUi.Scroll("##callbackrecords", 160f))
         {
-            return;
-        }
+            // 新しいものから。LINQ の Reverse で毎フレーム作り直さず、添字で逆から読む。
+            for (var i = 0; i < records.Count; i++)
+            {
+                var record = records[records.Count - 1 - i];
+                var text = $"{record.AddonName}  updateState={record.UpdateState}  {record.Signature}";
 
-        foreach (var record in records.Reverse())
-        {
-            ImGui.TextColored(ImGuiColors.DalamudGrey, $"{record.At:HH:mm:ss}");
-            ImGui.SameLine();
-            ImGui.TextUnformatted($"{record.AddonName}  updateState={record.UpdateState}  {record.Signature}");
+                using (EUi.TableRow(CallbackColumns, i, height: RowHeightFor(text, 70f, 2)))
+                {
+                    EUi.TableCell($"{record.At:HH:mm:ss}", color: EUi.Colors.TextMuted);
+                    EUi.Paragraph(text);
+                }
+            }
         }
     }
 
+    /// <summary>交換候補の表の列。全セルが 1 行なので TableCell で足りる。</summary>
+    private static readonly TableColumn[] CandidateColumns =
+    [
+        new("コスト", 60f, Align.End),
+        new("個数", 45f, Align.End),
+        new("NPC", SizeSpec.Weight(1f)),
+        new("エリア", SizeSpec.Weight(1f)),
+        new("座標", 150f),
+        new("経路", 90f),
+        new("実行", 130f),
+    ];
+
     /// <summary>
+    /// 交換候補タブ（デバッグモードのみ）。
     /// 通貨を選ぶと、その通貨で買えるものをゲームデータから解決して一覧表示する。
-    /// この段階ではゲーム状態を一切変更しない（読み取り専用）。
+    /// ここではゲーム状態を変更しない（「行って交換」を押したときだけ予約を立てる）。
+    ///
+    /// <b>EstellUtils へ移し終えたタブ。</b><c>RawTabScope</c> で囲まない。
     /// </summary>
     private void DrawExchangeTab()
     {
-        // 中身はまだ生の ImGui。移し終えたらこの 1 行を外す。
-        using var raw = RawTabScope.Open();
-
         var slots = this.plugin.TomestoneService.ListSlots();
         if (slots.Count == 0)
         {
-            ImGui.TextColored(ImGuiColors.DalamudRed, "トームストーンを解決できませんでした。");
+            EUi.TextColored("トームストーンを解決できませんでした。", NoteKind.Danger);
             return;
         }
 
-        ImGui.TextUnformatted("通貨を選ぶと、ゲームデータから交換候補を解決します。");
-        ImGui.Spacing();
+        EUi.Label("通貨を選ぶと、ゲームデータから交換候補を解決します。");
+        EUi.Spacing();
 
-        foreach (var slot in slots)
+        // 以前は SameLine を並べて最後に NewLine を打っていた。
+        // 幅に入り切らないと押せない通貨が出るので、折り返す横並びにする。
+        using (EUi.HStack(wrap: true))
         {
-            if (string.IsNullOrEmpty(slot.Name))
+            foreach (var slot in slots)
             {
-                continue;
-            }
+                if (string.IsNullOrEmpty(slot.Name))
+                {
+                    continue;
+                }
 
-            if (ImGui.Button($"{slot.Name}##build{slot.TomestonesRowId}"))
-            {
-                this.plugin.ExchangeResolver.BeginBuild(slot.ItemId);
+                if (EUi.Button($"{slot.Name}##build{slot.TomestonesRowId}"))
+                {
+                    this.plugin.ExchangeResolver.BeginBuild(slot.ItemId);
+                }
             }
-
-            ImGui.SameLine();
         }
 
-        ImGui.NewLine();
-        ImGui.Separator();
+        EUi.Separator();
 
         var resolver = this.plugin.ExchangeResolver;
 
         switch (resolver.Stage)
         {
             case ResolverBuildStage.NotStarted:
-                ImGui.TextUnformatted("通貨を選択してください。");
+                EUi.Label("通貨を選択してください。");
                 return;
 
             case ResolverBuildStage.Failed:
-                ImGui.TextColored(ImGuiColors.DalamudRed, "索引の構築に失敗しました。診断タブを確認してください。");
+                EUi.WrapColored("索引の構築に失敗しました。診断タブを確認してください。", NoteKind.Danger);
                 return;
 
             case ResolverBuildStage.Completed:
                 break;
 
             default:
-                ImGui.ProgressBar(resolver.BuildProgress, new System.Numerics.Vector2(-1, 0), $"{resolver.Stage} {resolver.BuildProgress * 100:F0}%");
+                EUi.ProgressBar(
+                    resolver.BuildProgress,
+                    $"{resolver.Stage} {resolver.BuildProgress * 100:F0}%");
                 return;
         }
 
-        if (ImGui.Checkbox("座標を解決できたものだけ表示", ref this.onlyWithLocation))
-        {
-            // 表示切り替えのみ。再構築は不要。
-        }
+        // 表示の切り替えだけ。再構築は要らないので戻り値は見ない。
+        EUi.Checkbox("座標を解決できたものだけ表示", ref this.onlyWithLocation);
 
         var groups = resolver.GroupByReward(this.onlyWithLocation);
-        ImGui.TextUnformatted($"報酬アイテム {groups.Count} 種 / 定義 {resolver.Results.Count} 件");
+        EUi.Label($"報酬アイテム {groups.Count} 種 / 定義 {resolver.Results.Count} 件");
 
-        ImGui.SetNextItemWidth(-1);
-        ImGui.InputTextWithHint("##filter", "アイテム名で絞り込み", ref this.rewardFilter, 100);
+        EUi.TextInput("##filter", ref this.rewardFilter, hint: "アイテム名で絞り込み", maxLength: 100);
 
         var filtered = string.IsNullOrWhiteSpace(this.rewardFilter)
             ? groups
             : groups.Where(g => g.RewardName.Contains(this.rewardFilter, StringComparison.OrdinalIgnoreCase)).ToList();
 
-        using var child = ImRaii.Child("##candidates", new System.Numerics.Vector2(0, 0), true);
-        if (!child)
+        var hidden = filtered.Count - 300;
+
+        // 件数の行をあとに置くと、送り領域が残り全部を取ってしまって出る場所が無い。
+        // 先に出す。
+        if (hidden > 0)
         {
-            return;
+            EUi.TextColored($"{hidden} 件は表示していません。絞り込んでください。", NoteKind.Warning);
         }
 
-        foreach (var group in filtered.Take(300))
+        using (EUi.Scroll("##candidates", EUi.AvailableHeight))
         {
-            using var node = ImRaii.TreeNode($"{group.RewardName}##{group.RewardItemId}");
-            if (!node)
+            foreach (var group in filtered.Take(300))
             {
-                continue;
-            }
+                // TreeNode は閉じた状態から始まるので defaultOpen は false。
+                using var node = EUi.Section(
+                    group.RewardName, defaultOpen: false, id: $"cand{group.RewardItemId}");
 
-            using var table = ImRaii.Table($"##defs{group.RewardItemId}", 7, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp);
-            if (!table)
-            {
-                continue;
-            }
-
-            ImGui.TableSetupColumn("コスト", ImGuiTableColumnFlags.WidthFixed, 60f);
-            ImGui.TableSetupColumn("個数", ImGuiTableColumnFlags.WidthFixed, 45f);
-            ImGui.TableSetupColumn("NPC");
-            ImGui.TableSetupColumn("エリア");
-            ImGui.TableSetupColumn("座標", ImGuiTableColumnFlags.WidthFixed, 150f);
-            ImGui.TableSetupColumn("経路", ImGuiTableColumnFlags.WidthFixed, 90f);
-            ImGui.TableSetupColumn("実行", ImGuiTableColumnFlags.WidthFixed, 130f);
-            ImGui.TableHeadersRow();
-
-            foreach (var def in group.Definitions)
-            {
-                ImGui.TableNextRow();
-
-                ImGui.TableNextColumn();
-                ImGui.TextUnformatted(def.CurrencyCost.ToString("N0"));
-
-                ImGui.TableNextColumn();
-                ImGui.TextUnformatted(def.RewardQuantity.ToString());
-
-                ImGui.TableNextColumn();
-                ImGui.TextUnformatted(string.IsNullOrEmpty(def.NpcName) ? $"<{def.NpcDataId}>" : def.NpcName);
-
-                ImGui.TableNextColumn();
-                if (def.TerritoryId == 0)
+                if (!node.IsVisible)
                 {
-                    ImGui.TextColored(ImGuiColors.DalamudRed, "未解決");
-                }
-                else
-                {
-                    ImGui.TextUnformatted(NpcLocationService.GetTerritoryName(def.TerritoryId));
+                    continue;
                 }
 
-                ImGui.TableNextColumn();
-                ImGui.TextUnformatted(def.HasLocation
-                    ? $"{def.NpcPosition.X:F1}, {def.NpcPosition.Y:F1}, {def.NpcPosition.Z:F1}"
-                    : "-");
+                EUi.TableHeader(CandidateColumns);
 
-                ImGui.TableNextColumn();
-                ImGui.TextUnformatted(def.Path.ToString());
-                if (!string.IsNullOrEmpty(def.MenuHint) && ImGui.IsItemHovered())
+                var definitions = group.Definitions;
+
+                for (var i = 0; i < definitions.Count; i++)
                 {
-                    ImGui.SetTooltip($"選択肢ヒント: {def.MenuHint}\nShopId: {def.ShopId}");
+                    var def = definitions[i];
+
+                    using (EUi.TableRow(CandidateColumns, i))
+                    {
+                        EUi.TableCell(def.CurrencyCost.ToString("N0"));
+                        EUi.TableCell(def.RewardQuantity.ToString());
+                        EUi.TableCell(string.IsNullOrEmpty(def.NpcName) ? $"<{def.NpcDataId}>" : def.NpcName);
+
+                        if (def.TerritoryId == 0)
+                        {
+                            EUi.TableCell("未解決", color: EUi.NoteColor(NoteKind.Danger));
+                        }
+                        else
+                        {
+                            EUi.TableCell(NpcLocationService.GetTerritoryName(def.TerritoryId));
+                        }
+
+                        EUi.TableCell(def.HasLocation
+                            ? $"{def.NpcPosition.X:F1}, {def.NpcPosition.Y:F1}, {def.NpcPosition.Z:F1}"
+                            : "-");
+
+                        EUi.TableCell(def.Path.ToString())
+                            .TipIf(
+                                !string.IsNullOrEmpty(def.MenuHint),
+                                $"選択肢ヒント: {def.MenuHint}\nShopId: {def.ShopId}");
+
+                        this.DrawTravelButton(def);
+                    }
                 }
-
-                ImGui.TableNextColumn();
-                this.DrawTravelButton(def);
             }
-        }
-
-        if (filtered.Count > 300)
-        {
-            ImGui.TextColored(ImGuiColors.DalamudYellow, $"{filtered.Count - 300} 件は表示していません。絞り込んでください。");
         }
     }
 
     /// <summary>
-    /// NPC のところまで移動して交換する。同じエリアにいる必要がある（テレポート未実装）。
+    /// NPC のところまで移動して交換する。
+    ///
+    /// 表の「実行」列から呼ぶ。どの経路を通っても <b>セルをちょうど 1 つ</b>
+    /// 消費する。消費しないと以降の列がずれる。
     /// </summary>
     private void DrawTravelButton(ExchangeDefinition definition)
     {
@@ -817,7 +830,7 @@ public sealed partial class MainWindow : EuWindow
 
         if (!definition.HasLocation)
         {
-            ImGui.TextColored(ImGuiColors.DalamudGrey, "座標未解決");
+            EUi.TableCell("座標未解決", color: EUi.Colors.TextMuted);
             return;
         }
 
@@ -828,48 +841,37 @@ public sealed partial class MainWindow : EuWindow
             // Lifestream が無いかエーテライト未アクセスなら、押せても失敗するので理由を出す。
             if (!this.plugin.Lifestream.IsLoaded)
             {
-                ImGui.TextColored(ImGuiColors.DalamudGrey, "Lifestream 未導入");
-                if (ImGui.IsItemHovered())
-                {
-                    ImGui.SetTooltip("別エリアへの移動には Lifestream が必要です。");
-                }
-
+                EUi.TableCell("Lifestream 未導入", color: EUi.Colors.TextMuted)
+                    .Tip("別エリアへの移動には Lifestream が必要です。");
                 return;
             }
 
             if (!this.plugin.AetheryteService.CanReach(definition.TerritoryId))
             {
-                ImGui.TextColored(ImGuiColors.DalamudGrey, "未アクセス");
-                if (ImGui.IsItemHovered())
-                {
-                    ImGui.SetTooltip($"{NpcLocationService.GetTerritoryName(definition.TerritoryId)} のエーテライトにアクセスしていないため、テレポートできません。");
-                }
-
+                EUi.TableCell("未アクセス", color: EUi.Colors.TextMuted)
+                    .Tip($"{NpcLocationService.GetTerritoryName(definition.TerritoryId)} のエーテライトにアクセスしていないため、テレポートできません。");
                 return;
             }
         }
 
+        var label = $"行って交換##travel{definition.ShopId}_{definition.RewardItemId}_{definition.NpcDataId}";
+
         if (!executor.CanRequest)
         {
-            ImGui.BeginDisabled();
-            ImGui.Button($"行って交換##travel{definition.ShopId}_{definition.RewardItemId}_{definition.NpcDataId}");
-            ImGui.EndDisabled();
+            EUi.Button(label, disabled: true);
             return;
         }
 
-        if (ImGui.Button($"行って交換##travel{definition.ShopId}_{definition.RewardItemId}_{definition.NpcDataId}"))
+        var tip = sameArea
+            ? $"{definition.NpcName} まで移動して 1 個交換します。通貨を消費します。"
+            : $"{NpcLocationService.GetTerritoryName(definition.TerritoryId)} へテレポートし、{definition.NpcName} まで移動して 1 個交換します。通貨を消費します。";
+
+        if (EUi.Button(label).Tip(tip))
         {
             if (!executor.RequestWithTravel(definition, out var reason))
             {
                 this.plugin.AnomalyLog.Warn("Exchange", reason);
             }
-        }
-
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip(sameArea
-                ? $"{definition.NpcName} まで移動して 1 個交換します。通貨を消費します。"
-                : $"{NpcLocationService.GetTerritoryName(definition.TerritoryId)} へテレポートし、{definition.NpcName} まで移動して 1 個交換します。通貨を消費します。");
         }
     }
 
@@ -878,6 +880,11 @@ public sealed partial class MainWindow : EuWindow
     ///
     /// 問題が無いときは畳んでおく。5 行を常に並べると、
     /// 使っていないものまで壊れているように見える。
+    ///
+    /// <b>ここだけ生の ImGui のまま。</b>呼び出し元が状況タブ
+    /// （<c>MainWindow.StatusTab.cs</c>）で、そのタブが <c>RawTabScope</c> で
+    /// 囲まれているため。囲みの中で <c>EUi.*</c> を呼ぶとレイアウトの持ち主が二人になる。
+    /// 状況タブを移すときに一緒に移す。
     /// </summary>
     private void DrawPluginTable()
     {
