@@ -73,6 +73,8 @@ public sealed class CurrencyCatalog(
     private static readonly TimeSpan ChoiceCacheDuration = TimeSpan.FromSeconds(1);
 
     /// <summary>選べる通貨の一覧。</summary>
+    public void Invalidate() => this.choiceCache = null;
+
     public IReadOnlyList<CurrencyChoice> ListChoices()
     {
         if (this.choiceCache is { } cached && DateTime.UtcNow < this.choiceCacheUntil)
@@ -102,7 +104,7 @@ public sealed class CurrencyCatalog(
 
         foreach (var (itemId, name) in this.specials.ListCurrencies())
         {
-            if (usable.Count > 0 && !usable.Contains(itemId))
+            if (list.Any(x => x.ItemId == itemId) || (usable.Count > 0 && !usable.Contains(itemId)))
             {
                 continue;
             }

@@ -153,6 +153,7 @@ public sealed class CraftPlanService(
     ];
 
     private List<CraftableCollectable>? craftables;
+    public void InvalidateCurrencies() => this.craftables = null;
     private List<CraftJob>? jobs;
     private uint crystalCategoryRowId;
 

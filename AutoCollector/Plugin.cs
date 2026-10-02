@@ -776,6 +776,38 @@ public sealed class Plugin : IDalamudPlugin
 
     private DateTime nextTickUtc = DateTime.MinValue;
 
+    private DateTime nextCurrencyRefreshUtc;
+    private bool currencyWasLoggedIn;
+    private int currencyRevision = -1;
+
+    private void RefreshCurrencies()
+    {
+        var loggedIn = Svc.ClientState.IsLoggedIn;
+        if (!loggedIn)
+        {
+            if (this.currencyWasLoggedIn) this.SpecialCurrencyMap.ResetClient();
+            this.currencyWasLoggedIn = false;
+            this.nextCurrencyRefreshUtc = DateTime.MinValue;
+            return;
+        }
+
+        // 交換・納品の途中では照合に使う表を変えない。
+        if (this.ExchangeExecutor.IsBusy || this.CollectableDelivery.IsRunning) return;
+        this.currencyWasLoggedIn = true;
+        if (DateTime.UtcNow < this.nextCurrencyRefreshUtc) return;
+        this.nextCurrencyRefreshUtc = DateTime.UtcNow.AddSeconds(5);
+        this.SpecialCurrencyMap.RefreshFromClient();
+        if (this.currencyRevision == this.SpecialCurrencyMap.Revision) return;
+        this.currencyRevision = this.SpecialCurrencyMap.Revision;
+        this.CollectableRewardService.Invalidate();
+        this.CraftPlanService.InvalidateCurrencies();
+        this.CollectableSource.Invalidate();
+        this.InclusionShopCatalog.Invalidate();
+        this.CurrencyCatalog.Invalidate();
+        this.ExchangeResolver.InvalidateCurrencies();
+        this.AnomalyLog.Info("Currency", "特殊通貨の対応表と、報酬・交換の索引を更新しました");
+    }
+
     private void OnFrameworkUpdate(IFramework framework)
     {
         try
@@ -786,6 +818,7 @@ public sealed class Plugin : IDalamudPlugin
             // 構築が終わるまで false で return され、
             // **索引が出来上がるまで周回が 1 度も進まなかった。**
             // FATE 周回はこれらの索引を使わないので、待つ理由が無い。
+            this.RefreshCurrencies();
             this.FateRunner.Tick();
 
             // 索引構築だけは毎フレーム進める。1 フレームあたりの処理量を制限してあるため、
@@ -1100,6 +1133,7 @@ public sealed class Plugin : IDalamudPlugin
         // ハンドラの解除を最優先で行う。ここが漏れると
         // AutomaticReloading 時に古いインスタンスが動き続ける。
         Svc.Framework.Update -= this.OnFrameworkUpdate;
+        this.FateRunner?.DisposeStarter();
 
         // 画面の接続も同じ理由で先に外す。
         // 外し忘れると、読み込み直したあとに古い画面が描かれ続ける。

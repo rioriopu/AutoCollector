@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Collections.Generic;
 using System.Numerics;
 using AutoCollector.Diagnostics;
@@ -277,11 +278,27 @@ public sealed unsafe class FateTargetService(AnomalyLog anomalyLog)
     /// 同じなら近いほうから。NorthHornAutoFates も同じ順で選んでいる。
     /// </summary>
     /// <returns>置いた相手。居なければ null。</returns>
+    // BNpcName の個別 ID。ハーム・フォーローン（12349）は別種。
+    public static bool IsForlorn(IGameObject obj)
+        => obj is IBattleNpc npc && npc.NameId is 6737 or 6738;
+
     public IGameObject? AcquireTarget(ushort fateId, Vector3 fateCentre, float fateRadius)
     {
         if (!Player.Available)
         {
             return null;
+        }
+
+        // 現在の通常ターゲットを保持する前に、参加中の FATE のボーナス敵を見る。
+        var forlorn = Svc.Objects
+            .Where(x => IsForlorn(x) && IsLiveEnemy(x) && fateId != 0 && FateIdOf(x) == fateId)
+            .OrderBy(x => Vector3.DistanceSquared(Player.Position, x.Position))
+            .FirstOrDefault();
+        if (forlorn is not null)
+        {
+            Svc.Targets.Target = forlorn;
+            this.ownedTarget = forlorn.GameObjectId;
+            return forlorn;
         }
 
         // いま狙っている相手がまだ有効なら、そのまま。

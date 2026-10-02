@@ -132,6 +132,10 @@ public sealed record FateInfo(
     /// <summary>集める品を持つ FATE か（＝納品 FATE）。</summary>
     public bool HasHandInItem { get; init; }
 
+    /// <summary>開始役の EntityId。BaseId ではない。</summary>
+    public uint MotivationNpcId { get; init; }
+    public bool IsActive => this.State is FateState.Preparing or FateState.Running;
+
     /// <summary>同じ FATE の同じ湧きかを判定するための鍵。</summary>
     public (ushort Id, int Start) SpawnKey => (this.Id, this.StartTimeEpoch);
 }
@@ -411,6 +415,7 @@ public sealed unsafe class FateScanner(AnomalyLog anomalyLog)
             Vector3 nearest = default;
             var nearestDistance = float.MaxValue;
             var found = false;
+            var foundForlorn = false;
 
             foreach (var obj in Svc.Objects)
             {
@@ -419,7 +424,8 @@ public sealed unsafe class FateScanner(AnomalyLog anomalyLog)
                     continue;
                 }
 
-                if (!npc.IsTargetable || npc.CurrentHp == 0)
+                if (!npc.IsTargetable || npc.IsDead || npc.CurrentHp == 0 ||
+                    !npc.StatusFlags.HasFlag(Dalamud.Game.ClientState.Objects.Enums.StatusFlags.Hostile))
                 {
                     continue;
                 }
@@ -442,8 +448,10 @@ public sealed unsafe class FateScanner(AnomalyLog anomalyLog)
                     new Vector2(from.X, from.Z),
                     new Vector2(npc.Position.X, npc.Position.Z));
 
-                if (distance < nearestDistance)
+                var forlorn = FateTargetService.IsForlorn(npc);
+                if ((!foundForlorn && forlorn) || (foundForlorn == forlorn && distance < nearestDistance))
                 {
+                    foundForlorn = forlorn;
                     nearestDistance = distance;
                     nearest = npc.Position;
                     found = true;
@@ -607,9 +615,8 @@ public sealed unsafe class FateScanner(AnomalyLog anomalyLog)
         bool skipCollect,
         IReadOnlySet<ushort>? blacklist)
     {
-        // 進行中のものだけを狙う。Preparing は NPC に話しかけて始めるものがあるが、
-        // その扱いは実機で確認してから足す。いまは確実に戦えるものに絞る。
-        if (f.State != FateState.Running)
+        // 準備中は開始役へ向かい、現地で EntityId を解決する。
+        if (!f.IsActive)
         {
             return false;
         }
@@ -631,7 +638,7 @@ public sealed unsafe class FateScanner(AnomalyLog anomalyLog)
         }
 
         // 着く前に終わるものを避ける。
-        if (f.RemainingSeconds < minTimeRemainingSec)
+        if (f.State == FateState.Running && f.RemainingSeconds < minTimeRemainingSec)
         {
             return false;
         }
@@ -753,6 +760,7 @@ public sealed unsafe class FateScanner(AnomalyLog anomalyLog)
             // 集める品を持つかは、シートを引いて覚えておく。
             // 毎フレーム引くと重いので、読み取った時点で 1 回だけ。
             HasHandInItem = HasEventItem(id),
+            MotivationNpcId = ctx->MotivationNpc,
         };
 
         return true;

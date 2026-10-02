@@ -7,7 +7,8 @@
     上書きすると SDK 更新に追従できなくなるため、ここでは書かない。
   -->
   <PropertyGroup>
-    <Version>0.1.5.5</Version>
+    <Version>0.1.5.6</Version>
+    <EstellUtilsProject Condition="'$(EstellUtilsProject)' == ''">..\..\EstellUtils\src\EstellUtils\EstellUtils.csproj</EstellUtilsProject>
     <RootNamespace>AutoCollector</RootNamespace>
     <AssemblyName>AutoCollector</AssemblyName>
     <Description>通貨が閾値に到達したら自動処理を停止し、交換所へ移動して交換し、復帰する</Description>
@@ -54,7 +55,7 @@
     別リポジトリのため、相対パスで参照している。
   -->
   <ItemGroup>
-    <ProjectReference Include="..\..\EstellUtils\src\EstellUtils\EstellUtils.csproj" />
+    <ProjectReference Include="$(EstellUtilsProject)" />
   </ItemGroup>
 
   <!-- Debug ビルドは dev プラグイン置き場へ直接出力する -->

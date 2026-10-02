@@ -470,6 +470,11 @@ public sealed class FateRunner(
     private System.Threading.Tasks.Task<System.Collections.Generic.List<Vector3>>? detourTask;
 
     /// <summary>このセッションで詰まった FATE。もう狙わない。</summary>
+    private readonly FateStarter starter = new(anomalyLog);
+    private bool startingFate;
+
+    public void DisposeStarter() => this.starter.Dispose();
+
     private readonly HashSet<ushort> blacklist = [];
 
     /// <summary>見送りを解く時刻。入り組んだ地形でも、置いてから再挑戦する。</summary>
@@ -551,6 +556,8 @@ public sealed class FateRunner(
     private bool teleportIssued;
 
     /// <summary>テレポを断られた時刻。撃ち直す間隔を空けるのに使う。</summary>
+    private DateTime teleportAcceptedUtc;
+
     private DateTime teleportRejectedUtc = DateTime.MinValue;
 
     /// <summary>
@@ -1009,7 +1016,8 @@ public sealed class FateRunner(
 
     /// <summary>最後に自分が向かおうとした場所。分からなければ null。</summary>
     private Vector3? LastRequestedDestination()
-        => this.moveIssued ? this.lastMoveDestination : null;
+        => this.starter.Destination ?? (this.approaching ? this.approachTarget :
+            this.moveIssued ? this.lastMoveDestination : null);
 
     /// <summary>
     /// 段階に関係なく、動けなくなっていないかを見張る。
@@ -1203,6 +1211,11 @@ public sealed class FateRunner(
     /// <summary>周回を止める。戦闘とプリセットを必ず元に戻す。</summary>
     public void Stop(string reason)
     {
+        var ownedMovement = this.IsRunning || this.approach.Active || this.approaching;
+        var previousDestination = this.LastRequestedDestination();
+        this.starter.CancelMovement(this.navigation);
+        this.starter.Reset();
+        this.startingFate = false;
         // **解除は状態を見ずに先に行う。**
         //
         // 止まっている状態でも、プリセットを有効にしたまま何らかの理由で
@@ -1229,7 +1242,7 @@ public sealed class FateRunner(
         // 利用者から見ると「止めたのに勝手に飛び続ける」になる
         // （2026-09-25 実測）。
         this.navigation.Stop();
-        this.vnavmesh.TryStop();
+        if (ownedMovement) this.vnavmesh.TryStop();
 
         // **止めたあとに動き出さないよう、しばらく見張る。**
         //
@@ -1239,12 +1252,12 @@ public sealed class FateRunner(
         // AsyncMoveRequest.Update がその結果を積み、また歩き出す。
         //
         // 探索が終わるのを待って、積まれたら捨てる。
-        this.stopGuardUntil = DateTime.UtcNow + StopGuardWindow;
+        this.stopGuardUntil = ownedMovement ? DateTime.UtcNow + StopGuardWindow : DateTime.MinValue;
 
         // **どこへ向かっていたかを控える。**
         // 見張りはこの行き先へ向かう経路だけを捨てる。
         // 控えないと、他の処理が積んだ経路まで巻き添えにする。
-        this.stopGuardDestination = this.LastRequestedDestination();
+        this.stopGuardDestination = previousDestination;
 
         // 頼んである経路探索の結果も捨てる。
         // 残しておくと、止めたあとに出来上がって積まれてしまう。
@@ -1405,6 +1418,9 @@ public sealed class FateRunner(
         // 見送りの期限が切れた FATE を戻す。
         this.ExpireBlacklist();
 
+        // 自分が開始した会話は、会話中の操作不可判定より先に進める。
+        if (this.starter.TickDialog(this.scanner)) return;
+
         // 1. 自動操作が成立しない状況では何もしない。
         //    戦闘・詠唱・動作中は FATE 周回では正常なので弾かれない。
         if (!SafetyGuard.IsSafeToRunFate(out var blockReason, out _))
@@ -1547,7 +1563,7 @@ public sealed class FateRunner(
             && this.target is { } landingTarget
             && this.scanner.GetById(landingTarget.Id) is { } liveTarget
             && liveTarget.Id != this.leftFateId
-            && (liveTarget.Progress >= 100 || liveTarget.State != FateState.Running))
+            && (liveTarget.Progress >= 100 || !liveTarget.IsActive))
         {
             // **達成と、失敗・時間切れを分ける。**
             //
@@ -1618,7 +1634,11 @@ public sealed class FateRunner(
             return;
         }
 
-        if (current is not null && current.State == FateState.Running)
+        // 準備中は CurrentFate がまだ空の場合もある。到着済みの対象を使う。
+        if (current is null && this.Step == FateStep.Fighting && this.target is { } pending)
+            current = this.scanner.GetById(pending.Id);
+
+        if (current is not null && current.IsActive)
         {
             this.TickInFate(cfg, current);
             return;
@@ -1677,11 +1697,12 @@ public sealed class FateRunner(
                 return;
             }
 
-            this.anomalyLog.Info("Fate", $"{cfg.FateRaiseWaitSeconds} 秒待ちましたがレイズされませんでした。街へ戻ります");
+            if (EzThrottler.Throttle("AutoCollector.FateRaiseTimeout", 30000))
+                this.anomalyLog.Info("Fate", $"{cfg.FateRaiseWaitSeconds} 秒待ちましたがレイズされませんでした。街へ戻ります");
         }
 
-        this.StatusDetail = "街へ戻っています";
-        ReturnHome();
+        this.StatusDetail = "戦闘不能画面からホームポイントへ戻っています";
+        ReturnAfterDeath();
     }
 
     private void TickTraveling(Config cfg)
@@ -1715,6 +1736,15 @@ public sealed class FateRunner(
             this.teleportStartedUtc = DateTime.UtcNow;
             this.teleportIssued = false;
             this.SetStep(FateStep.Traveling, $"{NpcLocationService.GetTerritoryName(destination)} へ移動しています");
+        }
+
+        // 受理後に詠唱を取り消された場合も、連打せず再試行する。
+        if (this.teleportIssued && DateTime.UtcNow - this.teleportAcceptedUtc > TimeSpan.FromSeconds(15) &&
+            Player.Object is { IsCasting: false } &&
+            this.lifestream.TryIsBusy(out var teleportBusy) && !teleportBusy)
+        {
+            this.teleportIssued = false;
+            this.teleportRejectedUtc = DateTime.UtcNow;
         }
 
         // **テレポは 1 度だけ撃つ。**
@@ -1774,6 +1804,7 @@ public sealed class FateRunner(
             }
 
             this.teleportRejectedUtc = DateTime.MinValue;
+            this.teleportAcceptedUtc = DateTime.UtcNow;
             this.trace.Decision("テレポを撃った", NpcLocationService.GetTerritoryName(destination));
             return;
         }
@@ -1843,7 +1874,7 @@ public sealed class FateRunner(
     private string DescribeNoCandidates(Config cfg)
     {
         var all = this.scanner.ListAll();
-        var running = all.Count(f => f.State == FateState.Running);
+        var running = all.Count(f => f.IsActive);
 
         if (running == 0)
         {
@@ -1857,7 +1888,7 @@ public sealed class FateRunner(
 
         foreach (var fate in all)
         {
-            if (fate.State != FateState.Running)
+            if (!fate.IsActive)
             {
                 continue;
             }
@@ -2042,6 +2073,8 @@ public sealed class FateRunner(
     /// </summary>
     private void BeginMoveTo(FateInfo fate)
     {
+        this.starter.CancelMovement(this.navigation);
+        this.starter.Reset();
         this.target = fate;
         this.moveStartedUtc = DateTime.UtcNow;
         this.moveIssued = false;
@@ -2092,7 +2125,7 @@ public sealed class FateRunner(
 
         // 狙っていた FATE が消えた・終わった。
         var live = this.scanner.GetById(fate.Id);
-        if (live is null || live.State != FateState.Running || live.Progress >= 100)
+        if (live is null || !live.IsActive || live.Progress >= 100)
         {
             this.approach.Cancel("狙っていた FATE が終わりました");
             this.navigation.Stop();
@@ -3081,6 +3114,30 @@ public sealed class FateRunner(
         //
         // そこでハードターゲットをこちらで置き、BMR には
         // 「いま狙っている相手と戦う」ことだけをさせる。
+        if (!Svc.Condition[ConditionFlag.InCombat] &&
+            this.scanner.FindNearestMob(current.Id, Player.Position) is null &&
+            this.starter.Tick(current, this.navigation))
+        {
+            this.startingFate = true;
+            this.ParkPresetMovement();
+            this.StatusDetail = this.starter.Detail;
+            return;
+        }
+        if (this.startingFate)
+        {
+            this.startingFate = false;
+            this.starter.CancelMovement(this.navigation);
+            this.ResumePresetMovement();
+        }
+        if (current.State == FateState.Preparing && this.starter.TimedOut)
+        {
+            this.blacklist.Add(current.Id);
+            this.blacklistUntil[current.Id] = DateTime.UtcNow + BlacklistDuration;
+            this.anomalyLog.Warn("Fate", $"{current.Name} の開始を確認できないため、一時的に見送ります");
+            this.starter.Reset();
+            this.LeaveFate(cfg, current, FateOutcome.Failed);
+            return;
+        }
         this.TickAcquireTarget(current);
 
         // **納品の段階に入っていれば、敵へ近づかない。**
@@ -4381,6 +4438,9 @@ public sealed class FateRunner(
 
     private void FinishCurrentFate()
     {
+        this.starter.CancelMovement(this.navigation);
+        this.starter.Reset();
+        this.startingFate = false;
         this.ReleaseCombat();
         this.target = null;
         this.SetStep(FateStep.Waiting, "FATE を探しています");
@@ -5048,6 +5108,14 @@ public sealed class FateRunner(
     /// 戦闘中、詠唱中など）。送っても弾かれるだけ。
     /// </summary>
     /// <returns>撃てたら true。</returns>
+    private static unsafe void ReturnAfterDeath()
+    {
+        if (!EzThrottler.Throttle("AutoCollector.FateDeathReturn", 3000)) return;
+        if (ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>("DeathScreen", out var addon) &&
+            ECommons.GenericHelpers.IsAddonReady(addon))
+            ECommons.Automation.Callback.Fire(addon, true, 1);
+    }
+
     private static unsafe bool ReturnHome()
     {
         try

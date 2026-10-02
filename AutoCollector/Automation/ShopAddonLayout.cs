@@ -119,7 +119,7 @@ public static class DataFileLoader
     /// 同梱データのほうが新しければ入れ替える。
     ///
     /// 比べるのは JSON の <c>verifiedGameVersion</c>。
-    /// この印を持たないファイルは、版が分からないので触らない。
+    /// 特殊通貨表は印のない旧版も更新する。他のファイルは印がなければ触らない。
     ///
     /// 入れ替えるときは、いま入っているものを
     /// <c>〜.backup-日付.json</c> として残す。
@@ -139,10 +139,13 @@ public static class DataFileLoader
             var embeddedVersion = ReadVersion(embedded);
 
             // どちらかに印が無ければ、比べようがないので触らない。
-            if (string.IsNullOrEmpty(installedVersion) || string.IsNullOrEmpty(embeddedVersion))
+            if (string.IsNullOrEmpty(embeddedVersion) ||
+                (string.IsNullOrEmpty(installedVersion) && fileName != "special_currency_map.json"))
             {
                 return;
             }
+
+            if (string.IsNullOrEmpty(installedVersion)) installedVersion = "0";
 
             // **数値で比べる。文字列の比較では足りない。**
             //

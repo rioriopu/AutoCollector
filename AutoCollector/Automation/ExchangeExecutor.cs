@@ -438,6 +438,7 @@ public sealed unsafe class ExchangeExecutor(
 
     /// <summary>復帰の段の後始末を済ませたか。毎フレーム閉じ直さないための旗。</summary>
     private bool resumeCleanupDone;
+    private string recoveryFailureDetail = string.Empty;
     private readonly AutoRetainerIpc autoRetainer = autoRetainer;
     private readonly CrafterEarner crafter = crafter;
     private readonly InclusionShopService inclusionShop = inclusionShop;
@@ -758,7 +759,7 @@ public sealed unsafe class ExchangeExecutor(
     /// 自分が開いたウィンドウでなければ触らない。
     /// 他プラグインやユーザーが手動で開いたものを閉じると、そちらの操作を壊す。
     /// </summary>
-    public void Cleanup()
+    public void Cleanup(bool preserveInterrupts = false)
     {
         // 1. 自分が開始した移動だけを止める
         try
@@ -828,8 +829,11 @@ public sealed unsafe class ExchangeExecutor(
             this.anomalyLog.Error("Cleanup", $"AutoRetainer の抑制を解除できませんでした: {ex.Message}");
         }
 
-        this.combat.ForgetInterrupt();
-        this.fate.ForgetInterrupt();
+        if (!preserveInterrupts)
+        {
+            this.combat.ForgetInterrupt();
+            this.fate.ForgetInterrupt();
+        }
         this.ownership.Clear();
     }
 
@@ -1016,6 +1020,7 @@ public sealed unsafe class ExchangeExecutor(
         this.nextArmedAllowedUtc = DateTime.MinValue;
         this.combat.ResetObservation();
         this.resumeCleanupDone = false;
+        this.recoveryFailureDetail = string.Empty;
         this.aethernetRoute = plannedRoute;
         this.deliveryStarted = false;
         this.aethernetTransferAttempts = 0;
@@ -1076,7 +1081,7 @@ public sealed unsafe class ExchangeExecutor(
         // 「制限時間を超えたため中止しました（SuppressExternal で停止）」になり、
         // しかも失敗として数えられてプリセットが自動で無効化されていた。
         if (this.Step is not (ExchangeStep.Idle or ExchangeStep.Done or ExchangeStep.Error
-                or ExchangeStep.WaitingSafeWindow or ExchangeStep.SuppressExternal) &&
+                or ExchangeStep.WaitingSafeWindow or ExchangeStep.SuppressExternal or ExchangeStep.ResumeEarners) &&
             this.tripDeadlineUtc != DateTime.MinValue &&
             DateTime.UtcNow > this.tripDeadlineUtc)
         {
@@ -1639,19 +1644,12 @@ public sealed unsafe class ExchangeExecutor(
 
     private void TickResumeEarners()
     {
-        // 戻す必要がもう無いかを、手を出さずに先に見る。
-        // 自分で動き出している／もう周回に戻っている場合はここで終い。
-        if (this.combat.PeekResume().Progress == EarnerProgress.Done)
-        {
-            this.FinishAfterExchange();
-            return;
-        }
-
         if (DateTime.UtcNow > this.stepDeadlineUtc)
         {
             // 再開できなくても交換自体は成功している。自動で繰り返さず、ユーザーに知らせて終える。
-            this.anomalyLog.Error("AutoDuty", "AutoDuty を再開できませんでした。手動で再開してください");
-            this.Failure = ExchangeFailure.AutoDutyResumeFailed;
+            this.anomalyLog.Error("Resume", "中断した周回を再開できませんでした。手動で再開してください");
+            if (this.Failure == ExchangeFailure.None)
+                this.Failure = ExchangeFailure.AutoDutyResumeFailed;
             this.FinishAfterExchange();
             return;
         }
@@ -1695,6 +1693,11 @@ public sealed unsafe class ExchangeExecutor(
         {
             // 戻せなくても交換は終わっている。記録に残して先へ進む。
             this.anomalyLog.Warn("Fate", $"FATE 周回を再開できませんでした: {fateResult.Detail}");
+            if (this.Failure == ExchangeFailure.None)
+            {
+                this.Failure = ExchangeFailure.AutoDutyResumeFailed;
+                this.StatusDetail = fateResult.Detail;
+            }
         }
 
         var result = this.combat.TickResume();
@@ -1706,7 +1709,8 @@ public sealed unsafe class ExchangeExecutor(
                 return;
 
             case EarnerProgress.Failed:
-                this.Failure = ExchangeFailure.AutoDutyResumeFailed;
+                if (this.Failure == ExchangeFailure.None)
+                    this.Failure = ExchangeFailure.AutoDutyResumeFailed;
                 this.FinishAfterExchange();
                 return;
 
@@ -1739,7 +1743,9 @@ public sealed unsafe class ExchangeExecutor(
         this.session = null;
         this.travelTarget = null;
         this.ownership.Clear();
-        this.Step = ExchangeStep.Done;
+        this.Step = this.Failure == ExchangeFailure.None ? ExchangeStep.Done : ExchangeStep.Error;
+        if (this.Failure != ExchangeFailure.None && this.recoveryFailureDetail.Length > 0)
+            this.StatusDetail = this.recoveryFailureDetail;
 
         if (this.Failure == ExchangeFailure.None)
         {
@@ -4279,12 +4285,24 @@ public sealed unsafe class ExchangeExecutor(
         //
         // 2026-09-14 実測: 通貨不足で終わったあと、3 分放置しても復帰しなかった。
         //
-        // Cleanup は中断の記憶を消すので、AutoDuty の再開に使うぶんは取っておく。
-        var interrupt = this.combat.Interrupt;
+        this.RecoverAfterFailure();
+    }
 
-        this.Cleanup();
+    private void RecoverAfterFailure()
+    {
+        // 中断記録を保ったまま窓と移動を片づける。明示停止は再開しない。
+        this.recoveryFailureDetail = this.StatusDetail;
+        var shouldResume = !this.aborted && (this.fate.Interrupt is { WasRunning: true } ||
+                                            this.combat.Interrupt is { WasRunning: true });
+        this.Cleanup(preserveInterrupts: shouldResume);
+        if (shouldResume)
+        {
+            this.resumeCleanupDone = false;
+            this.stepDeadlineUtc = DateTime.UtcNow.AddSeconds(20);
+            this.Step = ExchangeStep.ResumeEarners;
+            return;
+        }
 
-        this.combat.Interrupt = interrupt;
         this.ReleaseHeldControl();
     }
 
@@ -4305,7 +4323,7 @@ public sealed unsafe class ExchangeExecutor(
             EzConfig.Save();
         }
 
-        this.ReleaseHeldControl();
+        this.RecoverAfterFailure();
     }
 
     /// <summary>

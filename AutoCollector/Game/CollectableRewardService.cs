@@ -69,6 +69,8 @@ public sealed class CollectableRewardService(AnomalyLog anomalyLog, SpecialCurre
 
     private Dictionary<uint, uint>? jobIndex;
 
+    public void Invalidate() => this.index = null;
+
     /// <summary>
     /// この収集品を納品窓口のどのジョブのタブで渡すか（ClassJob の番号）。分からなければ false。
     ///

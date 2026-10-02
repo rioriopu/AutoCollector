@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Collections.Generic;
 using AutoCollector.Diagnostics;
 using AutoCollector.Game;
@@ -678,7 +679,7 @@ public sealed class CollectableDeliveryRunner(
             // まだ納品したことのない品は報酬が分からないため、事前に溢れを判定できない。
             // 上限際でそういう品を撃つと、ゲーム側が受け付けずに何も起きない。
             // これは異常ではなく、上限に達したという結果である。
-            if (this.NearCap(out var nearDetail))
+            if (this.NearCap(offer.ItemId, out var nearDetail))
             {
                 this.blocked.Add(offer.ItemId);
 
@@ -786,7 +787,7 @@ public sealed class CollectableDeliveryRunner(
         var names = new List<string>();
         var known = 0;
 
-        foreach (var (itemId, name) in this.currencyMap.ListCurrencies())
+        foreach (var (itemId, name) in this.rewards.ListAll().Values.Select(x => x.CurrencyItemId).Distinct().Select(id => (id, Ui.StatusText.ItemName(id))))
         {
             var cap = this.currency.GetEffectiveCap(itemId);
             if (cap is not { } limit || limit == 0)
@@ -825,45 +826,29 @@ public sealed class CollectableDeliveryRunner(
     /// 「あと少しで一杯」の判断には、この実行で観測した報酬のうち最大のものを使う。
     /// まだ 1 つも観測していない場合は控えめな値で見る。
     /// </summary>
-    private bool NearCap(out string detail)
+    private bool NearCap(uint collectableItemId, out string detail)
     {
         detail = string.Empty;
-
-        var margin = 0;
-        foreach (var reward in this.observedReward.Values)
+        uint currencyId;
+        int amount;
+        if (this.observedReward.TryGetValue(collectableItemId, out var observed))
         {
-            if (reward.Amount > margin)
-            {
-                margin = reward.Amount;
-            }
+            currencyId = observed.ScripItemId;
+            amount = observed.Amount;
         }
-
-        if (margin == 0)
+        else if (this.rewards.TryResolve(collectableItemId, out var reward))
         {
-            margin = 200;
+            currencyId = reward.CurrencyItemId;
+            amount = reward.HighReward;
         }
+        else return false;
 
-        foreach (var (itemId, name) in this.currencyMap.ListCurrencies())
-        {
-            var cap = this.currency.GetEffectiveCap(itemId);
-            if (cap is not { } limit || limit == 0)
-            {
-                continue;
-            }
-
-            if (!this.currency.TryGetCount(itemId, out var current))
-            {
-                continue;
-            }
-
-            if (limit - current <= margin)
-            {
-                detail = $"{name} {current:N0} / {limit:N0}";
-                return true;
-            }
-        }
-
-        return false;
+        var cap = this.currency.GetEffectiveCap(currencyId);
+        if (cap is not { } limit || limit == 0 || !this.currency.TryGetCount(currencyId, out var current))
+            return false;
+        if ((long)current + amount <= limit) return false;
+        detail = $"{Ui.StatusText.ItemName(currencyId)} {current:N0} / {limit:N0}";
+        return true;
     }
 
     /// <summary>手持ちの収集価値を並べる。納品できない理由を追うための材料。</summary>
@@ -944,7 +929,7 @@ public sealed class CollectableDeliveryRunner(
     {
         var list = new List<(uint, string, int)>();
 
-        foreach (var (itemId, name) in this.currencyMap.ListCurrencies())
+        foreach (var (itemId, name) in this.rewards.ListAll().Values.Select(x => x.CurrencyItemId).Distinct().Select(id => (id, Ui.StatusText.ItemName(id))))
         {
             list.Add((itemId, name, this.currency.GetCountOrZero(itemId)));
         }

@@ -104,6 +104,13 @@ public sealed class InclusionShopCatalog(
     /// </summary>
     private bool builtFromClientCurrencies;
 
+    public void Invalidate()
+    {
+        this.categories = null;
+        this.offerCache.Clear();
+        this.rawRewardCache.Clear();
+    }
+
     /// <summary>種別ごとの品。開いたものだけを覚える。</summary>
     private readonly Dictionary<uint, List<InclusionOffer>> offerCache = [];
 

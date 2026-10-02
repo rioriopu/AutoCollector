@@ -42,6 +42,7 @@ public sealed class CollectableSourceService(AnomalyLog anomalyLog, CollectableR
 
     /// <summary>通貨ごとの、製作の収集品と採集の収集品の数。</summary>
     private Dictionary<uint, (int Craft, int Gather)>? counts;
+    private readonly HashSet<uint> warnedCurrencies = [];
 
     /// <summary>この通貨は製作で稼ぐものか。</summary>
     public bool IsCraft(uint currencyItemId) => this.Classify(currencyItemId) == CollectableSource.Craft;
@@ -68,7 +69,7 @@ public sealed class CollectableSourceService(AnomalyLog anomalyLog, CollectableR
             return CollectableSource.None;
         }
 
-        if (pair.Craft > 0 && pair.Gather > 0)
+        if (pair.Craft > 0 && pair.Gather > 0 && this.warnedCurrencies.Add(currencyItemId))
         {
             this.anomalyLog.Warn(
                 "Collectables",

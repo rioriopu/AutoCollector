@@ -159,6 +159,12 @@ public sealed class ExchangeResolver(
     }
 
     /// <summary>指定通貨で購入できる交換定義の索引構築を開始する。</summary>
+    public void InvalidateCurrencies()
+    {
+        this.cacheByCurrency.Clear();
+        this.BeginBuild(this.targetCurrencyItemId, true);
+    }
+
     public void BeginBuild(uint currencyItemId) => this.BeginBuild(currencyItemId, false);
 
     /// <summary>

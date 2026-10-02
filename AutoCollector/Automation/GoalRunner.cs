@@ -312,7 +312,7 @@ public sealed class GoalRunner(
 
             // 欲しいアイテムが選ばれていなければ、目標が立たない。
             // 走らせると、何も買えない交換へ 2 回行って打ち切られるだけになる。
-            if (!this.earners.AnySuppliesCurrencyFor(preset) || preset.Rewards.Count == 0)
+            if (!preset.CraftToEarn || !this.earners.AnySuppliesCurrencyFor(preset) || preset.Rewards.Count == 0)
             {
                 continue;
             }

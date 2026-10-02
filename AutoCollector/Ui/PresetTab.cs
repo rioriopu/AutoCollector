@@ -65,6 +65,9 @@ public sealed class PresetTab(Plugin plugin)
 
     /// <summary>選んでいる系統。ゲーム内の交換画面と同じ並び。</summary>
     private int categoryIndex;
+    private string? categoryName;
+    private uint seriesShopId;
+    private int currencyRevision = -1;
 
     /// <summary>選んでいる種別。</summary>
     private int seriesIndex;
@@ -735,6 +738,17 @@ public sealed class PresetTab(Plugin plugin)
         var catalog = this.plugin.InclusionShopCatalog;
         // 選んでいる通貨で買えるものだけを出す。
         var categories = catalog.ListCategories(currencyItemId);
+        if (this.currencyRevision != this.plugin.SpecialCurrencyMap.Revision)
+        {
+            this.currencyRevision = this.plugin.SpecialCurrencyMap.Revision;
+            this.searchResults = null;
+            this.InvalidateCaches();
+            var category = categories.Select((value, index) => (value, index))
+                .FirstOrDefault(x => x.value.Name == this.categoryName);
+            this.categoryIndex = category.value is null ? 0 : category.index;
+            this.seriesIndex = category.value?.Series.Select((value, index) => (value, index))
+                .FirstOrDefault(x => x.value.SpecialShopId == this.seriesShopId).index ?? 0;
+        }
 
         // **「アイテム交換」窓口に載らない通貨がある。**
         //
@@ -857,6 +871,8 @@ public sealed class PresetTab(Plugin plugin)
         ImGui.Combo("種別", ref this.seriesIndex, seriesNames, seriesNames.Length);
 
         var selectedSeries = selectedCategory.Series[this.seriesIndex];
+        this.categoryName = selectedCategory.Name;
+        this.seriesShopId = selectedSeries.SpecialShopId;
 
         // --- 品（ここで初めて読む） ---
         var offers = catalog.ListOffers(selectedSeries.SpecialShopId, currencyItemId);
@@ -908,6 +924,34 @@ public sealed class PresetTab(Plugin plugin)
     private void DrawRunControls(ExchangePreset preset)
     {
         ImGui.Separator();
+
+        if (this.plugin.CurrencyCatalog.TryResolve(preset, out var currencyId))
+        {
+            var earner = this.plugin.Earners.FindFor(currencyId);
+            if (earner?.KindName == "FATE")
+            {
+                var fateBusy = this.plugin.ExchangeExecutor.IsBusy || this.plugin.GoalRunner.IsRunning ||
+                    this.plugin.CraftRunner.IsRunning || this.plugin.RetainerRestock.IsRunning ||
+                    this.plugin.CollectableCycle.IsRunning || !Player.Available || Player.IsInDuty;
+                using (ImRaii.Disabled(!preset.Enabled || this.plugin.FateRunner.IsRunning || fateBusy))
+                {
+                    if (ImGui.Button("F.A.T.E 周回を開始する"))
+                    {
+                        this.plugin.ResumeAfterStop();
+                        this.runControlNote = this.plugin.FateRunner.Start(out var reason) ? "F.A.T.E 周回を開始しました" : reason;
+                    }
+                }
+                ImGui.SameLine();
+                if (ImGui.Button("止める##fate")) this.plugin.EmergencyStop("プリセットから停止");
+                ImGui.TextWrapped(this.runControlNote);
+                return;
+            }
+            if (this.plugin.CollectableSource.IsGather(currencyId))
+            {
+                ImGui.TextWrapped("採集を自動で開始する機能は未実装です。交換は「行って交換」から実行できます。");
+                return;
+            }
+        }
 
         var combat = this.plugin.Combat;
         var autoDuty = this.plugin.AutoDuty;

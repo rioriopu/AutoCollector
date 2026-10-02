@@ -60,6 +60,16 @@ public sealed class SpecialCurrencyMap
     /// <summary>クライアントから対応表を取得できたか。</summary>
     public bool ResolvedFromClient { get; private set; }
 
+    public int Revision { get; private set; }
+    private readonly HashSet<(int, uint)> warnedMappings = [];
+
+    public void ResetClient()
+    {
+        if (this.runtimeMap.Count > 0) this.Revision++;
+        this.runtimeMap.Clear();
+        this.ResolvedFromClient = false;
+    }
+
     public string? VerifiedGameVersion { get; private set; }
 
     /// <summary>
@@ -102,8 +112,7 @@ public sealed class SpecialCurrencyMap
     /// </summary>
     public unsafe void RefreshFromClient()
     {
-        this.runtimeMap.Clear();
-        this.ResolvedFromClient = false;
+        var next = new Dictionary<int, uint>();
 
         try
         {
@@ -134,7 +143,7 @@ public sealed class SpecialCurrencyMap
                     continue;
                 }
 
-                if (this.runtimeMap.TryGetValue(specialId, out var existing) && existing != itemId)
+                if (next.TryGetValue(specialId, out var existing) && existing != itemId)
                 {
                     this.anomalyLog.Warn(
                         "Currency",
@@ -142,10 +151,10 @@ public sealed class SpecialCurrencyMap
                     continue;
                 }
 
-                this.runtimeMap[specialId] = itemId;
+                next[specialId] = itemId;
             }
 
-            this.ResolvedFromClient = this.runtimeMap.Count > 0;
+            this.ApplyRuntimeSnapshot(next);
 
             if (this.ResolvedFromClient)
             {
@@ -154,9 +163,19 @@ public sealed class SpecialCurrencyMap
         }
         catch (Exception ex)
         {
-            this.runtimeMap.Clear();
             this.anomalyLog.Warn("Currency", $"クライアントから特殊通貨の対応表を取得できませんでした: {ex.Message}");
         }
+    }
+
+    private void ApplyRuntimeSnapshot(IReadOnlyDictionary<int, uint> next)
+    {
+        if (next.Count == 0) return;
+        var before = this.Entries;
+        foreach (var pair in next) this.runtimeMap[pair.Key] = pair.Value;
+        var after = this.Entries;
+        if (before.Count != after.Count || before.Any(x => !after.TryGetValue(x.Key, out var value) || value != x.Value))
+            this.Revision++;
+        this.ResolvedFromClient = true;
     }
 
     /// <summary>控えの JSON と食い違っていたら知らせる。JSON 側を自動で書き換えることはしない。</summary>
@@ -169,7 +188,7 @@ public sealed class SpecialCurrencyMap
                 continue;
             }
 
-            if (stored != itemId)
+            if (stored != itemId && this.warnedMappings.Add((index, itemId)))
             {
                 this.anomalyLog.Warn(
                     "Currency",
