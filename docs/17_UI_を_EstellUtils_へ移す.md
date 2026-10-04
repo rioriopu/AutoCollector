@@ -105,6 +105,7 @@ using (EUi.Scroll("##shopentries", 400f))
 | 中身を自分で描くコンボ | `EUi.ComboBody` | 通貨・交換先・製作ジョブの 3 つ |
 | 選択行に中身を置く | `EUi.SelectableRow` | 重ね描きの仕掛け |
 | 選択行に色 | `Selectable(color:)` | 「薄いが押せる」項目 |
+| 焦点が戻り値から読めない | `WidgetResult.Focused` | `UiContext` の直接参照 |
 
 **`Deactivated` を編集の確定として使わない。**中身は `interaction.Released`
 （マウスを離した）で、入力の確定ではない。確定は `Committed`。

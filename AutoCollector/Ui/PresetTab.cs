@@ -9,7 +9,6 @@ using ECommons.Configuration;
 using ECommons.DalamudServices;
 using ECommons.GameHelpers;
 using EstellUtils.UI;
-using EstellUtils.UI.Core;
 using EstellUtils.UI.Layout;
 using EstellUtils.UI.Widgets;
 
@@ -153,7 +152,7 @@ public sealed class PresetTab(Plugin plugin)
         var edited = result.Changed;
 
         // 「いま打ち込んでいる欄か」は焦点で見る。
-        if (EstellUtils.UI.Core.UiContext.Current.FocusedId == result.Id)
+        if (result.Focused)
         {
             // **触れた時点で、いまの中身を控える。**
             // 控えないと、次のフレームで空になる。
