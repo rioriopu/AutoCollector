@@ -221,12 +221,9 @@ public sealed partial class MainWindow
 
         // --- 残す空き枠 ---
         var keep = this.craftPlanKeepFree;
-        using (EUi.Field("残す空き枠"))
+        if (EUi.InputInt("残す空き枠##craftplankeepfree", ref keep, min: 0, width: 160f))
         {
-            if (EUi.InputInt("##craftplankeepfree", ref keep, min: 0, width: 160f))
-            {
-                this.craftPlanKeepFree = Math.Max(0, keep);
-            }
+            this.craftPlanKeepFree = Math.Max(0, keep);
         }
 
         EUi.Separator();

@@ -1265,13 +1265,10 @@ public sealed partial class MainWindow : EuWindow
             // 上下限は入力欄に渡してあるが、Clamp は残す。
             // 範囲の判断を画面側だけに任せると、設定ファイルを手で書き換えた値が通る。
             var restartDelay = Plugin.C.AutoDutyRestartDelaySeconds;
-            using (EUi.Field("  再開までの待ち（秒）"))
+            if (EUi.InputInt("再開までの待ち（秒）##adrestartdelay", ref restartDelay, min: 0, max: 120, width: 160f))
             {
-                if (EUi.InputInt("##adrestartdelay", ref restartDelay, min: 0, max: 120, width: 160f))
-                {
-                    Plugin.C.AutoDutyRestartDelaySeconds = Math.Clamp(restartDelay, 0, 120);
-                    changed = true;
-                }
+                Plugin.C.AutoDutyRestartDelaySeconds = Math.Clamp(restartDelay, 0, 120);
+                changed = true;
             }
 
             if (Plugin.C.LastDutyTerritoryId != 0)

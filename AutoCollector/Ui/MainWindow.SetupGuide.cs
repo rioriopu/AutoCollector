@@ -1,4 +1,3 @@
-using System;
 using EstellUtils.UI;
 using EstellUtils.UI.Core;
 using EstellUtils.UI.Layout;
@@ -19,8 +18,7 @@ public sealed partial class MainWindow
     /// AutoDuty の設定一覧の表の列。
     ///
     /// 「場所と理由」は 2 色で 2 段に積むため <c>CellStack</c> を使う。
-    /// <c>CellStack</c> は行の高さを広げないので、<c>Wrap</c> は立てず、
-    /// 行の高さは <see cref="SetupDetailHeight"/> で自分で測る。
+    /// 行の高さは <c>TableRow</c> が前フレームの実測から決めるので指定しない。
     /// </summary>
     private static readonly TableColumn[] SetupItemColumns =
     [
@@ -30,37 +28,6 @@ public sealed partial class MainWindow
         new("場所と理由", SizeSpec.Weight(1f)),
         new(string.Empty, 130f),
     ];
-
-    /// <summary>「場所と理由」の列の固定幅ぶんの合計。</summary>
-    private const float SetupFixedWidths = 26f + 250f + 170f + 130f;
-
-    /// <summary>
-    /// 「場所と理由」を 2 段に積んだときに要る行の高さ。
-    ///
-    /// <see cref="EUi.CellStack"/> の内側は、行へ高さを申告しない。
-    /// 足りないと次の行へ重なるので、多めに見積もる。
-    /// </summary>
-    private static float SetupDetailHeight(string where, string why, bool withButton)
-    {
-        // CellStack が内側へ入れる余白のぶん、測る幅を少し狭めておく。
-        // 狭めに測ると高さは多めに出る。重なるより余るほうが安全。
-        var width = MathF.Max(
-            80f, EUi.AvailableWidth - SetupFixedWidths - EUi.ColumnSpacing(5) - 16f);
-
-        var height = EUi.MeasureWrapped(where, width).Y;
-
-        if (!string.IsNullOrEmpty(why))
-        {
-            height += EUi.MeasureWrapped(why, width).Y;
-        }
-
-        if (withButton)
-        {
-            height += EUi.LineHeight * 2f;
-        }
-
-        return MathF.Max(EUi.LineHeight, height);
-    }
 
     private void DrawSetupGuide()
     {
@@ -171,9 +138,7 @@ public sealed partial class MainWindow
         {
             var canApply = !item.Ok && item.Readable && item.CanApply;
 
-            using (EUi.TableRow(
-                SetupItemColumns, row++,
-                height: SetupDetailHeight(item.Where, item.Why, canApply)))
+            using (EUi.TableRow(SetupItemColumns, row++))
             {
                 if (!item.Readable)
                 {
