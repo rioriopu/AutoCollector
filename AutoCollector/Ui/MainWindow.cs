@@ -200,7 +200,7 @@ public sealed partial class MainWindow : EuWindow
     private static readonly TableColumn[] CallbackColumns =
     [
         new("時刻", 70f),
-        new("内容", SizeSpec.Weight(1f)),
+        new("内容", SizeSpec.Weight(1f), Wrap: true),
     ];
 
     /// <summary>
@@ -570,10 +570,7 @@ public sealed partial class MainWindow : EuWindow
         var names = selectable.Select(e => $"{e.ItemName}（{e.CostAmount:N0}）").ToArray();
         this.exchangeChoice = Math.Clamp(this.exchangeChoice, 0, names.Length - 1);
 
-        using (EUi.Field("交換対象"))
-        {
-            EUi.Combo("##exchangetarget", ref this.exchangeChoice, names, width: 320f);
-        }
+        EUi.Combo("交換対象##exchangetarget", ref this.exchangeChoice, names, width: 320f);
 
         var chosen = selectable[this.exchangeChoice];
         var definition = definitionsByItem[chosen.ItemId];
@@ -617,14 +614,11 @@ public sealed partial class MainWindow : EuWindow
         // AddonFilter を空にすると全アドオンを記録する。
         // ショップ以外（確認ダイアログ等）が飛んでいるかを調べるには空にする必要がある。
         var filter = recorder.AddonFilter;
-        using (EUi.Field("記録対象アドオン"))
+        if (EUi.TextInput(
+            "記録対象アドオン##callbackfilter", ref filter,
+            hint: "空にすると全アドオンを記録", maxLength: 64, width: 260f))
         {
-            if (EUi.TextInput(
-                "##callbackfilter", ref filter,
-                hint: "空にすると全アドオンを記録", maxLength: 64, width: 260f))
-            {
-                recorder.AddonFilter = filter;
-            }
+            recorder.AddonFilter = filter;
         }
 
         using (EUi.HStack())
@@ -663,7 +657,7 @@ public sealed partial class MainWindow : EuWindow
                 var record = records[records.Count - 1 - i];
                 var text = $"{record.AddonName}  updateState={record.UpdateState}  {record.Signature}";
 
-                using (EUi.TableRow(CallbackColumns, i, height: RowHeightFor(text, 70f, 2)))
+                using (EUi.TableRow(CallbackColumns, i))
                 {
                     EUi.TableCell($"{record.At:HH:mm:ss}", color: EUi.Colors.TextMuted);
                     EUi.Paragraph(text);
@@ -759,14 +753,12 @@ public sealed partial class MainWindow : EuWindow
 
         var hidden = filtered.Count - 300;
 
-        // 件数の行をあとに置くと、送り領域が残り全部を取ってしまって出る場所が無い。
-        // 先に出す。
-        if (hidden > 0)
-        {
-            EUi.TextColored($"{hidden} 件は表示していません。絞り込んでください。", NoteKind.Warning);
-        }
-
-        using (EUi.Scroll("##candidates", EUi.AvailableHeight))
+        // 送り領域は残り高さを全部取る。下に 1 行置くので、その分を伝えておく。
+        // 伝えないと、件数の行が出る場所を失う。
+        using (EUi.Scroll(
+            "##candidates",
+            SizeSpec.Fill,
+            reserveBelow: hidden > 0 ? EUi.LineHeight : 0f))
         {
             foreach (var group in filtered.Take(300))
             {
@@ -815,6 +807,12 @@ public sealed partial class MainWindow : EuWindow
                     }
                 }
             }
+        }
+
+        // 送り領域の外。reserveBelow でこの 1 行ぶんを空けてある。
+        if (hidden > 0)
+        {
+            EUi.TextColored($"{hidden} 件は表示していません。絞り込んでください。", NoteKind.Warning);
         }
     }
 
@@ -881,10 +879,7 @@ public sealed partial class MainWindow : EuWindow
     /// 問題が無いときは畳んでおく。5 行を常に並べると、
     /// 使っていないものまで壊れているように見える。
     ///
-    /// <b>ここだけ生の ImGui のまま。</b>呼び出し元が状況タブ
-    /// （<c>MainWindow.StatusTab.cs</c>）で、そのタブが <c>RawTabScope</c> で
-    /// 囲まれているため。囲みの中で <c>EUi.*</c> を呼ぶとレイアウトの持ち主が二人になる。
-    /// 状況タブを移すときに一緒に移す。
+    /// 状況タブの内側から呼ぶ。そのタブと同じく EstellUtils で描く。
     /// </summary>
     private void DrawPluginTable()
     {
@@ -904,11 +899,12 @@ public sealed partial class MainWindow : EuWindow
             missing++;
         }
 
-        using var node = ImRaii.TreeNode(
-            missing == 0 ? "連携プラグイン: 問題ありません##plugins" : $"連携プラグイン: {missing} 件に注意##plugins",
-            missing == 0 ? ImGuiTreeNodeFlags.None : ImGuiTreeNodeFlags.DefaultOpen);
+        using var node = EUi.Section(
+            missing == 0 ? "連携プラグイン: 問題ありません" : $"連携プラグイン: {missing} 件に注意",
+            defaultOpen: missing != 0,
+            id: "plugins");
 
-        if (!node)
+        if (!node.IsVisible)
         {
             return;
         }
@@ -917,199 +913,183 @@ public sealed partial class MainWindow : EuWindow
         if (combat.RestartCount > 0 && !combat.KeeperGaveUp)
         {
             var status = string.IsNullOrEmpty(combat.KeeperStatus) ? string.Empty : $" / {combat.KeeperStatus}";
-            ImGui.TextColored(ImGuiColors.DalamudGrey, $"周回の維持: 再開 {combat.RestartCount} 回{status}");
+            EUi.MutedParagraph($"周回の維持: 再開 {combat.RestartCount} 回{status}");
         }
 
-        using var table = ImRaii.Table("##automation", 4, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp);
-        if (!table)
-        {
-            return;
-        }
+        var adPaused = this.plugin.AutoDuty.TryIsPaused(out var reportedPaused) && reportedPaused;
 
-        ImGui.TableSetupColumn("プラグイン", ImGuiTableColumnFlags.WidthFixed, 110f);
-        ImGui.TableSetupColumn("必要度", ImGuiTableColumnFlags.WidthFixed, 210f);
-        ImGui.TableSetupColumn("導入", ImGuiTableColumnFlags.WidthFixed, 50f);
-        ImGui.TableSetupColumn("状態");
-        ImGui.TableHeadersRow();
+        // 再開ボタンを出すのは、止まっているときだけ。
+        // Cell なら中に何個置いても列は 1 つなので、行の中へ戻せた。
+        var showResume = this.plugin.AutoDuty.IsLoaded &&
+                         (adPaused ||
+                          (this.plugin.ExchangeExecutor.LastResumeTerritoryId != 0 &&
+                           this.plugin.AutoDuty.TryIsStopped(out var adIdle) && adIdle));
 
-        DrawRow("AutoDuty", "周回に相乗りするなら必須", this.plugin.AutoDuty.IsLoaded, "周回に相乗りできません。設定タブで「AutoDuty や Artisan が動作しているときだけ交換する」を切ると、プリセットだけで動きます", () =>
-        {
-            // 交換後に再開できなかった場合の受け皿。棒立ちのまま気付かないのを避ける。
-            // 一時停止は本プラグインからは使わないが、ユーザーが手動で止めている場合に備えて表示する。
-            var paused = this.plugin.AutoDuty.TryIsPaused(out var reported) && reported;
+        EUi.TableHeader(PluginColumns);
 
-            if (paused ||
-                (this.plugin.ExchangeExecutor.LastResumeTerritoryId != 0 &&
-                 this.plugin.AutoDuty.TryIsStopped(out var idle) && idle))
+        var row = 0;
+
+        DrawRow(
+            ref row, "AutoDuty", "周回に相乗りするなら必須", this.plugin.AutoDuty.IsLoaded,
+            "周回に相乗りできません。設定タブで「AutoDuty や Artisan が動作しているときだけ交換する」を切ると、プリセットだけで動きます",
+            () =>
             {
-                if (ImGui.SmallButton($"再開##resumead"))
+                if (!this.plugin.AutoDuty.TryIsStopped(out var stopped))
                 {
-                    if (!this.plugin.ExchangeExecutor.TryResumeAutoDutyManually(out var resumeReason))
-                    {
-                        this.plugin.AnomalyLog.Warn("AutoDuty", resumeReason);
-                    }
+                    return [TextRun.Of("状態を取得できません", NoteKind.Danger)];
                 }
 
-                ImGui.SameLine();
-            }
+                if (stopped)
+                {
+                    return [new TextRun("停止中")];
+                }
 
-            if (!this.plugin.AutoDuty.TryIsStopped(out var stopped))
+                if (adPaused)
+                {
+                    return [TextRun.Of("一時停止中", NoteKind.Warning)];
+                }
+
+                this.plugin.AutoDuty.TryIsLooping(out var looping);
+                this.plugin.AutoDuty.TryIsNavigating(out var navigating);
+
+                return [TextRun.Of($"動作中（周回={looping} / 移動={navigating}）", NoteKind.Warning)];
+            },
+            withResume: showResume);
+
+        DrawRow(
+            ref row, "AutoRetainer", "任意", this.plugin.AutoRetainer.IsLoaded, "使いません（問題ありません）",
+            () =>
             {
-                ImGui.TextColored(ImGuiColors.DalamudRed, "状態を取得できません");
-                return;
-            }
+                var busy = this.plugin.AutoRetainer.IsBusyFailClosed();
+                this.plugin.AutoRetainer.TryGetSuppressed(out var suppressed);
 
-            if (stopped)
+                var state = busy
+                    ? TextRun.Of("処理中", NoteKind.Warning)
+                    : new TextRun("待機中");
+
+                if (!suppressed)
+                {
+                    return [state];
+                }
+
+                return
+                [
+                    state,
+                    this.plugin.AutoRetainer.SuppressedByUs
+                        ? TextRun.Of("（本プラグインが抑制中）", NoteKind.Success)
+                        : new TextRun("（他が抑制中）", EUi.Colors.TextMuted),
+                ];
+            });
+
+        DrawRow(
+            ref row, "Artisan", "任意", this.plugin.Artisan.IsLoaded, "使いません（問題ありません）",
+            () =>
             {
-                ImGui.TextUnformatted("停止中");
-                return;
-            }
+                var endurance = this.plugin.Artisan.TryGetEnduranceStatus(out var e) && e;
+                var list = this.plugin.Artisan.TryIsListRunning(out var l) && l;
 
-            if (paused)
-            {
-                ImGui.TextColored(ImGuiColors.DalamudOrange, "一時停止中");
-                return;
-            }
+                var state = endurance || list
+                    ? TextRun.Of(endurance ? "耐久モード実行中" : "製作リスト実行中", NoteKind.Warning)
+                    : new TextRun("待機中");
 
-            this.plugin.AutoDuty.TryIsLooping(out var looping);
-            this.plugin.AutoDuty.TryIsNavigating(out var navigating);
-            ImGui.TextColored(ImGuiColors.DalamudYellow, $"動作中（周回={looping} / 移動={navigating}）");
-        });
+                if (this.plugin.Artisan.StoppedByUs)
+                {
+                    return [state, TextRun.Of("（本プラグインが停止中）", NoteKind.Success)];
+                }
 
-        DrawRow("AutoRetainer", "任意", this.plugin.AutoRetainer.IsLoaded, "使いません（問題ありません）", () =>
+                if (this.plugin.Artisan.TryGetStopRequest(out var stopped) && stopped)
+                {
+                    return [state, new TextRun("（他が停止中）", EUi.Colors.TextMuted)];
+                }
+
+                return [state];
+            });
+
+        DrawRow(
+            ref row, "vnavmesh", "必須", this.plugin.Vnavmesh.IsLoaded, "交換所まで自動で移動できません",
+            () => !this.plugin.Vnavmesh.TryIsReady(out var ready)
+                ? [TextRun.Of("状態を取得できません", NoteKind.Danger)]
+                : [new TextRun(ready ? "このエリアで利用可能" : "このエリアのメッシュが未準備")]);
+
+        DrawRow(
+            ref row, "Lifestream", "別エリアの交換所を使うなら必須", this.plugin.Lifestream.IsLoaded,
+            "別エリアの交換所へテレポートできません。同じエリアの交換所だけが使えます",
+            () => !this.plugin.Lifestream.TryIsBusy(out var busy)
+                ? [TextRun.Of("状態を取得できません", NoteKind.Danger)]
+                : [new TextRun(busy ? "処理中" : "待機中")]);
+
+        // 状態の列は「断片の並び」で受け取る。色の違う文を 1 行へ並べるため。
+        // ボタンを添える行だけ Cell で囲み、列の数を変えずに済ませる。
+        void DrawRow(
+            ref int row, string name, string necessity, bool loaded, string missingText,
+            Func<TextRun[]> state, bool withResume = false)
         {
-            var busy = this.plugin.AutoRetainer.IsBusyFailClosed();
-            this.plugin.AutoRetainer.TryGetSuppressed(out var suppressed);
-
-            if (busy)
+            using (EUi.TableRow(PluginColumns, row++))
             {
-                ImGui.TextColored(ImGuiColors.DalamudYellow, "処理中");
-            }
-            else
-            {
-                ImGui.TextUnformatted("待機中");
-            }
+                EUi.TableCell(name);
+                EUi.TableCell(necessity, color: EUi.Colors.TextMuted);
 
-            if (suppressed)
-            {
-                ImGui.SameLine();
-                ImGui.TextColored(
-                    this.plugin.AutoRetainer.SuppressedByUs ? ImGuiColors.HealerGreen : ImGuiColors.DalamudGrey,
-                    this.plugin.AutoRetainer.SuppressedByUs ? "（本プラグインが抑制中）" : "（他が抑制中）");
-            }
-        });
+                EUi.TableCell(
+                    loaded ? "あり" : "なし",
+                    color: loaded ? EUi.NoteColor(NoteKind.Success) : EUi.Colors.TextMuted);
 
-        DrawRow("Artisan", "任意", this.plugin.Artisan.IsLoaded, "使いません（問題ありません）", () =>
-        {
-            var endurance = this.plugin.Artisan.TryGetEnduranceStatus(out var e) && e;
-            var list = this.plugin.Artisan.TryIsListRunning(out var l) && l;
+                if (!loaded)
+                {
+                    // 入っていないときの説明文は長い。列の Wrap に任せる。
+                    EUi.Paragraph(missingText);
+                    return;
+                }
 
-            if (endurance || list)
-            {
-                ImGui.TextColored(ImGuiColors.DalamudYellow, endurance ? "耐久モード実行中" : "製作リスト実行中");
-            }
-            else
-            {
-                ImGui.TextUnformatted("待機中");
-            }
+                if (!withResume)
+                {
+                    EUi.RichLabel(state());
+                    return;
+                }
 
-            if (this.plugin.Artisan.StoppedByUs)
-            {
-                ImGui.SameLine();
-                ImGui.TextColored(ImGuiColors.HealerGreen, "（本プラグインが停止中）");
-            }
-            else if (this.plugin.Artisan.TryGetStopRequest(out var stopped) && stopped)
-            {
-                ImGui.SameLine();
-                ImGui.TextColored(ImGuiColors.DalamudGrey, "（他が停止中）");
-            }
-        });
+                using (EUi.Cell())
+                {
+                    if (EUi.SmallButton("再開##resumead"))
+                    {
+                        if (!this.plugin.ExchangeExecutor.TryResumeAutoDutyManually(out var resumeReason))
+                        {
+                            this.plugin.AnomalyLog.Warn("AutoDuty", resumeReason);
+                        }
+                    }
 
-        DrawRow("vnavmesh", "必須", this.plugin.Vnavmesh.IsLoaded, "交換所まで自動で移動できません", () =>
-        {
-            if (!this.plugin.Vnavmesh.TryIsReady(out var ready))
-            {
-                ImGui.TextColored(ImGuiColors.DalamudRed, "状態を取得できません");
-                return;
-            }
-
-            ImGui.TextUnformatted(ready ? "このエリアで利用可能" : "このエリアのメッシュが未準備");
-        });
-
-        DrawRow("Lifestream", "別エリアの交換所を使うなら必須", this.plugin.Lifestream.IsLoaded, "別エリアの交換所へテレポートできません。同じエリアの交換所だけが使えます", () =>
-        {
-            if (!this.plugin.Lifestream.TryIsBusy(out var busy))
-            {
-                ImGui.TextColored(ImGuiColors.DalamudRed, "状態を取得できません");
-                return;
-            }
-
-            ImGui.TextUnformatted(busy ? "処理中" : "待機中");
-        });
-
-        static void DrawRow(string name, string necessity, bool loaded, string missingText, Action drawState)
-        {
-            ImGui.TableNextRow();
-
-            ImGui.TableNextColumn();
-            ImGui.TextUnformatted(name);
-
-            ImGui.TableNextColumn();
-            ImGui.TextColored(ImGuiColors.DalamudGrey, necessity);
-
-            ImGui.TableNextColumn();
-            if (loaded)
-            {
-                ImGui.TextColored(ImGuiColors.HealerGreen, "あり");
-            }
-            else
-            {
-                ImGui.TextColored(ImGuiColors.DalamudGrey, "なし");
-            }
-
-            ImGui.TableNextColumn();
-            if (loaded)
-            {
-                drawState();
-            }
-            else
-            {
-                ImGui.TextWrapped(missingText);
+                    EUi.RichLabel(false, state());
+                }
             }
         }
     }
+
+    /// <summary>
+    /// 連携プラグインの表の列。
+    ///
+    /// 「状態」は入っていないときの説明文が長いので <c>Wrap</c> を立てる。
+    /// 行の高さは <see cref="EUi.TableRow"/> が前フレームの実測から決める。
+    /// </summary>
+    private static readonly TableColumn[] PluginColumns =
+    [
+        new("プラグイン", 110f),
+        new("必要度", 210f),
+        new("導入", 50f),
+        new("状態", SizeSpec.Weight(1f), Wrap: true),
+    ];
 
     /// <summary>セルフチェックの表の列。見出しと行へ同じものを渡す。</summary>
     private static readonly TableColumn[] SelfCheckColumns =
     [
         new("状態", 60f),
         new("項目", 160f),
-        new("詳細", SizeSpec.Weight(1f)),
+        new("詳細", SizeSpec.Weight(1f), Wrap: true),
     ];
 
     /// <summary>記録の表の列。見出しは出さず、行だけを並べる。</summary>
     private static readonly TableColumn[] AnomalyColumns =
     [
         new("時刻", 150f),
-        new("内容", SizeSpec.Weight(1f)),
+        new("内容", SizeSpec.Weight(1f), Wrap: true),
     ];
-
-    /// <summary>
-    /// 列を並べた行で、折り返す最終列に必要な高さを求める。
-    ///
-    /// <b>行の高さは先に決めないといけない。</b>
-    /// <see cref="EUi.TableRow"/> は行の高さを固定で取るため、
-    /// 折り返して 2 行になる文を入れると次の行へはみ出す。
-    ///
-    /// 最終列の幅は「行の幅 − 固定列の合計 − 列間の隙間」で求まる。
-    /// 最終列だけは、行の残り幅がそのまま列幅になるので、
-    /// 中で <see cref="EUi.Paragraph"/> を呼べば同じ幅で折り返す。
-    /// </summary>
-    private static float RowHeightFor(ReadOnlySpan<char> text, float fixedWidths, int columnCount)
-    {
-        var width = MathF.Max(80f, EUi.AvailableWidth - fixedWidths - EUi.ColumnSpacing(columnCount));
-        return MathF.Max(EUi.LineHeight, EUi.MeasureWrapped(text, width).Y);
-    }
 
     /// <summary>
     /// 診断タブ。
@@ -1165,8 +1145,7 @@ public sealed partial class MainWindow : EuWindow
                     _ => "失敗",
                 };
 
-                using (EUi.TableRow(
-                    SelfCheckColumns, i, height: RowHeightFor(item.Detail, 60f + 160f, 3)))
+                using (EUi.TableRow(SelfCheckColumns, i))
                 {
                     EUi.TableCell(label, color: EUi.NoteColor(kind));
                     EUi.TableCell(item.Name);
@@ -1246,8 +1225,7 @@ public sealed partial class MainWindow : EuWindow
                     _ => EUi.Colors.TextMuted,
                 };
 
-                using (EUi.TableRow(
-                    AnomalyColumns, i, height: RowHeightFor(entry.Message, 150f, 2)))
+                using (EUi.TableRow(AnomalyColumns, i))
                 {
                     EUi.TableCell($"{entry.At:HH:mm:ss} [{entry.Category}]", color: color);
                     EUi.Paragraph(entry.Message);
@@ -1379,13 +1357,10 @@ public sealed partial class MainWindow : EuWindow
         EUi.Spacing();
 
         var minAd = Plugin.C.MinimumAutoDutyVersion;
-        using (EUi.Field("必要な AutoDuty の版"))
+        if (EUi.TextInput("必要な AutoDuty の版##minadversion", ref minAd, maxLength: 32, width: 160f))
         {
-            if (EUi.TextInput("##minadversion", ref minAd, maxLength: 32, width: 160f))
-            {
-                Plugin.C.MinimumAutoDutyVersion = minAd;
-                changed = true;
-            }
+            Plugin.C.MinimumAutoDutyVersion = minAd;
+            changed = true;
         }
 
         EUi.MutedParagraph("  これを下回るあいだは戦闘の自動周回を使えません。空にすると制限しません");

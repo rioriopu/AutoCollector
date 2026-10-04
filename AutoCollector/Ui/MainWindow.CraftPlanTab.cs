@@ -1,11 +1,11 @@
-﻿using System;
+using System;
 using System.Linq;
-using System.Numerics;
 using AutoCollector.Automation;
 using AutoCollector.Game;
-using Dalamud.Bindings.ImGui;
-using Dalamud.Interface.Colors;
-using Dalamud.Interface.Utility.Raii;
+using EstellUtils.UI;
+using EstellUtils.UI.Core;
+using EstellUtils.UI.Layout;
+using EstellUtils.UI.Widgets;
 
 namespace AutoCollector.Ui;
 
@@ -15,6 +15,8 @@ namespace AutoCollector.Ui;
 /// リテイナーから素材を引き出す前に、何をどれだけ引き出そうとしているのかを
 /// 目で確かめられるようにする。
 /// リテイナーの中身を触る処理は、この計算が正しいと確認できてから足す。
+///
+/// <b>EstellUtils へ移し終えたタブ。</b><c>RawTabScope</c> で囲まない。
 /// </summary>
 public sealed partial class MainWindow
 {
@@ -31,6 +33,18 @@ public sealed partial class MainWindow
     /// <summary>区切りは <see cref="CraftPlanService.LevelBands"/> に置いてある。</summary>
     private static (int Min, int Max)[] LevelBands => CraftPlanService.LevelBands;
 
+    /// <summary>要る素材の表の列。</summary>
+    private static readonly TableColumn[] MaterialColumns =
+    [
+        new("素材", SizeSpec.Weight(1f)),
+        new("1 回", 50f, Align.End),
+        new("全部で", 60f, Align.End),
+        new("持っている", 70f, Align.End),
+        new("引き出す", 70f),
+        new("リテイナー", 110f),
+        new("要る枠", 55f, Align.End),
+    ];
+
     private void DrawCraftPlanTab()
     {
         if (!Plugin.C.DebugMode)
@@ -38,17 +52,10 @@ public sealed partial class MainWindow
             return;
         }
 
-        // 中身はまだ生の ImGui。移し終えたらこの 1 行を外す。
-        using var raw = RawTabScope.Open();
+        EUi.MutedParagraph("欲しいスクリップ → それを生む収集品 → 作る個数 → 要る素材、の順に決まります。");
+        EUi.MutedParagraph("足りない素材はリテイナーから取り出せます。呼び鈴の近くで実行してください。");
 
-        ImGui.TextColored(
-            ImGuiColors.DalamudGrey,
-            "欲しいスクリップ → それを生む収集品 → 作る個数 → 要る素材、の順に決まります。");
-        ImGui.TextColored(
-            ImGuiColors.DalamudGrey,
-            "足りない素材はリテイナーから取り出せます。呼び鈴の近くで実行してください。");
-
-        ImGui.Separator();
+        EUi.Separator();
 
         // --- 欲しいスクリップ ---
         var currencies = this.plugin.CurrencyCatalog.ListChoices()
@@ -57,7 +64,7 @@ public sealed partial class MainWindow
 
         if (currencies.Count == 0)
         {
-            ImGui.TextColored(ImGuiColors.DalamudRed, "スクリップの一覧を作れませんでした");
+            EUi.WrapColored("スクリップの一覧を作れませんでした", NoteKind.Danger);
             return;
         }
 
@@ -84,19 +91,13 @@ public sealed partial class MainWindow
             this.craftPlanTargetItemId = 0;
         }
 
-        ImGui.SetNextItemWidth(320f);
-        using (var combo = ImRaii.Combo("欲しいスクリップ", currencies[currencyIndex].Name))
         {
-            if (combo)
+            var names = currencies.Select(x => x.Name).ToArray();
+
+            if (EUi.Combo("欲しいスクリップ##craftplancurrency", ref currencyIndex, names, width: 320f))
             {
-                for (var i = 0; i < currencies.Count; i++)
-                {
-                    if (ImGui.Selectable($"{currencies[i].Name}##cur{i}", i == currencyIndex))
-                    {
-                        this.craftPlanCurrencyItemId = currencies[i].ItemId;
-                        this.craftPlanTargetItemId = 0;
-                    }
-                }
+                this.craftPlanCurrencyItemId = currencies[currencyIndex].ItemId;
+                this.craftPlanTargetItemId = 0;
             }
         }
 
@@ -105,7 +106,7 @@ public sealed partial class MainWindow
 
         if (craftable.Count == 0)
         {
-            ImGui.TextColored(ImGuiColors.DalamudYellow, "このスクリップを生む、作れる収集品が見つかりません");
+            EUi.WrapColored("このスクリップを生む、作れる収集品が見つかりません", NoteKind.Warning);
             return;
         }
 
@@ -114,7 +115,7 @@ public sealed partial class MainWindow
 
         if (jobs.Count == 0)
         {
-            ImGui.TextColored(ImGuiColors.DalamudRed, "ジョブの一覧を作れませんでした");
+            EUi.WrapColored("ジョブの一覧を作れませんでした", NoteKind.Danger);
             return;
         }
 
@@ -129,20 +130,14 @@ public sealed partial class MainWindow
             this.craftPlanLevelBand = 0;
         }
 
-        ImGui.SetNextItemWidth(200f);
-        using (var jobCombo = ImRaii.Combo("ジョブ", jobs[jobIndex].Name))
         {
-            if (jobCombo)
+            var jobNames = jobs.Select(x => x.Name).ToArray();
+
+            if (EUi.Combo("ジョブ##craftplanjob", ref jobIndex, jobNames, width: 200f))
             {
-                for (var i = 0; i < jobs.Count; i++)
-                {
-                    if (ImGui.Selectable($"{jobs[i].Name}##job{i}", i == jobIndex))
-                    {
-                        this.craftPlanJob = jobs[i].CraftType;
-                        this.craftPlanTargetItemId = 0;
-                        this.craftPlanLevelBand = 0;
-                    }
-                }
+                this.craftPlanJob = jobs[jobIndex].CraftType;
+                this.craftPlanTargetItemId = 0;
+                this.craftPlanLevelBand = 0;
             }
         }
 
@@ -159,20 +154,23 @@ public sealed partial class MainWindow
         // 帯が 1 つしかないなら絞る意味がない。橙貨は各ジョブ 1 件なので出ない。
         if (available.Count > 1)
         {
-            ImGui.TextColored(ImGuiColors.DalamudGrey, "  レベル:");
-
-            foreach (var band in available)
+            // 選んでいる帯は PushColor ではなく主要ボタンの見た目で示す。
+            // 色を直接押し込むとテーマが効かない。
+            using (EUi.HStack(wrap: true))
             {
-                ImGui.SameLine();
+                EUi.Muted("レベル:");
 
-                var selected = this.craftPlanLevelBand == band.Min;
-
-                using var color = ImRaii.PushColor(ImGuiCol.Button, ImGuiColors.ParsedBlue, selected);
-
-                if (ImGui.SmallButton($"{band.Min}-{band.Max}##band{band.Min}"))
+                foreach (var band in available)
                 {
-                    this.craftPlanLevelBand = band.Min;
-                    this.craftPlanTargetItemId = 0;
+                    var selected = this.craftPlanLevelBand == band.Min;
+
+                    if (EUi.Button(
+                        $"{band.Min}-{band.Max}##band{band.Min}",
+                        selected ? ButtonStyle.Primary : ButtonStyle.Normal))
+                    {
+                        this.craftPlanLevelBand = band.Min;
+                        this.craftPlanTargetItemId = 0;
+                    }
                 }
             }
         }
@@ -195,78 +193,76 @@ public sealed partial class MainWindow
             }
         }
 
-        ImGui.TextColored(ImGuiColors.DalamudGrey, $"  作れる収集品 {filtered.Count} 件（製作手帳と同じ並び）");
+        EUi.Muted($"  作れる収集品 {filtered.Count} 件（製作手帳と同じ並び）");
 
-        using (var child = ImRaii.Child("##craftlist", new Vector2(0, 150), true))
+        using (EUi.Scroll("##craftlist", 150f))
         {
-            if (child)
+            foreach (var item in filtered)
             {
-                foreach (var item in filtered)
+                // 名前と補足を 1 行に並べる。列幅を宣言しておかないと、
+                // 名前の長さで補足の位置が揃わない。
+                using (EUi.Row(SizeSpec.Weight(1f), SizeSpec.Px(170f)))
                 {
-                    if (ImGui.Selectable($"{item.Name}##c{item.ItemId}", this.craftPlanTargetItemId == item.ItemId))
+                    if (EUi.Selectable($"{item.Name}##c{item.ItemId}", this.craftPlanTargetItemId == item.ItemId))
                     {
                         this.craftPlanTargetItemId = item.ItemId;
                     }
 
-                    ImGui.SameLine();
-                    ImGui.TextColored(ImGuiColors.DalamudGrey, $"  Lv{item.ClassJobLevel}  最大 {item.HighReward}");
+                    EUi.Muted($"Lv{item.ClassJobLevel}  最大 {item.HighReward}");
                 }
             }
         }
 
         if (this.craftPlanTargetItemId == 0)
         {
-            ImGui.TextColored(ImGuiColors.DalamudGrey, "作る収集品を選んでください");
+            EUi.Muted("作る収集品を選んでください");
             return;
         }
 
         // --- 残す空き枠 ---
         var keep = this.craftPlanKeepFree;
-        ImGui.SetNextItemWidth(160f);
-        if (ImGui.InputInt("残す空き枠", ref keep))
+        using (EUi.Field("残す空き枠"))
         {
-            this.craftPlanKeepFree = Math.Max(0, keep);
+            if (EUi.InputInt("##craftplankeepfree", ref keep, min: 0, width: 160f))
+            {
+                this.craftPlanKeepFree = Math.Max(0, keep);
+            }
         }
 
-        ImGui.Separator();
+        EUi.Separator();
 
         // --- 計算結果 ---
         var plan = this.plugin.CraftPlanService.BuildPlan(this.craftPlanTargetItemId, this.craftPlanKeepFree);
 
         if (plan is null)
         {
-            ImGui.TextColored(ImGuiColors.DalamudRed, "計画を作れませんでした");
+            EUi.WrapColored("計画を作れませんでした", NoteKind.Danger);
             return;
         }
 
-        ImGui.TextUnformatted($"{plan.Target.Name}（{plan.Target.JobName}）");
-        ImGui.TextColored(
-            ImGuiColors.DalamudGrey,
-            $"  鞄の空き {plan.FreeSlots} 枠 / 残す {plan.KeepFree} 枠");
+        EUi.Label($"{plan.Target.Name}（{plan.Target.JobName}）");
+        EUi.Muted($"  鞄の空き {plan.FreeSlots} 枠 / 残す {plan.KeepFree} 枠");
 
-        ImGui.TextColored(
-            plan.Crafts > 0 ? ImGuiColors.HealerGreen : ImGuiColors.DalamudRed,
-            $"  作る個数: {plan.Crafts} 個");
+        EUi.TextColored(
+            $"  作る個数: {plan.Crafts} 個",
+            plan.Crafts > 0 ? NoteKind.Success : NoteKind.Danger);
 
         // 終わりは所持数で見る。すでに持っているぶんが目標に乗ることを示しておく。
         if (plan.TargetHeld > 0)
         {
-            ImGui.TextColored(
-                ImGuiColors.DalamudGrey,
+            EUi.MutedParagraph(
                 $"  すでに {plan.TargetHeld} 個持っています" +
                 $"（作り終えると {plan.TargetHeld + (plan.Crafts * Math.Max(1, plan.Target.AmountResult))} 個）");
         }
 
         if (plan.Crafts > 0)
         {
-            ImGui.TextColored(
-                ImGuiColors.DalamudGrey,
-                $"  納品して得られる見込み: 最大 {plan.Crafts * plan.Target.HighReward:N0}");
+            EUi.MutedParagraph($"  納品して得られる見込み: 最大 {plan.Crafts * plan.Target.HighReward:N0}");
         }
 
         foreach (var note in plan.Notes)
         {
-            ImGui.TextColored(ImGuiColors.DalamudYellow, $"  {note}");
+            EUi.WrapColored($"  {note}", NoteKind.Warning);
         }
 
         if (plan.Materials.Count == 0)
@@ -274,16 +270,16 @@ public sealed partial class MainWindow
             return;
         }
 
-        ImGui.Spacing();
+        EUi.Spacing();
 
         // --- リテイナーから取り出す ---
         var restock = this.plugin.RetainerRestock;
 
         if (restock.IsRunning)
         {
-            ImGui.TextColored(ImGuiColors.DalamudYellow, $"取り出し中: {restock.StatusDetail}（{restock.Withdrawn} 個）");
+            EUi.WrapColored($"取り出し中: {restock.StatusDetail}（{restock.Withdrawn} 個）", NoteKind.Warning);
 
-            if (ImGui.Button("中止する##stoprestock"))
+            if (EUi.Button("中止する##stoprestock"))
             {
                 restock.Stop("ユーザー操作");
             }
@@ -294,9 +290,9 @@ public sealed partial class MainWindow
         {
             var shortfalls = plan.Materials.Where(x => x.Shortfall > 0).ToList();
 
-            using (ImRaii.Disabled(shortfalls.Count == 0))
+            using (EUi.HStack())
             {
-                if (ImGui.Button("足りない素材をリテイナーから取り出す##restock"))
+                if (EUi.Button("足りない素材をリテイナーから取り出す##restock", disabled: shortfalls.Count == 0))
                 {
                     var requests = shortfalls
                         .Select(x => new RestockRequest
@@ -327,46 +323,43 @@ public sealed partial class MainWindow
                         this.plugin.AnomalyLog.Warn("Restock", restockFailure);
                     }
                 }
-            }
 
-            ImGui.SameLine();
-            ImGui.TextColored(
-                ImGuiColors.DalamudGrey,
-                shortfalls.Count == 0 ? "足りない素材はありません" : $"{shortfalls.Count} 種類を取り出します");
+                EUi.Muted(shortfalls.Count == 0 ? "足りない素材はありません" : $"{shortfalls.Count} 種類を取り出します");
+            }
 
             // 押す前に、呼び鈴が見えているかを出す。
             // 押しても何も起きないとき、原因がここか別かを切り分けられるようにする。
             var bell = restock.DescribeBell();
-            ImGui.TextColored(
+            EUi.WrapColored(
+                $"  {bell}",
                 bell.StartsWith("呼び鈴が見つかりました", StringComparison.Ordinal)
-                    ? ImGuiColors.HealerGreen
-                    : ImGuiColors.DalamudRed,
-                $"  {bell}");
+                    ? NoteKind.Success
+                    : NoteKind.Danger);
 
             if (!string.IsNullOrEmpty(restock.LastFailure))
             {
-                ImGui.TextColored(ImGuiColors.DalamudRed, $"  始められませんでした: {restock.LastFailure}");
+                EUi.WrapColored($"  始められませんでした: {restock.LastFailure}", NoteKind.Danger);
             }
             else if (!string.IsNullOrEmpty(restock.StatusDetail))
             {
-                ImGui.TextColored(ImGuiColors.DalamudGrey, $"  前回: {restock.StatusDetail}");
+                EUi.MutedParagraph($"  前回: {restock.StatusDetail}");
             }
 
             this.DrawRestockTrace(restock);
         }
 
-        ImGui.Spacing();
+        EUi.Spacing();
 
         // --- 作らせる ---
         var craft = this.plugin.CraftRunner;
 
         if (craft.IsRunning)
         {
-            ImGui.TextColored(
-                ImGuiColors.DalamudYellow,
-                $"製作中: {craft.StatusDetail}（{craft.StepIndex + 1} / {craft.StepCount} 手順）");
+            EUi.WrapColored(
+                $"製作中: {craft.StatusDetail}（{craft.StepIndex + 1} / {craft.StepCount} 手順）",
+                NoteKind.Warning);
 
-            if (ImGui.Button("中止する##stopcraft"))
+            if (EUi.Button("中止する##stopcraft"))
             {
                 craft.Stop("ユーザー操作");
             }
@@ -376,57 +369,54 @@ public sealed partial class MainWindow
             var steps = CraftRunner.BuildSteps(plan);
             var blocked = plan.Materials.Any(x => x.Shortfall > 0 && !x.IsIntermediate);
 
-            using (ImRaii.Disabled(steps.Count == 0 || blocked || !this.plugin.Artisan.IsLoaded))
+            if (EUi.Button(
+                "この計画で作らせる##startcraft",
+                disabled: steps.Count == 0 || blocked || !this.plugin.Artisan.IsLoaded))
             {
-                if (ImGui.Button("この計画で作らせる##startcraft"))
+                if (!craft.Start(plan, out var craftFailure))
                 {
-                    if (!craft.Start(plan, out var craftFailure))
-                    {
-                        this.plugin.AnomalyLog.Warn("Craft", craftFailure);
-                    }
+                    this.plugin.AnomalyLog.Warn("Craft", craftFailure);
                 }
             }
 
-            ImGui.SameLine();
-
+            // 手順の一覧は長い。以前は SameLine で横に付けていたが、
+            // 折り返すと行末が決まらないので独立した行にする。
             if (!this.plugin.Artisan.IsLoaded)
             {
-                ImGui.TextColored(ImGuiColors.DalamudRed, "Artisan が導入されていません");
+                EUi.WrapColored("Artisan が導入されていません", NoteKind.Danger);
             }
             else if (blocked)
             {
-                ImGui.TextColored(ImGuiColors.DalamudYellow, "素材が足りません。先に取り出してください");
+                EUi.WrapColored("素材が足りません。先に取り出してください", NoteKind.Warning);
             }
             else
             {
-                ImGui.TextColored(
-                    ImGuiColors.DalamudGrey,
+                EUi.MutedParagraph(
                     $"{steps.Count} 手順: {string.Join(" → ", steps.Select(x => $"{x.Name}×{x.Crafts}回"))}");
             }
 
             if (!string.IsNullOrEmpty(craft.LastFailure))
             {
-                ImGui.TextColored(ImGuiColors.DalamudRed, $"  {craft.LastFailure}");
+                EUi.WrapColored($"  {craft.LastFailure}", NoteKind.Danger);
             }
             else if (!string.IsNullOrEmpty(craft.StatusDetail))
             {
-                ImGui.TextColored(ImGuiColors.DalamudGrey, $"  前回: {craft.StatusDetail}");
+                EUi.MutedParagraph($"  前回: {craft.StatusDetail}");
             }
         }
 
         if (craft.Trace.Count > 0)
         {
-            using var craftChild = ImRaii.Child("##crafttrace", new Vector2(0, 90), true);
-            if (craftChild)
+            using (EUi.Scroll("##crafttrace", 90f))
             {
                 foreach (var line in craft.Trace)
                 {
-                    ImGui.TextUnformatted(line);
+                    EUi.Label(line);
                 }
             }
         }
 
-        ImGui.Spacing();
+        EUi.Spacing();
 
         // --- リテイナーの持ち物を覚えているか ---
         //
@@ -436,134 +426,103 @@ public sealed partial class MainWindow
 
         if (inventory.IsUsable(out var inventoryReason))
         {
-            ImGui.TextColored(
-                ImGuiColors.HealerGreen,
+            EUi.WrapColored(
                 $"リテイナーの持ち物: {inventory.Count} 人分を覚えています" +
-                (inventory.OldestSeenAt is { } oldest ? $"（最も古い記録 {oldest:MM/dd HH:mm}）" : string.Empty));
+                (inventory.OldestSeenAt is { } oldest ? $"（最も古い記録 {oldest:MM/dd HH:mm}）" : string.Empty),
+                NoteKind.Success);
 
-            ImGui.TextColored(
-                ImGuiColors.DalamudGrey,
-                "  持っていないと分かっている相手は開きません。");
-
-            ImGui.SameLine();
-
-            // 手で出し入れすると記録とずれる。ずれたときに覚え直させる手段を置く。
-            if (ImGui.SmallButton("覚えた持ち物を忘れる##forgetretainer"))
+            using (EUi.HStack())
             {
-                inventory.Clear();
-                this.plugin.AnomalyLog.Info("Retainer", "リテイナーの持ち物の記録を消しました");
-            }
+                EUi.Muted("  持っていないと分かっている相手は開きません。");
 
-            if (ImGui.IsItemHovered())
-            {
-                ImGui.SetTooltip(
-                    "記録を消すと、次の取り出しで全員を順に開いて覚え直します。\n" +
-                    "手で出し入れして記録とずれたときに使ってください。");
+                // 手で出し入れすると記録とずれる。ずれたときに覚え直させる手段を置く。
+                if (EUi.SmallButton("覚えた持ち物を忘れる##forgetretainer")
+                    .Tip("記録を消すと、次の取り出しで全員を順に開いて覚え直します。\n" +
+                         "手で出し入れして記録とずれたときに使ってください。"))
+                {
+                    inventory.Clear();
+                    this.plugin.AnomalyLog.Info("Retainer", "リテイナーの持ち物の記録を消しました");
+                }
             }
         }
         else
         {
-            ImGui.TextColored(ImGuiColors.DalamudYellow, $"リテイナーの持ち物: {inventoryReason}");
-            ImGui.TextColored(
-                ImGuiColors.DalamudGrey,
-                "  呼び鈴からリテイナーを開くと自動で覚えます。覚えるまでは全員を順に開いて探します");
+            EUi.WrapColored($"リテイナーの持ち物: {inventoryReason}", NoteKind.Warning);
+            EUi.MutedParagraph("  呼び鈴からリテイナーを開くと自動で覚えます。覚えるまでは全員を順に開いて探します");
         }
 
-        ImGui.Spacing();
-        ImGui.TextUnformatted("要る素材");
-        ImGui.SameLine();
-        ImGui.TextColored(ImGuiColors.DalamudGrey, "（素材名をクリックするとコピーします）");
+        EUi.Spacing();
 
-        using var table = ImRaii.Table("##materials", 7, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp);
-        if (!table)
+        using (EUi.HStack())
         {
-            return;
+            EUi.Heading("要る素材");
+            EUi.Muted("（素材名をクリックするとコピーします）");
         }
 
-        ImGui.TableSetupColumn("素材");
-        ImGui.TableSetupColumn("1 回", ImGuiTableColumnFlags.WidthFixed, 50f);
-        ImGui.TableSetupColumn("全部で", ImGuiTableColumnFlags.WidthFixed, 60f);
-        ImGui.TableSetupColumn("持っている", ImGuiTableColumnFlags.WidthFixed, 70f);
-        ImGui.TableSetupColumn("引き出す", ImGuiTableColumnFlags.WidthFixed, 70f);
-        ImGui.TableSetupColumn("リテイナー", ImGuiTableColumnFlags.WidthFixed, 110f);
-        ImGui.TableSetupColumn("要る枠", ImGuiTableColumnFlags.WidthFixed, 55f);
-        ImGui.TableHeadersRow();
+        EUi.TableHeader(MaterialColumns);
+
+        var row = 0;
 
         foreach (var material in plan.Materials)
         {
-            ImGui.TableNextRow();
-
-            ImGui.TableNextColumn();
-            DrawCopyableName(material.Name, $"##planmat{material.ItemId}");
-
-            if (material.IsIntermediate)
+            using (EUi.TableRow(MaterialColumns, row++))
             {
-                ImGui.SameLine();
-                ImGui.TextColored(ImGuiColors.DalamudYellow, "（作れる）");
-            }
+                // 名前と印を 1 つのセルへ入れる。Cell が列を 1 つだけ消費するので、
+                // 中に何個置いても以降の列はずれない。
+                using (EUi.Cell())
+                {
+                    DrawCopyableName(material.Name, $"##planmat{material.ItemId}");
 
-            // クリスタルは鞄ではなく専用の入れ物に入る。枠を使わないことを示す。
-            if (material.IsCrystal)
-            {
-                ImGui.SameLine();
-                ImGui.TextColored(ImGuiColors.ParsedBlue, "（クリスタル）");
-            }
+                    if (material.IsIntermediate)
+                    {
+                        EUi.TextColored("（作れる）", NoteKind.Warning);
+                    }
 
-            ImGui.TableNextColumn();
-            ImGui.TextUnformatted(material.PerCraft.ToString());
+                    // クリスタルは鞄ではなく専用の入れ物に入る。枠を使わないことを示す。
+                    if (material.IsCrystal)
+                    {
+                        EUi.TextColored("（クリスタル）", NoteKind.Info);
+                    }
+                }
 
-            ImGui.TableNextColumn();
-            ImGui.TextUnformatted(material.Needed.ToString());
+                EUi.TableCell(material.PerCraft.ToString());
+                EUi.TableCell(material.Needed.ToString());
+                EUi.TableCell(material.Held.ToString());
 
-            ImGui.TableNextColumn();
-            ImGui.TextUnformatted(material.Held.ToString());
+                EUi.TableCell(
+                    material.Shortfall > 0 ? material.Shortfall.ToString() : "足りています",
+                    color: EUi.NoteColor(material.Shortfall > 0 ? NoteKind.Warning : NoteKind.Success));
 
-            ImGui.TableNextColumn();
-            ImGui.TextColored(
-                material.Shortfall > 0 ? ImGuiColors.DalamudYellow : ImGuiColors.HealerGreen,
-                material.Shortfall > 0 ? material.Shortfall.ToString() : "足りています");
+                DrawRetainerHolding(inventory, material.ItemId, material.Shortfall);
 
-            ImGui.TableNextColumn();
-            DrawRetainerHolding(inventory, material.ItemId, material.Shortfall);
-
-            ImGui.TableNextColumn();
-            if (material.IsCrystal)
-            {
-                ImGui.TextColored(ImGuiColors.DalamudGrey, "枠なし");
-            }
-            else
-            {
-                ImGui.TextUnformatted(material.NewSlots.ToString());
+                EUi.TableCell(
+                    material.IsCrystal ? "枠なし" : material.NewSlots.ToString(),
+                    color: material.IsCrystal ? EUi.Colors.TextMuted : null);
             }
 
             // 作れる素材が足りないなら、その素材も出す。
             // リテイナーに完成品が無いときはこちらを取り出すことになる。
             foreach (var sub in material.SubMaterials)
             {
-                ImGui.TableNextRow();
+                using (EUi.TableRow(MaterialColumns, row++))
+                {
+                    using (EUi.Cell())
+                    {
+                        DrawCopyableName($"    └ {sub.Name}", $"##plansub{material.ItemId}_{sub.ItemId}", sub.Name);
+                    }
 
-                ImGui.TableNextColumn();
-                DrawCopyableName($"    └ {sub.Name}", $"##plansub{material.ItemId}_{sub.ItemId}", sub.Name);
+                    EUi.TableCell(sub.PerCraft.ToString(), color: EUi.Colors.TextMuted);
+                    EUi.TableCell(sub.Needed.ToString(), color: EUi.Colors.TextMuted);
+                    EUi.TableCell(sub.Held.ToString(), color: EUi.Colors.TextMuted);
 
-                ImGui.TableNextColumn();
-                ImGui.TextColored(ImGuiColors.DalamudGrey, sub.PerCraft.ToString());
+                    EUi.TableCell(
+                        sub.Shortfall > 0 ? sub.Shortfall.ToString() : "足りています",
+                        color: EUi.NoteColor(sub.Shortfall > 0 ? NoteKind.Warning : NoteKind.Success));
 
-                ImGui.TableNextColumn();
-                ImGui.TextColored(ImGuiColors.DalamudGrey, sub.Needed.ToString());
+                    DrawRetainerHolding(inventory, sub.ItemId, sub.Shortfall);
 
-                ImGui.TableNextColumn();
-                ImGui.TextColored(ImGuiColors.DalamudGrey, sub.Held.ToString());
-
-                ImGui.TableNextColumn();
-                ImGui.TextColored(
-                    sub.Shortfall > 0 ? ImGuiColors.DalamudYellow : ImGuiColors.HealerGreen,
-                    sub.Shortfall > 0 ? sub.Shortfall.ToString() : "足りています");
-
-                ImGui.TableNextColumn();
-                DrawRetainerHolding(inventory, sub.ItemId, sub.Shortfall);
-
-                ImGui.TableNextColumn();
-                ImGui.TextColored(ImGuiColors.DalamudGrey, "-");
+                    EUi.TableCell("-", color: EUi.Colors.TextMuted);
+                }
             }
         }
     }
@@ -573,24 +532,20 @@ public sealed partial class MainWindow
     ///
     /// 足りない素材をどこで手に入れるかは、たいてい外部の一覧で調べることになる。
     /// 名前を打ち直さずに済むようにしておく。
+    ///
+    /// 表の中から呼ぶ。右に印を添えることがあるので、<b>呼び出し側が
+    /// <see cref="EUi.Cell"/> で囲む。</b>ここでは幅を取らず、文字の幅だけ使う。
     /// </summary>
     /// <param name="label">画面に出す文字。段差の記号を含むことがある。</param>
-    /// <param name="id">ImGui の識別子。行ごとに変える。</param>
+    /// <param name="id">ウィジェットの識別子。行ごとに変える。</param>
     /// <param name="copyText">写す文字。省くと <paramref name="label"/> をそのまま写す。</param>
     private static void DrawCopyableName(string label, string id, string? copyText = null)
     {
         var text = copyText ?? label;
 
-        ImGui.Selectable($"{label}{id}", false, ImGuiSelectableFlags.None, new Vector2(0f, 0f));
-
-        if (ImGui.IsItemClicked(ImGuiMouseButton.Left))
+        if (EUi.Selectable($"{label}{id}", false).Tip($"クリックで「{text}」をコピー"))
         {
-            ImGui.SetClipboardText(text);
-        }
-
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip($"クリックで「{text}」をコピー");
+            EUi.SetClipboard(text);
         }
     }
 
@@ -607,24 +562,24 @@ public sealed partial class MainWindow
             return;
         }
 
-        ImGui.Spacing();
-        ImGui.TextColored(ImGuiColors.DalamudGrey, $"取り出しの記録（{restock.Trace.Count} 行）");
+        EUi.Spacing();
 
-        ImGui.SameLine();
-        if (ImGui.SmallButton("コピー##copytrace"))
+        using (EUi.HStack())
         {
-            ImGui.SetClipboardText(string.Join(Environment.NewLine, restock.Trace));
+            EUi.Muted($"取り出しの記録（{restock.Trace.Count} 行）");
+
+            if (EUi.SmallButton("コピー##copytrace"))
+            {
+                EUi.SetClipboard(string.Join(Environment.NewLine, restock.Trace));
+            }
         }
 
-        using var child = ImRaii.Child("##restocktrace", new Vector2(0, 120), true);
-        if (!child)
+        using (EUi.Scroll("##restocktrace", 120f))
         {
-            return;
-        }
-
-        foreach (var line in restock.Trace)
-        {
-            ImGui.TextUnformatted(line);
+            foreach (var line in restock.Trace)
+            {
+                EUi.Label(line);
+            }
         }
     }
 
@@ -632,12 +587,14 @@ public sealed partial class MainWindow
     /// リテイナーが持っている数を出す。
     ///
     /// 覚えていない場合は「不明」と出す。取り出す前に、足りるかどうかが分かる。
+    ///
+    /// 表の中から呼ぶ。<b>セルをちょうど 1 つ消費する。</b>
     /// </summary>
     private static void DrawRetainerHolding(RetainerInventoryStore inventory, uint itemId, int shortfall)
     {
         if (!inventory.IsUsable(out _))
         {
-            ImGui.TextColored(ImGuiColors.DalamudGrey, "不明");
+            EUi.TableCell("不明", color: EUi.Colors.TextMuted);
             return;
         }
 
@@ -646,21 +603,17 @@ public sealed partial class MainWindow
 
         if (total == 0)
         {
-            ImGui.TextColored(
-                shortfall > 0 ? ImGuiColors.DalamudRed : ImGuiColors.DalamudGrey,
-                "持っていません");
+            EUi.TableCell(
+                "持っていません",
+                color: shortfall > 0 ? EUi.NoteColor(NoteKind.Danger) : EUi.Colors.TextMuted);
             return;
         }
 
-        ImGui.TextColored(
-            shortfall > 0 && total < shortfall ? ImGuiColors.DalamudRed : ImGuiColors.HealerGreen,
-            $"{total}（{holders.Count} 人）");
-
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip(string.Join(
+        EUi.TableCell(
+            $"{total}（{holders.Count} 人）",
+            color: EUi.NoteColor(shortfall > 0 && total < shortfall ? NoteKind.Danger : NoteKind.Success))
+            .Tip(string.Join(
                 Environment.NewLine,
                 holders.Select(x => $"{x.Name}: {x.Quantity}（{x.SeenAt:MM/dd HH:mm}）")));
-        }
     }
 }

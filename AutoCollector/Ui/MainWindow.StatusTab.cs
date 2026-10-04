@@ -1,13 +1,12 @@
 using System;
 using System.Linq;
-using System.Numerics;
 using AutoCollector.Automation;
-using Dalamud.Bindings.ImGui;
-using Dalamud.Interface.Colors;
-using Dalamud.Interface.Utility;
-using Dalamud.Interface.Utility.Raii;
 using ECommons.Configuration;
 using ECommons.DalamudServices;
+using EstellUtils.UI;
+using EstellUtils.UI.Core;
+using EstellUtils.UI.Layout;
+using EstellUtils.UI.Widgets;
 
 namespace AutoCollector.Ui;
 
@@ -19,9 +18,21 @@ namespace AutoCollector.Ui;
 ///
 /// 判定はここで書かない。MonitorService のスナップショットを描くだけにする。
 /// 画面の条件と実際に発火する条件がずれると、最も説明しにくい壊れ方になる。
+///
+/// <b>EstellUtils へ移し終えたタブ。</b><c>RawTabScope</c> で囲まない。
 /// </summary>
 public sealed partial class MainWindow
 {
+    /// <summary>トームストーンの内訳の表の列。</summary>
+    private static readonly TableColumn[] TomestoneColumns =
+    [
+        new("スロット", 70f, Align.End),
+        new("通貨", SizeSpec.Weight(1f)),
+        new("ItemId", 70f, Align.End),
+        new("所持", 130f, Align.End),
+        new("週上限", 90f, Align.End),
+    ];
+
     /// <summary>
     /// 急停止。**この画面のいちばん上に、いつでも置く。**
     ///
@@ -44,43 +55,43 @@ public sealed partial class MainWindow
                       this.plugin.FateRunner.IsRunning ||
                       this.plugin.AutoDuty.IsRunningForDisplay() == true;
 
-        using (ImRaii.PushColor(ImGuiCol.Button, running ? 0xFF2222CCu : 0xFF333333u))
-        using (ImRaii.PushColor(ImGuiCol.ButtonHovered, 0xFF3333DDu))
+        using (EUi.HStack(wrap: true))
         {
-            if (ImGui.Button("すべて止める##emergencystop", new Vector2(160, 34)))
+            // 色を直接押し込むのはやめた。テーマの「破壊的な操作」で出す。
+            // 何も動いていないときは目立たせない。
+            if (EUi.Button(
+                "すべて止める##emergencystop",
+                running ? ButtonStyle.Danger : ButtonStyle.Normal,
+                width: 160f))
             {
                 this.plugin.EmergencyStop("状況タブから止められました");
             }
-        }
 
-        ImGui.SameLine();
-
-        // **止まっている旗は 2 本ある。どちらか 1 本でも立っていたら出す。**
-        //
-        // 周回の維持（Suspended）だけを見ていた。交換側の封鎖（IsAborted）が
-        // 残っていても「止めています」が出ず、再開ボタンも出ない。
-        // その状態では製作と取り出しだけが動き、納品と交換は弾かれ続ける。
-        if (this.plugin.Combat.KeeperSuspended || executor.IsAborted)
-        {
-            ImGui.TextColored(ImGuiColors.DalamudYellow, "  止めています");
-
-            ImGui.SameLine();
-
-            if (ImGui.SmallButton("再開する##emergencyresume"))
+            // **止まっている旗は 2 本ある。どちらか 1 本でも立っていたら出す。**
+            //
+            // 周回の維持（Suspended）だけを見ていた。交換側の封鎖（IsAborted）が
+            // 残っていても「止めています」が出ず、再開ボタンも出ない。
+            // その状態では製作と取り出しだけが動き、納品と交換は弾かれ続ける。
+            if (this.plugin.Combat.KeeperSuspended || executor.IsAborted)
             {
-                this.plugin.ResumeAfterStop();
+                EUi.TextColored("止めています", NoteKind.Warning);
+
+                if (EUi.SmallButton("再開する##emergencyresume"))
+                {
+                    this.plugin.ResumeAfterStop();
+                }
+            }
+            else if (running)
+            {
+                EUi.Muted("交換・製作・納品・周回のすべてを止めます");
+            }
+            else
+            {
+                EUi.Muted("いまは何も動いていません");
             }
         }
-        else if (running)
-        {
-            ImGui.TextColored(ImGuiColors.DalamudGrey, "  交換・製作・納品・周回のすべてを止めます");
-        }
-        else
-        {
-            ImGui.TextColored(ImGuiColors.DalamudGrey, "  いまは何も動いていません");
-        }
 
-        ImGui.Separator();
+        EUi.Separator();
     }
 
     /// <summary>プリセットタブへ切り替える要求。立っているフレームだけ渡す。</summary>
@@ -88,9 +99,6 @@ public sealed partial class MainWindow
 
     private void DrawStatusTab()
     {
-        // 中身はまだ生の ImGui。移し終えたらこの 1 行を外す。
-        using var raw = RawTabScope.Open();
-
         var snap = this.plugin.MonitorService.Snapshot;
 
         this.DrawEmergencyStop();
@@ -100,20 +108,18 @@ public sealed partial class MainWindow
         this.DrawAttention(snap);
         this.DrawPresetProgress(snap);
 
-        ImGui.Spacing();
+        EUi.Spacing();
         this.DrawSetupGuide();
 
         if (!this.plugin.AutoDuty.IsLoaded)
         {
-            ImGui.TextColored(
-                ImGuiColors.DalamudGrey,
-                "AutoDuty を使わない構成です。周回に相乗りする場合は AutoDuty を導入してください。");
+            EUi.MutedParagraph("AutoDuty を使わない構成です。周回に相乗りする場合は AutoDuty を導入してください。");
         }
 
-        ImGui.Spacing();
+        EUi.Spacing();
         this.DrawPluginTable();
 
-        ImGui.Spacing();
+        EUi.Spacing();
         this.DrawInternals(snap);
     }
 
@@ -140,37 +146,36 @@ public sealed partial class MainWindow
             return;
         }
 
-        ImGui.Separator();
+        EUi.Separator();
 
         if (runner.IsRunning)
         {
-            ImGui.TextColored(
-                ImGuiColors.HealerGreen,
-                $"目標つきの周回: {runner.Preset?.Name ?? "?"}（{Describe(runner.Step)} / {runner.Rounds} 回目）");
-            ImGui.TextColored(ImGuiColors.DalamudGrey, $"  {runner.StatusDetail}");
+            EUi.WrapColored(
+                $"目標つきの周回: {runner.Preset?.Name ?? "?"}（{Describe(runner.Step)} / {runner.Rounds} 回目）",
+                NoteKind.Success);
+            EUi.MutedParagraph($"  {runner.StatusDetail}");
 
-            if (ImGui.Button("止める##stopgoalstatus"))
+            if (EUi.Button("止める##stopgoalstatus"))
             {
                 runner.Stop("ユーザー操作");
             }
         }
         else if (stoppedPresets.Count > 0)
         {
-            ImGui.TextColored(ImGuiColors.DalamudYellow, "目標つきの周回が止まっています");
+            EUi.TextColored("目標つきの周回が止まっています", NoteKind.Warning);
 
             foreach (var preset in stoppedPresets)
             {
                 var retry = runner.BlockedRetryInSeconds(preset.Id);
 
-                ImGui.TextColored(
-                    ImGuiColors.DalamudGrey,
+                EUi.MutedParagraph(
                     retry is null
                         ? $"  {preset.Name}: {runner.BlockedReason(preset.Id)}"
                         : $"  {preset.Name}: {runner.BlockedReason(preset.Id)}（{retry} 秒後にもう一度試します）");
 
-                using var id = ImRaii.PushId(preset.Id.ToString());
-
-                if (ImGui.SmallButton("いますぐもう一度試す"))
+                // 以前は PushId で区切っていた。ラベルへ直接混ぜるほうが、
+                // どのプリセットのボタンかがコードからも読める。
+                if (EUi.SmallButton($"いますぐもう一度試す##retry{preset.Id}"))
                 {
                     runner.ClearBlock(preset.Id);
                 }
@@ -178,7 +183,7 @@ public sealed partial class MainWindow
         }
         else
         {
-            ImGui.TextColored(ImGuiColors.DalamudGrey, $"前回の目標つきの周回: {runner.StatusDetail}");
+            EUi.MutedParagraph($"前回の目標つきの周回: {runner.StatusDetail}");
         }
 
         if (runner.Trace.Count == 0)
@@ -186,21 +191,20 @@ public sealed partial class MainWindow
             return;
         }
 
-        using var node = ImRaii.TreeNode($"進行の記録（{runner.Trace.Count} 行）##goaltrace");
-        if (!node)
+        using var node = EUi.Section(
+            $"進行の記録（{runner.Trace.Count} 行）", defaultOpen: false, id: "goaltrace");
+
+        if (!node.IsVisible)
         {
             return;
         }
 
-        using var child = ImRaii.Child("##goaltracelist", new Vector2(0, 180), true);
-        if (!child)
+        using (EUi.Scroll("##goaltracelist", 180f))
         {
-            return;
-        }
-
-        foreach (var line in runner.Trace)
-        {
-            ImGui.TextUnformatted(line);
+            foreach (var line in runner.Trace)
+            {
+                EUi.Label(line);
+            }
         }
     }
 
@@ -229,39 +233,42 @@ public sealed partial class MainWindow
     {
         var executor = this.plugin.ExchangeExecutor;
 
-        ImGui.Separator();
+        EUi.Separator();
 
         // H1 結果が未確認の交換が残っている
         if (executor.InFlight is { } attempt)
         {
-            Head(ImGuiColors.DalamudRed, "前回の交換の結果が確認できていません");
+            Head(NoteKind.Danger, "前回の交換の結果が確認できていません");
             Detail(StatusText.DescribeInFlight(attempt, this.plugin.CurrencyService));
             Detail("ゲーム内で所持数を確かめてから、記録を消してください。消すまで新しい交換は行いません。");
 
-            if (ImGui.Button("確認したのでクリアする##inflight"))
+            if (EUi.Button("確認したのでクリアする##inflight"))
             {
                 executor.ClearInFlight();
             }
 
-            ImGui.Separator();
+            EUi.Separator();
             return;
         }
 
         // H2 失敗して止まっている
         if (executor.Step == ExchangeStep.Error)
         {
-            Head(ImGuiColors.DalamudRed, "交換を中止しました");
-            ImGui.TextWrapped($"  {executor.StatusDetail}");
+            Head(NoteKind.Danger, "交換を中止しました");
+            EUi.Paragraph($"  {executor.StatusDetail}");
             Detail(StatusText.NextAction(executor.Failure));
 
-            if (ImGui.Button("状態をリセットして再開する##reseterr"))
+            using (EUi.HStack(wrap: true))
             {
-                executor.ResetAfterError();
+                if (EUi.Button("状態をリセットして再開する##reseterr"))
+                {
+                    executor.ResetAfterError();
+                }
+
+                this.DrawResumeAutoDutyButton();
             }
 
-            this.DrawResumeAutoDutyButton(sameLine: true);
-
-            ImGui.Separator();
+            EUi.Separator();
             return;
         }
 
@@ -269,46 +276,46 @@ public sealed partial class MainWindow
         if (executor.Step is not (ExchangeStep.Idle or ExchangeStep.Done))
         {
             var count = executor.SessionCompleted > 0 ? $"（{executor.SessionCompleted} 個目）" : string.Empty;
-            Head(ImGuiColors.DalamudYellow, "交換しています");
-            ImGui.TextWrapped($"  {StatusText.StepLabel(executor.Step)}: {executor.StatusDetail}{count}");
+            Head(NoteKind.Warning, "交換しています");
+            EUi.Paragraph($"  {StatusText.StepLabel(executor.Step)}: {executor.StatusDetail}{count}");
             this.DrawPhaseRow(executor.Step);
 
-            if (ImGui.Button("中止する##abort"))
+            if (EUi.Button("中止する##abort"))
             {
                 this.plugin.EmergencyStop("ユーザー操作");
             }
 
-            ImGui.Separator();
+            EUi.Separator();
             return;
         }
 
         // H4 プリセットが 1 件も無い
         if (snap.Presets.Count == 0)
         {
-            Head(ImGuiColors.DalamudGrey, "まだ何も登録されていません");
+            Head(NoteKind.Info, "まだ何も登録されていません");
             Detail("どの通貨がいくつ貯まったら何と交換するかを 1 件登録すると、自動交換が始まります。");
             this.DrawJumpToPreset();
-            ImGui.Separator();
+            EUi.Separator();
             return;
         }
 
         // H5 有効なものが無い
         if (snap.EnabledCount == 0)
         {
-            Head(ImGuiColors.DalamudGrey, "監視しているものがありません");
+            Head(NoteKind.Info, "監視しているものがありません");
             Detail($"{snap.Presets.Count} 件ありますが、すべて止まっています。有効なものが 1 つも無いあいだは監視しません。");
             this.DrawJumpToPreset();
-            ImGui.Separator();
+            EUi.Separator();
             return;
         }
 
         // H6 設定が途中
         if (snap.UsableCount == 0)
         {
-            Head(ImGuiColors.DalamudYellow, "設定が途中です");
+            Head(NoteKind.Warning, "設定が途中です");
             Detail("監視する通貨は決まっていますが、何と交換するかが選ばれていません。");
             this.DrawJumpToPreset();
-            ImGui.Separator();
+            EUi.Separator();
             return;
         }
 
@@ -320,29 +327,29 @@ public sealed partial class MainWindow
         // 目標つきの周回は外部の自動化を待たないので、H7 の説明も当てはまらない。
         if (this.plugin.GoalRunner.HasBlocked && !this.plugin.GoalRunner.IsRunning)
         {
-            Head(ImGuiColors.DalamudYellow, "目標つきの周回が止まっています");
+            Head(NoteKind.Warning, "目標つきの周回が止まっています");
             Detail("下の「目標つきの周回が止まっています」に理由が出ています。");
             this.DrawJumpToPreset();
-            ImGui.Separator();
+            EUi.Separator();
             return;
         }
 
         // H6.6 目標つきの周回が動いている
         if (this.plugin.GoalRunner.IsRunning)
         {
-            Head(ImGuiColors.HealerGreen, "目標つきの周回を回しています");
+            Head(NoteKind.Success, "目標つきの周回を回しています");
             Detail(this.plugin.GoalRunner.StatusDetail);
-            ImGui.Separator();
+            EUi.Separator();
             return;
         }
 
         // H7 外部の自動化を待っている
         if (Plugin.C.RequireExternalAutomationRunning && !snap.AutomationRunning)
         {
-            Head(ImGuiColors.DalamudGrey, "出番待ちです");
+            Head(NoteKind.Info, "出番待ちです");
             Detail("これで正常です。AutoDuty か Artisan が動き出したら、その切れ目で交換します。");
 
-            if (snap.ReachedCount > 0 && ImGui.Button("いま 1 回だけ交換する##manual"))
+            if (snap.ReachedCount > 0 && EUi.Button("いま 1 回だけ交換する##manual"))
             {
                 if (!this.plugin.MonitorService.RequestManualRun(out var reason))
                 {
@@ -350,7 +357,7 @@ public sealed partial class MainWindow
                 }
             }
 
-            ImGui.Separator();
+            EUi.Separator();
             return;
         }
 
@@ -359,55 +366,51 @@ public sealed partial class MainWindow
         {
             if (snap.SafetyKind == StartWaitKind.Transient)
             {
-                Head(ImGuiColors.DalamudYellow, "まもなく交換します");
+                Head(NoteKind.Warning, "まもなく交換します");
                 Detail($"{snap.SafetyReason}。終わったら交換所へ向かいます。");
             }
             else
             {
-                Head(ImGuiColors.DalamudYellow, "いまは始められません");
+                Head(NoteKind.Warning, "いまは始められません");
                 Detail($"{snap.SafetyReason}。");
             }
 
-            ImGui.Separator();
+            EUi.Separator();
             return;
         }
 
         // H10 条件を満たした
         if (snap.ReachedCount > 0)
         {
-            Head(ImGuiColors.DalamudYellow, "まもなく交換します");
+            Head(NoteKind.Warning, "まもなく交換します");
             Detail($"{NearestName(snap)}: 条件を満たしました。交換所へ向かいます。");
-            ImGui.Separator();
+            EUi.Separator();
             return;
         }
 
         // H11 監視中
-        Head(ImGuiColors.HealerGreen, "監視中");
+        Head(NoteKind.Success, "監視中");
         Detail(NearestText(snap));
 
         // 直前の交換が終わっている場合だけ、その結果を添える。
         if (executor.Step == ExchangeStep.Done && executor.Failure == ExchangeFailure.None &&
             executor.LastSessionCompleted > 0)
         {
-            ImGui.TextColored(
-                ImGuiColors.DalamudGrey,
+            EUi.MutedParagraph(
                 $"  直前の交換: {executor.LastSessionCompleted} 個 交換しました（{executor.LastFinishedAt:HH:mm}）");
         }
 
-        ImGui.Separator();
+        EUi.Separator();
 
-        static void Head(Vector4 color, string text)
-        {
-            ImGui.TextColored(color, "●");
-            ImGui.SameLine();
-            ImGui.TextColored(color, text);
-        }
+        // 以前は「●」と文を TextColored + SameLine で 2 回に分けて描いていた。
+        // 1 つの文字列にして 1 回で描く。折り返しても印が行頭に残る。
+        static void Head(NoteKind kind, string text) => EUi.WrapColored($"● {text}", kind);
 
         static void Detail(string text)
         {
             if (!string.IsNullOrEmpty(text))
             {
-                ImGui.TextColored(ImGuiColors.DalamudGrey, $"  {text}");
+                EUi.MutedParagraph($"  {text}");
             }
         }
     }
@@ -423,20 +426,26 @@ public sealed partial class MainWindow
             _ => 2,
         };
 
-        ImGui.TextUnformatted("  ");
-
+        // 以前は SameLine を 7 回積んでいた。色の違う断片を 1 行で描く。
         var names = new[] { "準備", "移動", "交換", "復帰" };
+        var parts = new TextRun[(names.Length * 2) - 1 + 1];
+        var at = 0;
+
+        parts[at++] = new TextRun("  ");
+
         for (var i = 0; i < names.Length; i++)
         {
-            ImGui.SameLine();
-            ImGui.TextColored(i == phase ? ImGuiColors.HealerGreen : ImGuiColors.DalamudGrey, names[i]);
+            parts[at++] = i == phase
+                ? TextRun.Of(names[i], NoteKind.Success)
+                : new TextRun(names[i], EUi.Colors.TextMuted);
 
             if (i < names.Length - 1)
             {
-                ImGui.SameLine();
-                ImGui.TextColored(ImGuiColors.DalamudGrey, "›");
+                parts[at++] = new TextRun(" › ", EUi.Colors.TextMuted);
             }
         }
+
+        EUi.RichLabel(parts);
     }
 
     private static string NearestName(MonitorSnapshot snap)
@@ -505,12 +514,12 @@ public sealed partial class MainWindow
 
         if (this.plugin.SelfCheck.Latest is { CanExchange: false })
         {
-            Row(ImGuiColors.DalamudRed, "セルフチェックに失敗した項目があります。交換はすべて止めています。");
+            Row(NoteKind.Danger, "セルフチェックに失敗した項目があります。交換はすべて止めています。");
         }
 
         if (!this.plugin.Vnavmesh.IsLoaded)
         {
-            Row(ImGuiColors.DalamudRed, "vnavmesh が入っていないため、交換所まで自動で移動できません。");
+            Row(NoteKind.Danger, "vnavmesh が入っていないため、交換所まで自動で移動できません。");
         }
 
         var executor = this.plugin.ExchangeExecutor;
@@ -520,15 +529,15 @@ public sealed partial class MainWindow
         if (executor.LastResumeTerritoryId != 0 && autoDutyIdle && !this.plugin.Combat.KeeperGaveUp)
         {
             var name = Game.NpcLocationService.GetTerritoryName(executor.LastResumeTerritoryId);
-            Row(ImGuiColors.DalamudYellow, $"AutoDuty が止まったままです（最後に周回していたのは {name}）。");
-            this.DrawResumeAutoDutyButton(sameLine: false);
+            Row(NoteKind.Warning, $"AutoDuty が止まったままです（最後に周回していたのは {name}）。");
+            this.DrawResumeAutoDutyButton();
         }
 
         if (this.plugin.Combat.KeeperGaveUp)
         {
-            Row(ImGuiColors.DalamudYellow, "AutoDuty の周回維持をやめています（手動で止めたと判断しました）。");
+            Row(NoteKind.Warning, "AutoDuty の周回維持をやめています（手動で止めたと判断しました）。");
 
-            if (ImGui.SmallButton("維持を再開##keeperresume"))
+            if (EUi.SmallButton("維持を再開##keeperresume"))
             {
                 this.plugin.ResumeAfterStop();
             }
@@ -539,9 +548,9 @@ public sealed partial class MainWindow
         // その理由がどこにも出ていなかった。
         if (this.plugin.Combat.KeeperSuspended)
         {
-            Row(ImGuiColors.DalamudYellow, "周回の維持を止めています。1 周したらそこで終わります。");
+            Row(NoteKind.Warning, "周回の維持を止めています。1 周したらそこで終わります。");
 
-            if (ImGui.SmallButton("維持を再開##keeperunsuspend"))
+            if (EUi.SmallButton("維持を再開##keeperunsuspend"))
             {
                 this.plugin.ResumeAfterStop();
             }
@@ -551,30 +560,30 @@ public sealed partial class MainWindow
         {
             if (!p.Enabled && p.DisabledReason is { } reason)
             {
-                Row(ImGuiColors.DalamudYellow, $"「{p.Name}」を自動で無効にしました: {reason}");
+                Row(NoteKind.Warning, $"「{p.Name}」を自動で無効にしました: {reason}");
                 this.DrawJumpToPreset(small: true);
             }
 
             if (p.Enabled && p.Readiness == PresetReadiness.Unreadable)
             {
-                Row(ImGuiColors.DalamudRed, $"「{p.Name}」の所持数を読み取れないため、交換しません。");
+                Row(NoteKind.Danger, $"「{p.Name}」の所持数を読み取れないため、交換しません。");
             }
         }
 
         if (any)
         {
-            ImGui.Separator();
+            EUi.Separator();
         }
 
-        void Row(Vector4 color, string text)
+        void Row(NoteKind kind, string text)
         {
             if (!any)
             {
                 any = true;
-                ImGui.TextUnformatted("注意");
+                EUi.Heading("注意");
             }
 
-            ImGui.TextColored(color, $"・{text}");
+            EUi.WrapColored($"・{text}", kind);
         }
     }
 
@@ -584,12 +593,12 @@ public sealed partial class MainWindow
 
     private void DrawPresetProgress(MonitorSnapshot snap)
     {
-        ImGui.TextUnformatted("登録した交換");
-        ImGui.Separator();
+        EUi.Heading("登録した交換");
+        EUi.Separator();
 
         if (snap.Presets.Count == 0)
         {
-            ImGui.TextColored(ImGuiColors.DalamudGrey, "登録がありません。");
+            EUi.Muted("登録がありません。");
             return;
         }
 
@@ -605,31 +614,33 @@ public sealed partial class MainWindow
             }
 
             var color = p.Id == activeId
-                ? ImGuiColors.DalamudYellow
+                ? EUi.NoteColor(NoteKind.Warning)
                 : p.Readiness switch
                 {
-                    PresetReadiness.Reached => ImGuiColors.HealerGreen,
-                    PresetReadiness.Watching => ImGuiColors.DalamudWhite,
-                    PresetReadiness.TargetReached => ImGuiColors.DalamudGrey,
-                    _ => ImGuiColors.DalamudRed,
+                    PresetReadiness.Reached => EUi.NoteColor(NoteKind.Success),
+                    PresetReadiness.Watching => EUi.Colors.Text,
+                    PresetReadiness.TargetReached => EUi.Colors.TextMuted,
+                    _ => EUi.NoteColor(NoteKind.Danger),
                 };
 
-            ImGui.TextColored(color, "●");
-            ImGui.SameLine();
-            ImGui.TextUnformatted(p.Name);
-            ImGui.SameLine();
-            ImGui.TextColored(ImGuiColors.DalamudGrey, $"{p.CurrencyName} → {p.RewardName}");
+            // 印・名前・交換内容を 1 行で描く。
+            EUi.RichLabel(
+                new TextRun("● ", color),
+                new TextRun(p.Name),
+                new TextRun($"  {p.CurrencyName} → {p.RewardName}", EUi.Colors.TextMuted));
 
             this.DrawPresetGauge(p);
 
-            ImGui.TextColored(ImGuiColors.DalamudGrey, $"  {p.ModeText}");
-            ImGui.Spacing();
+            EUi.MutedParagraph($"  {p.ModeText}");
+            EUi.Spacing();
         }
 
         if (disabled > 0)
         {
-            using var node = ImRaii.TreeNode($"停止中のもの（{disabled}）##disabledpresets");
-            if (node)
+            using var node = EUi.Section(
+                $"停止中のもの（{disabled}）", defaultOpen: false, id: "disabledpresets");
+
+            if (node.IsVisible)
             {
                 foreach (var p in snap.Presets)
                 {
@@ -638,14 +649,14 @@ public sealed partial class MainWindow
                         continue;
                     }
 
-                    ImGui.TextUnformatted(p.Name);
+                    EUi.Label(p.Name);
 
                     if (p.DisabledReason is { } reason)
                     {
-                        ImGui.TextColored(ImGuiColors.DalamudRed, $"  {reason}");
+                        EUi.WrapColored($"  {reason}", NoteKind.Danger);
                     }
 
-                    if (ImGui.SmallButton($"もう一度有効にする##reenable{p.Id}"))
+                    if (EUi.SmallButton($"もう一度有効にする##reenable{p.Id}"))
                     {
                         foreach (var preset in Plugin.C.Presets)
                         {
@@ -665,65 +676,67 @@ public sealed partial class MainWindow
 
     private void DrawPresetGauge(PresetProgress p)
     {
-        ImGui.TextUnformatted("  ");
-        ImGui.SameLine();
-
         switch (p.Readiness)
         {
             case PresetReadiness.NeedsReward:
-                ImGui.TextColored(ImGuiColors.DalamudYellow, "交換して得るものが選ばれていません");
-                ImGui.SameLine();
-                if (ImGui.SmallButton($"選ぶ##pick{p.Id}"))
+                using (EUi.HStack(wrap: true))
                 {
-                    this.jumpToPresetTab = true;
+                    EUi.TextColored("  交換して得るものが選ばれていません", NoteKind.Warning);
+
+                    if (EUi.SmallButton($"選ぶ##pick{p.Id}"))
+                    {
+                        this.jumpToPresetTab = true;
+                    }
                 }
 
                 return;
 
             case PresetReadiness.CurrencyUnresolved:
-                ImGui.TextColored(ImGuiColors.DalamudRed, "この通貨をいま解決できません");
-                ImGui.SameLine();
-                if (ImGui.SmallButton($"選び直す##recur{p.Id}"))
+                using (EUi.HStack(wrap: true))
                 {
-                    this.jumpToPresetTab = true;
+                    EUi.TextColored("  この通貨をいま解決できません", NoteKind.Danger);
+
+                    if (EUi.SmallButton($"選び直す##recur{p.Id}"))
+                    {
+                        this.jumpToPresetTab = true;
+                    }
                 }
 
                 return;
 
             case PresetReadiness.Unreadable:
-                ImGui.TextColored(ImGuiColors.DalamudRed, "所持数を読み取れません");
+                EUi.TextColored("  所持数を読み取れません", NoteKind.Danger);
                 return;
 
             case PresetReadiness.TargetReached:
-                ImGui.TextColored(
-                    ImGuiColors.DalamudGrey,
-                    $"{p.RewardName} を {p.OwnedReward ?? 0:N0} 個 持っています（目標 {p.Trigger ?? 0:N0} ではなく所持目標）");
+                EUi.MutedParagraph(
+                    $"  {p.RewardName} を {p.OwnedReward ?? 0:N0} 個 持っています（目標 {p.Trigger ?? 0:N0} ではなく所持目標）");
                 return;
         }
 
         if (p.Trigger is not { } trigger || trigger <= 0)
         {
-            ImGui.TextColored(
-                ImGuiColors.DalamudYellow,
-                $"所持 {p.Current:N0}（所持上限を読めないため、発動する数を計算できません。条件を「固定値」にすると動きます）");
+            EUi.WrapColored(
+                $"  所持 {p.Current:N0}（所持上限を読めないため、発動する数を計算できません。条件を「固定値」にすると動きます）",
+                NoteKind.Warning);
             return;
         }
 
         var fraction = Math.Clamp(p.Current / (float)trigger, 0f, 1f);
-        ImGui.ProgressBar(
-            fraction,
-            new Vector2(240f * ImGuiHelpers.GlobalScale, 0),
-            $"{p.Current:N0} / {trigger:N0}");
 
-        ImGui.SameLine();
+        // 拡大率は EstellUtils の寸法が面倒をみるので、GlobalScale は掛けない。
+        using (EUi.HStack())
+        {
+            EUi.ProgressBar(fraction, $"{p.Current:N0} / {trigger:N0}", width: 240f);
 
-        if (p.Readiness == PresetReadiness.Reached)
-        {
-            ImGui.TextColored(ImGuiColors.HealerGreen, "条件を満たしました");
-        }
-        else
-        {
-            ImGui.TextColored(ImGuiColors.DalamudGrey, $"あと {trigger - p.Current:N0}");
+            if (p.Readiness == PresetReadiness.Reached)
+            {
+                EUi.TextColored("条件を満たしました", NoteKind.Success);
+            }
+            else
+            {
+                EUi.Muted($"あと {trigger - p.Current:N0}");
+            }
         }
     }
 
@@ -731,11 +744,17 @@ public sealed partial class MainWindow
     // 共通の小物
     // ------------------------------------------------------------------
 
+    /// <summary>
+    /// プリセットタブへ飛ぶボタン。
+    ///
+    /// いまの状態（①）から出すときは通常の大きさ、注意（②）の行に添えるときは
+    /// 小さい版。注意の行に大きいボタンを並べると、行間が広がって一覧性が落ちる。
+    /// </summary>
     private void DrawJumpToPreset(bool small = false)
     {
         var pressed = small
-            ? ImGui.SmallButton("プリセットタブを開く##jump")
-            : ImGui.Button("プリセットタブを開く##jump");
+            ? EUi.SmallButton("プリセットタブを開く##jump")
+            : EUi.Button("プリセットタブを開く##jump");
 
         if (pressed)
         {
@@ -743,7 +762,14 @@ public sealed partial class MainWindow
         }
     }
 
-    private void DrawResumeAutoDutyButton(bool sameLine)
+    /// <summary>
+    /// AutoDuty を最後の周回エリアで再開するボタン。
+    ///
+    /// 横に並べるかどうかは呼び出し側が <see cref="EUi.HStack"/> で決める。
+    /// 以前の <c>sameLine</c> 引数は、ここで <c>ImGui.SameLine()</c> を
+    /// 撃つためのものだったので要らなくなった。
+    /// </summary>
+    private void DrawResumeAutoDutyButton()
     {
         var territory = this.plugin.ExchangeExecutor.LastResumeTerritoryId;
         if (territory == 0 || !this.plugin.AutoDuty.IsLoaded)
@@ -751,12 +777,7 @@ public sealed partial class MainWindow
             return;
         }
 
-        if (sameLine)
-        {
-            ImGui.SameLine();
-        }
-
-        if (ImGui.SmallButton($"{Game.NpcLocationService.GetTerritoryName(territory)} で再開##resumead"))
+        if (EUi.SmallButton($"{Game.NpcLocationService.GetTerritoryName(territory)} で再開##resumead"))
         {
             if (!this.plugin.ExchangeExecutor.TryResumeAutoDutyManually(out var reason))
             {
@@ -775,37 +796,35 @@ public sealed partial class MainWindow
     /// </summary>
     private void DrawInternals(MonitorSnapshot snap)
     {
-        using var node = ImRaii.TreeNode(
-            "詳細（動作の確認用）##internals",
-            Plugin.C.DebugMode ? ImGuiTreeNodeFlags.DefaultOpen : ImGuiTreeNodeFlags.None);
+        using var node = EUi.Section(
+            "詳細（動作の確認用）", defaultOpen: Plugin.C.DebugMode, id: "internals");
 
-        if (!node)
+        if (!node.IsVisible)
         {
             return;
         }
 
         var executor = this.plugin.ExchangeExecutor;
-        ImGui.TextUnformatted($"いまの手順: {executor.Step} / {executor.Failure} / {executor.StatusDetail}");
-        ImGui.TextUnformatted($"監視の判断: {this.plugin.MonitorService.LastDecision}");
+        EUi.Paragraph($"いまの手順: {executor.Step} / {executor.Failure} / {executor.StatusDetail}");
+        EUi.Paragraph($"監視の判断: {this.plugin.MonitorService.LastDecision}");
 
         var resolver = this.plugin.ExchangeResolver;
-        ImGui.TextUnformatted(
+        EUi.Paragraph(
             $"交換候補の索引: {resolver.Stage} {resolver.BuildProgress * 100:F0}% / 定義 {resolver.Results.Count} 件");
 
-        ImGui.TextUnformatted(
+        EUi.Paragraph(
             snap.SafeToStart
                 ? "安全判定: 開始できます"
                 : $"安全判定: {snap.SafetyReason}（{snap.SafetyKind}）");
 
-        ImGui.TextUnformatted(
-            snap.FreeBagSlots is { } free ? $"所持枠の空き: {free}" : "所持枠の空き: 取得できません");
+        EUi.Label(snap.FreeBagSlots is { } free ? $"所持枠の空き: {free}" : "所持枠の空き: 取得できません");
 
         // 呼び鈴は素材の取り出しに要る。覚えているかどうかを常に見えるところに出す。
         // プリセットを開かないと分からない状態だった。
         var territory = Svc.ClientState.TerritoryType;
         var knownBell = this.plugin.BellLocations.Get(territory);
 
-        ImGui.TextUnformatted(
+        EUi.Paragraph(
             knownBell is { } bell
                 ? $"呼び鈴: このエリア（{territory}）で覚えています {bell.X:F1}, {bell.Y:F1}, {bell.Z:F1}" +
                   $" / 全 {this.plugin.BellLocations.Count} エリア"
@@ -813,55 +832,37 @@ public sealed partial class MainWindow
                   $" / 全 {this.plugin.BellLocations.Count} エリア");
 
         var combat = this.plugin.Combat;
-        ImGui.TextUnformatted($"周回の維持: 再開 {combat.RestartCount} 回 / {combat.KeeperStatus} / 維持停止={combat.KeeperGaveUp}");
-        ImGui.TextUnformatted($"スナップショット: 更新 {snap.AtUtc.ToLocalTime():HH:mm:ss} / 外部自動化 {snap.AutomationDetail}");
+        EUi.Paragraph($"周回の維持: 再開 {combat.RestartCount} 回 / {combat.KeeperStatus} / 維持停止={combat.KeeperGaveUp}");
+        EUi.Paragraph($"スナップショット: 更新 {snap.AtUtc.ToLocalTime():HH:mm:ss} / 外部自動化 {snap.AutomationDetail}");
 
-        ImGui.Spacing();
+        EUi.Spacing();
 
-        using (var table = ImRaii.Table("##tomestones", 5, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp))
+        EUi.TableHeader(TomestoneColumns);
+
+        for (var i = 0; i < snap.Slots.Count; i++)
         {
-            if (table)
+            var slot = snap.Slots[i];
+
+            using (EUi.TableRow(TomestoneColumns, i))
             {
-                ImGui.TableSetupColumn("スロット", ImGuiTableColumnFlags.WidthFixed, 70f);
-                ImGui.TableSetupColumn("通貨");
-                ImGui.TableSetupColumn("ItemId", ImGuiTableColumnFlags.WidthFixed, 70f);
-                ImGui.TableSetupColumn("所持", ImGuiTableColumnFlags.WidthFixed, 130f);
-                ImGui.TableSetupColumn("週上限", ImGuiTableColumnFlags.WidthFixed, 90f);
-                ImGui.TableHeadersRow();
+                EUi.TableCell(slot.TomestonesRowId.ToString())
+                    .Tip("Tomestones シートの行番号です。パッチで中身が入れ替わっても、\n" +
+                         "設定を作り直さずに済ませるための番号です。");
 
-                foreach (var slot in snap.Slots)
+                EUi.TableCell(slot.Name);
+                EUi.TableCell(slot.ItemId.ToString());
+
+                if (this.plugin.CurrencyService.TryGetCount(slot.ItemId, out var count))
                 {
-                    ImGui.TableNextRow();
-
-                    ImGui.TableNextColumn();
-                    ImGui.TextUnformatted(slot.TomestonesRowId.ToString());
-                    if (ImGui.IsItemHovered())
-                    {
-                        ImGui.SetTooltip(
-                            "Tomestones シートの行番号です。パッチで中身が入れ替わっても、\n" +
-                            "設定を作り直さずに済ませるための番号です。");
-                    }
-
-                    ImGui.TableNextColumn();
-                    ImGui.TextUnformatted(slot.Name);
-
-                    ImGui.TableNextColumn();
-                    ImGui.TextUnformatted(slot.ItemId.ToString());
-
-                    ImGui.TableNextColumn();
-                    if (this.plugin.CurrencyService.TryGetCount(slot.ItemId, out var count))
-                    {
-                        var cap = slot.StackCap;
-                        ImGui.TextUnformatted(cap > 0 ? $"{count:N0} / {cap:N0}" : $"{count:N0}");
-                    }
-                    else
-                    {
-                        ImGui.TextColored(ImGuiColors.DalamudRed, "取得不可");
-                    }
-
-                    ImGui.TableNextColumn();
-                    ImGui.TextUnformatted(slot.SheetWeeklyLimit > 0 ? slot.SheetWeeklyLimit.ToString("N0") : "なし");
+                    var cap = slot.StackCap;
+                    EUi.TableCell(cap > 0 ? $"{count:N0} / {cap:N0}" : $"{count:N0}");
                 }
+                else
+                {
+                    EUi.TableCell("取得不可", color: EUi.NoteColor(NoteKind.Danger));
+                }
+
+                EUi.TableCell(slot.SheetWeeklyLimit > 0 ? slot.SheetWeeklyLimit.ToString("N0") : "なし");
             }
         }
 
@@ -870,11 +871,11 @@ public sealed partial class MainWindow
 
         if (weeklyLimit > 0)
         {
-            ImGui.TextUnformatted($"今週の取得量: {acquired:N0} / {weeklyLimit:N0}");
+            EUi.Label($"今週の取得量: {acquired:N0} / {weeklyLimit:N0}");
         }
         else
         {
-            ImGui.TextColored(ImGuiColors.DalamudGrey, "今週の取得量は取得できません（交換には影響しません）");
+            EUi.MutedParagraph("今週の取得量は取得できません（交換には影響しません）");
         }
     }
 }

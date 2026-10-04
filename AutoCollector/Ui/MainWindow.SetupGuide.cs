@@ -1,7 +1,7 @@
-using System.Numerics;
-using Dalamud.Bindings.ImGui;
-using Dalamud.Interface.Colors;
-using Dalamud.Interface.Utility.Raii;
+using System;
+using EstellUtils.UI;
+using EstellUtils.UI.Core;
+using EstellUtils.UI.Layout;
 
 namespace AutoCollector.Ui;
 
@@ -10,9 +10,58 @@ namespace AutoCollector.Ui;
 ///
 /// 周回の途中には割り込めないため、AutoDuty を 1 周で終わらせ、その終わりに交換する。
 /// そのために AutoDuty 側で何を設定すればよいかを、順番に示す。
+///
+/// 状況タブの内側から呼ぶ。そのタブと同じく EstellUtils で描く。
 /// </summary>
 public sealed partial class MainWindow
 {
+    /// <summary>
+    /// AutoDuty の設定一覧の表の列。
+    ///
+    /// 「場所と理由」は 2 色で 2 段に積むため <c>CellStack</c> を使う。
+    /// <c>CellStack</c> は行の高さを広げないので、<c>Wrap</c> は立てず、
+    /// 行の高さは <see cref="SetupDetailHeight"/> で自分で測る。
+    /// </summary>
+    private static readonly TableColumn[] SetupItemColumns =
+    [
+        new(string.Empty, 26f),
+        new("設定", 250f),
+        new("現在 / 推奨", 170f),
+        new("場所と理由", SizeSpec.Weight(1f)),
+        new(string.Empty, 130f),
+    ];
+
+    /// <summary>「場所と理由」の列の固定幅ぶんの合計。</summary>
+    private const float SetupFixedWidths = 26f + 250f + 170f + 130f;
+
+    /// <summary>
+    /// 「場所と理由」を 2 段に積んだときに要る行の高さ。
+    ///
+    /// <see cref="EUi.CellStack"/> の内側は、行へ高さを申告しない。
+    /// 足りないと次の行へ重なるので、多めに見積もる。
+    /// </summary>
+    private static float SetupDetailHeight(string where, string why, bool withButton)
+    {
+        // CellStack が内側へ入れる余白のぶん、測る幅を少し狭めておく。
+        // 狭めに測ると高さは多めに出る。重なるより余るほうが安全。
+        var width = MathF.Max(
+            80f, EUi.AvailableWidth - SetupFixedWidths - EUi.ColumnSpacing(5) - 16f);
+
+        var height = EUi.MeasureWrapped(where, width).Y;
+
+        if (!string.IsNullOrEmpty(why))
+        {
+            height += EUi.MeasureWrapped(why, width).Y;
+        }
+
+        if (withButton)
+        {
+            height += EUi.LineHeight * 2f;
+        }
+
+        return MathF.Max(EUi.LineHeight, height);
+    }
+
     private void DrawSetupGuide()
     {
         if (!this.plugin.AutoDuty.IsLoaded)
@@ -29,43 +78,34 @@ public sealed partial class MainWindow
         // 設定の話は、版が足りてから。
         if (setup.NeedsAutoDutyUpdate)
         {
-            using var stale = ImRaii.TreeNode(
-                "はじめに: AutoDuty の更新が必要です##setupversion",
-                ImGuiTreeNodeFlags.DefaultOpen);
+            using var stale = EUi.Section(
+                "はじめに: AutoDuty の更新が必要です", defaultOpen: true, id: "setupversion");
 
-            if (!stale)
+            if (!stale.IsVisible)
             {
                 return;
             }
 
             var installed = setup.InstalledVersion?.ToString() ?? "読み取れません";
 
-            ImGui.TextColored(
-                ImGuiColors.DalamudRed,
-                $"いま {installed} / 必要 {setup.RequiredVersion}");
+            EUi.WrapColored($"いま {installed} / 必要 {setup.RequiredVersion}", NoteKind.Danger);
 
-            ImGui.TextColored(
-                ImGuiColors.DalamudGrey,
-                "AutoDuty は設定の持ち方を作り直しました。古い版では設定を読み書きできません。");
-            ImGui.TextColored(
-                ImGuiColors.DalamudGrey,
-                "そのまま任せると、ループ間処理を確かめられないまま周回だけを繰り返します。");
+            EUi.MutedParagraph("AutoDuty は設定の持ち方を作り直しました。古い版では設定を読み書きできません。");
+            EUi.MutedParagraph("そのまま任せると、ループ間処理を確かめられないまま周回だけを繰り返します。");
 
-            ImGui.Spacing();
+            EUi.Spacing();
 
-            if (ImGui.Button("AutoDuty を更新する", new Vector2(200, 30)))
+            using (EUi.HStack(wrap: true))
             {
-                setup.OpenPluginInstaller();
+                if (EUi.Button("AutoDuty を更新する", width: 200f))
+                {
+                    setup.OpenPluginInstaller();
+                }
+
+                EUi.Muted("更新可能な一覧を AutoDuty で絞って開きます");
             }
 
-            ImGui.SameLine();
-            ImGui.TextColored(
-                ImGuiColors.DalamudGrey,
-                "  更新可能な一覧を AutoDuty で絞って開きます");
-
-            ImGui.TextColored(
-                ImGuiColors.DalamudGrey,
-                "  必要な版は 設定タブ で変えられます。空にすると制限しません");
+            EUi.MutedParagraph("  必要な版は 設定タブ で変えられます。空にすると制限しません");
 
             return;
         }
@@ -75,11 +115,13 @@ public sealed partial class MainWindow
         if (pending == 0)
         {
             // 整っているときは 1 行にたたむ。毎回読ませるものではない。
-            using var done = ImRaii.TreeNode("AutoDuty の設定は整っています##setup");
-            if (done)
+            using var done = EUi.Section(
+                "AutoDuty の設定は整っています", defaultOpen: false, id: "setup");
+
+            if (done.IsVisible)
             {
-                ImGui.TextColored(ImGuiColors.DalamudGrey, "1 周ごとに交換する構成になっています。");
-                ImGui.Spacing();
+                EUi.MutedParagraph("1 周ごとに交換する構成になっています。");
+                EUi.Spacing();
                 this.DrawSetupItems(setup);
             }
 
@@ -87,110 +129,108 @@ public sealed partial class MainWindow
         }
 
         // 直すべきものがあるときは開いた状態で出す。
-        using var node = ImRaii.TreeNode(
-            $"はじめに: AutoDuty 側であと {pending} 件の設定が必要です##setup",
-            ImGuiTreeNodeFlags.DefaultOpen);
+        using var node = EUi.Section(
+            $"はじめに: AutoDuty 側であと {pending} 件の設定が必要です", defaultOpen: true, id: "setup");
 
-        if (!node)
+        if (!node.IsVisible)
         {
             return;
         }
 
-        ImGui.TextColored(
-            ImGuiColors.DalamudGrey,
-            "ID クリア → リテイナー → GC 納品 → 交換 → 次の ID の流れにするための設定です。");
-        ImGui.TextColored(
-            ImGuiColors.DalamudGrey,
-            "周回の途中には割り込めないため、AutoDuty を 1 周で終わらせ、その切れ目で交換します。");
+        EUi.MutedParagraph("ID クリア → リテイナー → GC 納品 → 交換 → 次の ID の流れにするための設定です。");
+        EUi.MutedParagraph("周回の途中には割り込めないため、AutoDuty を 1 周で終わらせ、その切れ目で交換します。");
 
-        ImGui.Spacing();
+        EUi.Spacing();
 
-        if (ImGui.Button("AutoDuty の設定を開く", new Vector2(200, 30)))
+        using (EUi.HStack(wrap: true))
         {
-            setup.OpenAutoDutyConfig();
-        }
+            if (EUi.Button("AutoDuty の設定を開く", width: 200f))
+            {
+                setup.OpenAutoDutyConfig();
+            }
 
-        if (setup.HasApplicable)
-        {
-            ImGui.SameLine();
-
-            if (ImGui.Button("推奨設定をまとめて適用", new Vector2(220, 30)))
+            if (setup.HasApplicable &&
+                EUi.Button("推奨設定をまとめて適用", width: 220f)
+                    .Tip("AutoDuty の設定を変更します。変更内容はログに残ります。"))
             {
                 setup.ApplyAll();
             }
-
-            if (ImGui.IsItemHovered())
-            {
-                ImGui.SetTooltip("AutoDuty の設定を変更します。変更内容はログに残ります。");
-            }
         }
 
-        ImGui.Spacing();
+        EUi.Spacing();
         this.DrawSetupItems(setup);
     }
 
     private void DrawSetupItems(Automation.AutoDutySetup setup)
     {
-        using var table = ImRaii.Table(
-            "##setupitems",
-            4,
-            ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp);
+        EUi.TableHeader(SetupItemColumns);
 
-        if (!table)
-        {
-            return;
-        }
-
-        ImGui.TableSetupColumn("", ImGuiTableColumnFlags.WidthFixed, 26f);
-        ImGui.TableSetupColumn("設定", ImGuiTableColumnFlags.WidthFixed, 250f);
-        ImGui.TableSetupColumn("現在 / 推奨", ImGuiTableColumnFlags.WidthFixed, 170f);
-        ImGui.TableSetupColumn("場所と理由");
-        ImGui.TableHeadersRow();
+        var row = 0;
 
         foreach (var item in setup.Items)
         {
-            ImGui.TableNextRow();
+            var canApply = !item.Ok && item.Readable && item.CanApply;
 
-            ImGui.TableNextColumn();
-            if (!item.Readable)
+            using (EUi.TableRow(
+                SetupItemColumns, row++,
+                height: SetupDetailHeight(item.Where, item.Why, canApply)))
             {
-                ImGui.TextColored(ImGuiColors.DalamudGrey, "?");
-            }
-            else if (item.Ok)
-            {
-                ImGui.TextColored(ImGuiColors.HealerGreen, "OK");
-            }
-            else
-            {
-                ImGui.TextColored(ImGuiColors.DalamudYellow, "!");
-            }
-
-            ImGui.TableNextColumn();
-            ImGui.TextUnformatted(item.Title);
-
-            ImGui.TableNextColumn();
-            if (!item.Readable)
-            {
-                ImGui.TextColored(ImGuiColors.DalamudGrey, "読み取れません");
-            }
-            else
-            {
-                ImGui.TextColored(
-                    item.Ok ? ImGuiColors.HealerGreen : ImGuiColors.DalamudYellow,
-                    item.Current);
-                ImGui.SameLine();
-                ImGui.TextColored(ImGuiColors.DalamudGrey, $"/ {item.ExpectedLabel}");
-            }
-
-            ImGui.TableNextColumn();
-            ImGui.TextWrapped(item.Where);
-            ImGui.TextColored(ImGuiColors.DalamudGrey, item.Why);
-
-            if (!item.Ok && item.Readable && item.CanApply)
-            {
-                if (ImGui.SmallButton($"この設定を適用##apply{item.Key}"))
+                if (!item.Readable)
                 {
-                    setup.Apply(item);
+                    EUi.TableCell("?", color: EUi.Colors.TextMuted);
+                }
+                else if (item.Ok)
+                {
+                    EUi.TableCell("OK", color: EUi.NoteColor(NoteKind.Success));
+                }
+                else
+                {
+                    EUi.TableCell("!", color: EUi.NoteColor(NoteKind.Warning));
+                }
+
+                EUi.TableCell(item.Title);
+
+                // 現在の値だけ状態色を付け、推奨は控えめに添える。
+                // 1 セルに 2 つ置けるようになったので、色分けを戻した。
+                if (!item.Readable)
+                {
+                    EUi.TableCell("読み取れません", color: EUi.Colors.TextMuted);
+                }
+                else
+                {
+                    using (EUi.Cell())
+                    {
+                        EUi.TextColored(item.Current, item.Ok ? NoteKind.Success : NoteKind.Warning);
+                        EUi.Muted($"/ {item.ExpectedLabel}");
+                    }
+                }
+
+                // 場所は通常色、理由は控えめ。元の 2 色へ戻した。
+                using (EUi.CellStack())
+                {
+                    EUi.Paragraph(item.Where);
+
+                    if (!string.IsNullOrEmpty(item.Why))
+                    {
+                        EUi.MutedParagraph(item.Why);
+                    }
+                }
+
+                // 適用ボタンは専用の列へ。表の外へ出していたときは、
+                // どの行のボタンなのかが分からなかった。
+                if (canApply)
+                {
+                    using (EUi.Cell())
+                    {
+                        if (EUi.SmallButton($"この設定を適用##apply{item.Key}"))
+                        {
+                            setup.Apply(item);
+                        }
+                    }
+                }
+                else
+                {
+                    EUi.TableCell(string.Empty);
                 }
             }
         }
