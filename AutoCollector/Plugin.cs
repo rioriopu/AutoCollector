@@ -449,6 +449,20 @@ public sealed class Plugin : IDalamudPlugin
             changed = true;
         }
 
+        if (C.ConfigVersion < 6)
+        {
+            // 自動の元栓を足した。既存の設定は止めた状態から始める。
+            //
+            // 更新した瞬間に動き出さないようにする。
+            // 元栓の既定は false だが、この項目を持たない設定を読むと
+            // 既定のまま入るので、ここで明示しておく意味は
+            // 「版を上げたこと」の記録にある。
+            C.AutomationEnabled = false;
+
+            C.ConfigVersion = 6;
+            changed = true;
+        }
+
         if (changed)
         {
             EzConfig.Save();
@@ -922,6 +936,43 @@ public sealed class Plugin : IDalamudPlugin
     /// 状況タブの「状態をリセットして再開する」で戻せるが、
     /// 何も動いていないときに止めるとその画面自体が出ない。
     /// </summary>
+    /// <summary>
+    /// 自動で動いてよい状態にする。状況タブの「開始」。
+    ///
+    /// **止めたときに立てた旗も一緒に下ろす。**
+    /// 元栓を開けるだけだと、「すべて止める」のあとに押しても
+    /// 封鎖が残っていて何も起きない。押したのに動かない、になる。
+    /// </summary>
+    internal void StartAutomation(string reason)
+    {
+        this.ResumeAfterStop();
+
+        if (!C.AutomationEnabled)
+        {
+            C.AutomationEnabled = true;
+            EzConfig.Save();
+            this.AnomalyLog.Info("Run", $"自動を開始しました（{reason}）");
+        }
+    }
+
+    /// <summary>
+    /// 新しく始めないようにする。状況タブの「停止」。
+    ///
+    /// **走っているものは畳まない。**それは「すべて止める」の仕事。
+    /// こちらは切れ目まで進ませてから止まる、穏やかな止め方。
+    /// </summary>
+    internal void StopAutomation(string reason)
+    {
+        if (!C.AutomationEnabled)
+        {
+            return;
+        }
+
+        C.AutomationEnabled = false;
+        EzConfig.Save();
+        this.AnomalyLog.Info("Run", $"自動を止めました（{reason}）");
+    }
+
     internal void ResumeAfterStop()
     {
         this.Combat?.ResumeKeeper();
@@ -939,6 +990,19 @@ public sealed class Plugin : IDalamudPlugin
 
     internal void EmergencyStop(string reason, bool stopExternalAutomation = true)
     {
+        // **元栓も閉じる。**
+        //
+        // 閉じないと、封鎖を解いた瞬間にまた自分から始めてしまう。
+        // 緊急で止めたのだから、次に動き出すのは利用者が「開始」を押したとき。
+        //
+        // 利用者が止めたときだけにする。アンロードや更新で通すと、
+        // 入れ直したときに設定だけ「停止」へ変わって見える。
+        if (stopExternalAutomation && C is not null && C.AutomationEnabled)
+        {
+            C.AutomationEnabled = false;
+            EzConfig.Save();
+        }
+
         // 束ねている側から先に止める。
         //
         // ここを通さないと、交換を止めた直後に目標つき周回が次の動作

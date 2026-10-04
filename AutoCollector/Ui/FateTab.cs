@@ -80,6 +80,9 @@ public sealed class FateTab(Plugin plugin)
             {
                 if (EUi.Button("周回を始める"))
                 {
+                    // 押すこと自体が「走らせたい」の意思表示。元栓も開ける。
+                    // 開けないと周回だけ回り、貯まっても交換へ行かない。
+                    this.plugin.StartAutomation("F.A.T.E 周回の開始");
                     this.lastStartFailure = runner.Start(out var why) ? null : why;
                 }
 

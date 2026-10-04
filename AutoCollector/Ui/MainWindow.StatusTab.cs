@@ -33,15 +33,26 @@ public sealed partial class MainWindow
     ];
 
     /// <summary>
-    /// 急停止。**この画面のいちばん上に、いつでも置く。**
+    /// 操作の列。**この画面のいちばん上に、いつでも置く。**
+    ///
+    /// <b>「停止」と「すべて止める」は別物。</b>
+    ///
+    /// <code>
+    /// 開始        自動で動いてよい状態にする（止めた旗も下ろす）
+    /// 停止        新しく始めない。走っているものはそのまま終わらせる
+    /// すべて止める  走っているものごと、いますぐ畳む
+    /// </code>
+    ///
+    /// 分けたのは、**穏やかに止めたいときに畳む必要がないから。**
+    /// 「すべて止める」は交換の途中でも中断するので、
+    /// そのあと所持数の確認が要る。プリセットを直したいだけのときに
+    /// それを通らせるのは重い。
     ///
     /// これまでの「中止する」は交換の実行中しか描いていなかった。
     /// 周回だけが回っているときや、製作・納品の最中には押すものが無く、
     /// 止めたいのに止められない場面があった。
-    ///
-    /// 止めるのは自動処理のすべて。周回の維持も、走っている周回も含む。
     /// </summary>
-    private void DrawEmergencyStop()
+    private void DrawRunControls()
     {
         var executor = this.plugin.ExchangeExecutor;
 
@@ -54,40 +65,65 @@ public sealed partial class MainWindow
                       this.plugin.FateRunner.IsRunning ||
                       this.plugin.AutoDuty.IsRunningForDisplay() == true;
 
+        // 止まっている旗は 2 本ある。どちらか 1 本でも立っていたら止まっている。
+        //
+        // 周回の維持（Suspended）だけを見ていた時期があり、
+        // 交換側の封鎖（IsAborted）が残っていても「止めています」が出なかった。
+        // その状態では製作と取り出しだけが動き、納品と交換は弾かれ続ける。
+        var halted = this.plugin.Combat.KeeperSuspended || executor.IsAborted;
+        var enabled = Plugin.C.AutomationEnabled && !halted;
+
         using (EUi.HStack(wrap: true))
         {
+            // 動いてよい状態なら、開始は押しても変わらない。
+            if (EUi.Button("開始##runstart", enabled ? ButtonStyle.Normal : ButtonStyle.Primary, width: 110f)
+                .Tip("自動で動いてよい状態にします。\n" +
+                     "「すべて止める」で立てた旗も、ここで下ろします。"))
+            {
+                this.plugin.StartAutomation("状況タブ");
+            }
+
+            if (EUi.Button("停止##runstop", width: 110f, disabled: !enabled)
+                .Tip("新しく始めないようにします。\n" +
+                     "いま走っているものは、切れ目まで進んでから止まります。\n" +
+                     "すぐ畳みたいときは「すべて止める」。"))
+            {
+                this.plugin.StopAutomation("状況タブ");
+            }
+
             // 色を直接押し込むのはやめた。テーマの「破壊的な操作」で出す。
             // 何も動いていないときは目立たせない。
             if (EUi.Button(
                 "すべて止める##emergencystop",
                 running ? ButtonStyle.Danger : ButtonStyle.Normal,
-                width: 160f))
+                width: 160f)
+                .Tip("交換・製作・納品・周回を、いますぐ畳みます。\n" +
+                     "交換の途中なら中断するので、そのあと所持数の確認が要ります。"))
             {
                 this.plugin.EmergencyStop("状況タブから止められました");
             }
+        }
 
-            // **止まっている旗は 2 本ある。どちらか 1 本でも立っていたら出す。**
-            //
-            // 周回の維持（Suspended）だけを見ていた。交換側の封鎖（IsAborted）が
-            // 残っていても「止めています」が出ず、再開ボタンも出ない。
-            // その状態では製作と取り出しだけが動き、納品と交換は弾かれ続ける。
-            if (this.plugin.Combat.KeeperSuspended || executor.IsAborted)
-            {
-                EUi.TextColored("止めています", NoteKind.Warning);
-
-                if (EUi.SmallButton("再開する##emergencyresume"))
-                {
-                    this.plugin.ResumeAfterStop();
-                }
-            }
-            else if (running)
-            {
-                EUi.Muted("交換・製作・納品・周回のすべてを止めます");
-            }
-            else
-            {
-                EUi.Muted("いまは何も動いていません");
-            }
+        // いまどちらの状態かを 1 行で出す。
+        if (halted)
+        {
+            EUi.WrapColored("止めています（すべて止める）。「開始」で戻せます", NoteKind.Warning);
+        }
+        else if (!Plugin.C.AutomationEnabled)
+        {
+            EUi.WrapColored(
+                running
+                    ? "止めています。いま走っているものが終わったら、新しくは始めません"
+                    : "止めています。「開始」を押すまで自分からは動きません",
+                NoteKind.Warning);
+        }
+        else if (running)
+        {
+            EUi.WrapColored("動いています", NoteKind.Success);
+        }
+        else
+        {
+            EUi.Muted("動いてよい状態です。条件を満たしたら始めます");
         }
 
         EUi.Separator();
@@ -100,7 +136,7 @@ public sealed partial class MainWindow
     {
         var snap = this.plugin.MonitorService.Snapshot;
 
-        this.DrawEmergencyStop();
+        this.DrawRunControls();
 
         this.DrawHeadline(snap);
         this.DrawGoalRun();
@@ -284,6 +320,21 @@ public sealed partial class MainWindow
                 this.plugin.EmergencyStop("ユーザー操作");
             }
 
+            EUi.Separator();
+            return;
+        }
+
+        // H3.5 元栓が閉じている
+        //
+        // **H4 以降より先に出す。**
+        // 下に置くと「監視中」「出番待ちです」と出てしまう。
+        // 止めてあるのに正常に待っているように見え、
+        // なぜ動かないのかが画面のどこにも出なくなる。
+        if (!Plugin.C.AutomationEnabled)
+        {
+            Head(NoteKind.Warning, "止めています");
+            Detail("上の「開始」を押すまで、自分からは動きません。");
+            Detail("手で押す操作（行って交換・いま 1 回だけ交換する）はそのまま使えます。");
             EUi.Separator();
             return;
         }

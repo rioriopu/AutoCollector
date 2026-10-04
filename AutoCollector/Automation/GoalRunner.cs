@@ -291,6 +291,16 @@ public sealed class GoalRunner(
             return;
         }
 
+        // **元栓が閉じているあいだも走り出さない。**
+        //
+        // こちらは「すべて止める」と違い、走っているものは畳まない。
+        // 新しく始めないだけなので、ここで戻るのが効き目そのものになる。
+        if (!Plugin.C.AutomationEnabled)
+        {
+            this.StoppedDetail = "止めています。状況タブの「開始」で動き出します";
+            return;
+        }
+
         this.StoppedDetail = string.Empty;
 
         // 目標の計算は所持数をひととおり数える。毎フレーム行う必要はない。

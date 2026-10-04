@@ -68,6 +68,11 @@ public sealed partial class MainWindow : EuWindow
         var labels = new List<string> { "状況", "プリセット", "FATE 周回" };
 
         // 開発・調査用のタブはデバッグモードのときだけ出す。
+        //
+        // **並べるかどうかと、中身を描くかどうかを揃える。**
+        // 製作計画とデバッグは常に並べたうえで、中身が
+        // DebugMode を見て即 return していた。
+        // タブはあるのに開くと空、という状態になっていた。
         if (Plugin.C.DebugMode)
         {
             labels.Add("交換候補");
@@ -76,8 +81,13 @@ public sealed partial class MainWindow : EuWindow
 
         labels.Add("診断");
         labels.Add("設定");
-        labels.Add("製作計画");
-        labels.Add("デバッグ");
+
+        if (Plugin.C.DebugMode)
+        {
+            labels.Add("製作計画");
+            labels.Add("デバッグ");
+        }
+
         labels.Add("寄付");
 
         // **「プリセットへ飛ぶ」はラベルで指す。**

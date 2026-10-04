@@ -236,7 +236,7 @@ public sealed class PresetTab(Plugin plugin)
 
             if (EUi.Button("再開する##resumeall"))
             {
-                this.plugin.ResumeAfterStop();
+                this.plugin.StartAutomation("プリセットタブの再開");
             }
         }
 
@@ -336,8 +336,12 @@ public sealed class PresetTab(Plugin plugin)
                     {
                         preset.DisabledReason = null;
 
-                        // 入れ直したなら「走らせたい」という意思表示。止めた旗も下ろす。
+                        // 入れ直したなら、止めた旗は下ろす。
                         // 下ろさないと、製作だけ動いて納品と交換が弾かれ続ける。
+                        //
+                        // **ただし元栓は開けない。**
+                        // チェックを入れただけで動き出すのを防ぐのが元栓の役目で、
+                        // ここで開けると意味が無くなる。動かすのは「開始」。
                         this.plugin.ResumeAfterStop();
                     }
 
@@ -893,7 +897,7 @@ public sealed class PresetTab(Plugin plugin)
                         "F.A.T.E 周回を開始する",
                         disabled: !preset.Enabled || this.plugin.FateRunner.IsRunning || fateBusy))
                     {
-                        this.plugin.ResumeAfterStop();
+                        this.plugin.StartAutomation("F.A.T.E 周回の開始");
                         this.runControlNote = this.plugin.FateRunner.Start(out var reason) ? "F.A.T.E 周回を開始しました" : reason;
                     }
 
@@ -1039,7 +1043,9 @@ public sealed class PresetTab(Plugin plugin)
 
         // 止めた記録が残っていると、始めてもすぐ押し返される。先に戻す。
         // 交換の封鎖も一緒に下ろす。片方だけだと周回だけが回り、交換は弾かれ続ける。
-        this.plugin.ResumeAfterStop();
+        //
+        // 押すこと自体が「走らせたい」の意思表示なので、元栓も開ける。
+        this.plugin.StartAutomation("周回の開始");
 
         var territory = Plugin.C.LastDutyTerritoryId;
 
@@ -2348,7 +2354,9 @@ public sealed class PresetTab(Plugin plugin)
         //
         // 下ろさないと、製作と取り出しだけが動いて、納品と交換は
         // 「停止中です」で弾かれ続ける。作るだけ作って鞄が埋まる。
-        this.plugin.ResumeAfterStop();
+        //
+        // 押すこと自体が「走らせたい」の意思表示なので、元栓も開ける。
+        this.plugin.StartAutomation("素材を確かめて開始");
 
         var plan = this.CachedPlan(preset);
 

@@ -247,6 +247,16 @@ public sealed class MonitorService(
             return;
         }
 
+        // **元栓が閉じているあいだは、自分から始めない。**
+        //
+        // 手で押したぶんより下に置く。上に置くと、押して積んだ 1 回も
+        // 塞いでしまい、「いま 1 回だけ交換する」が効かなくなる。
+        if (!Plugin.C.AutomationEnabled)
+        {
+            this.LastDecision = "止めています。状況タブの「開始」で動き出します";
+            return;
+        }
+
         if (DateTime.UtcNow < this.nextCheckUtc)
         {
             return;
