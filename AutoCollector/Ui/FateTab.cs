@@ -1,12 +1,11 @@
-﻿using System;
+using System;
+using System.Collections.Generic;
 using System.Linq;
 using AutoCollector.Automation;
 using AutoCollector.Game;
-using Dalamud.Bindings.ImGui;
-using Dalamud.Interface.Colors;
-using Dalamud.Interface.Utility.Raii;
 using ECommons.Configuration;
 using ECommons.DalamudServices;
+using EstellUtils.UI;
 
 namespace AutoCollector.Ui;
 
@@ -17,6 +16,8 @@ namespace AutoCollector.Ui;
 /// <b>保存はマップ単位で行う</b>（Config.FateZones）。
 /// 拡張 ID で保存すると、パッチでマップが追加されたときに
 /// ユーザーが選んだ覚えのないマップで周回が始まってしまう。
+///
+/// <b>EstellUtils へ移し終えたタブ。</b><c>RawTabScope</c> で囲まない。
 /// </summary>
 public sealed class FateTab(Plugin plugin)
 {
@@ -26,26 +27,23 @@ public sealed class FateTab(Plugin plugin)
 
     public void Draw()
     {
-        // 中身はまだ生の ImGui。移し終えたらこの 1 行を外す。
-        using var raw = RawTabScope.Open();
-
         var cfg = Plugin.C;
         var runner = this.plugin.FateRunner;
 
         this.DrawHeadline(cfg, runner);
-        ImGui.Separator();
+        EUi.Separator();
 
         this.DrawZoneSelection(cfg);
-        ImGui.Separator();
+        EUi.Separator();
 
         DrawConditions(cfg);
-        ImGui.Separator();
+        EUi.Separator();
 
         DrawCombat(cfg);
-        ImGui.Separator();
+        EUi.Separator();
 
         DrawBuddy(cfg);
-        ImGui.Separator();
+        EUi.Separator();
 
         this.DrawMisc(cfg);
 
@@ -60,59 +58,61 @@ public sealed class FateTab(Plugin plugin)
 
         if (running)
         {
-            ImGui.TextColored(ImGuiColors.HealerGreen, $"● {StepLabel(runner.Step)}");
-            ImGui.TextWrapped(runner.StatusDetail);
-            ImGui.Text($"完了した FATE: {runner.Completed} 件");
+            EUi.TextColored($"● {StepLabel(runner.Step)}", NoteKind.Success);
+            EUi.Paragraph(runner.StatusDetail);
+            EUi.Label($"完了した FATE: {runner.Completed} 件");
 
-            if (ImGui.Button("止める"))
+            if (EUi.Button("止める"))
             {
                 runner.Stop("画面から停止");
             }
         }
         else
         {
-            var ready = this.DescribeReadiness(cfg, out var color);
-            ImGui.TextColored(color, ready);
+            var ready = this.DescribeReadiness(cfg, out var kind);
+            EUi.WrapColored(ready, kind);
 
             if (runner.StoppedReason is { Length: > 0 } reason)
             {
-                ImGui.TextColored(ImGuiColors.DalamudGrey, $"前回: {reason}（完了 {runner.Completed} 件）");
+                EUi.MutedParagraph($"前回: {reason}（完了 {runner.Completed} 件）");
             }
 
-            if (ImGui.Button("周回を始める"))
+            using (EUi.HStack(wrap: true))
             {
-                this.lastStartFailure = runner.Start(out var why) ? null : why;
-            }
+                if (EUi.Button("周回を始める"))
+                {
+                    this.lastStartFailure = runner.Start(out var why) ? null : why;
+                }
 
-            if (this.lastStartFailure is { Length: > 0 } failure)
-            {
-                ImGui.SameLine();
-                ImGui.TextColored(ImGuiColors.DalamudRed, failure);
+                if (this.lastStartFailure is { Length: > 0 } failure)
+                {
+                    EUi.TextColored(failure, NoteKind.Danger);
+                }
             }
         }
     }
 
-    private string DescribeReadiness(Config cfg, out System.Numerics.Vector4 color)
+    private string DescribeReadiness(Config cfg, out NoteKind kind)
     {
         if (!this.plugin.BossMod.IsLoaded)
         {
-            color = ImGuiColors.DalamudRed;
+            kind = NoteKind.Danger;
             return "● BossMod Reborn が導入されていません";
         }
 
         if (!this.plugin.Vnavmesh.IsLoaded)
         {
-            color = ImGuiColors.DalamudRed;
+            kind = NoteKind.Danger;
             return "● vnavmesh が導入されていません";
         }
 
         if (cfg.FateZones.Count == 0)
         {
-            color = ImGuiColors.DalamudYellow;
+            kind = NoteKind.Warning;
             return "● 周回するマップを選んでください";
         }
 
-        color = ImGuiColors.DalamudGrey;
+        kind = NoteKind.Info;
         return $"● 待機中（マップ {cfg.FateZones.Count} 件）";
     }
 
@@ -148,9 +148,11 @@ public sealed class FateTab(Plugin plugin)
 
     private void DrawZoneSelection(Config cfg)
     {
-        ImGui.Text("周回するマップ");
-        ImGui.SameLine();
-        ImGui.TextColored(ImGuiColors.DalamudGrey, $"（{cfg.FateZones.Count} 件を選択中）");
+        using (EUi.HStack())
+        {
+            EUi.Heading("周回するマップ");
+            EUi.Muted($"（{cfg.FateZones.Count} 件を選択中）");
+        }
 
         var here = Svc.ClientState.TerritoryType;
 
@@ -162,7 +164,7 @@ public sealed class FateTab(Plugin plugin)
                 " → ",
                 cfg.FateZones.Select(id => this.plugin.FateZoneCatalog.NameOf(id)));
 
-            ImGui.TextColored(ImGuiColors.DalamudGrey, $"  巡回順: {route} → （先頭へ戻る）");
+            EUi.MutedParagraph($"  巡回順: {route} → （先頭へ戻る）");
 
             // **周回中の変更は、次に始めるときから効く。**
             //
@@ -177,13 +179,8 @@ public sealed class FateTab(Plugin plugin)
                     " → ",
                     running.Select(id => this.plugin.FateZoneCatalog.NameOf(id)));
 
-                ImGui.TextColored(
-                    ImGuiColors.DalamudYellow,
-                    $"  いま回っているのは: {current}");
-
-                ImGui.TextColored(
-                    ImGuiColors.DalamudGrey,
-                    "  （周回中の変更は、次に開始したときから効きます）");
+                EUi.WrapColored($"  いま回っているのは: {current}", NoteKind.Warning);
+                EUi.MutedParagraph("  （周回中の変更は、次に開始したときから効きます）");
             }
         }
 
@@ -196,15 +193,16 @@ public sealed class FateTab(Plugin plugin)
                 ? $"{ex.Name}（{selectedInEx}/{ex.Zones.Count}・バイカラージェム）"
                 : $"{ex.Name}（{selectedInEx}/{ex.Zones.Count}）";
 
-            using var node = ImRaii.TreeNode($"{label}###fate_ex_{ex.ExVersionId}");
-            if (!node)
+            // 見出しは件数で変わるので、開閉を覚える id は別に渡す。
+            using var node = EUi.Section(label, defaultOpen: false, id: $"fate_ex_{ex.ExVersionId}");
+            if (!node.IsVisible)
             {
                 continue;
             }
 
             // 拡張ごとの一括切り替え。押した時点の配下だけを対象にする。
             var toggleAll = allSelected;
-            if (ImGui.Checkbox($"この拡張をまとめて選ぶ###fate_all_{ex.ExVersionId}", ref toggleAll))
+            if (EUi.Checkbox($"この拡張をまとめて選ぶ##fate_all_{ex.ExVersionId}", ref toggleAll))
             {
                 foreach (var z in ex.Zones)
                 {
@@ -225,75 +223,64 @@ public sealed class FateTab(Plugin plugin)
                 EzConfig.Save();
             }
 
-            ImGui.Indent();
-
-            foreach (var z in ex.Zones)
+            using (EUi.Indent())
             {
-                var chosen = cfg.FateZones.Contains(z.TerritoryId);
-                var name = z.TerritoryId == here ? $"{z.Name}（いまここ）" : z.Name;
-
-                if (ImGui.Checkbox($"{name}###fate_zone_{z.TerritoryId}", ref chosen))
+                foreach (var z in ex.Zones)
                 {
-                    if (chosen)
-                    {
-                        if (!cfg.FateZones.Contains(z.TerritoryId))
-                        {
-                            cfg.FateZones.Add(z.TerritoryId);
-                        }
-                    }
-                    else
-                    {
-                        cfg.FateZones.Remove(z.TerritoryId);
-                    }
+                    var chosen = cfg.FateZones.Contains(z.TerritoryId);
+                    var name = z.TerritoryId == here ? $"{z.Name}（いまここ）" : z.Name;
 
-                    this.NormalizeZoneOrder(cfg);
-                    EzConfig.Save();
+                    if (EUi.Checkbox($"{name}##fate_zone_{z.TerritoryId}", ref chosen))
+                    {
+                        if (chosen)
+                        {
+                            if (!cfg.FateZones.Contains(z.TerritoryId))
+                            {
+                                cfg.FateZones.Add(z.TerritoryId);
+                            }
+                        }
+                        else
+                        {
+                            cfg.FateZones.Remove(z.TerritoryId);
+                        }
+
+                        this.NormalizeZoneOrder(cfg);
+                        EzConfig.Save();
+                    }
                 }
             }
-
-            ImGui.Unindent();
         }
 
         var nearest = cfg.FateNearestFirst;
-        if (ImGui.Checkbox("最寄りの FATE を最優先で狙う", ref nearest))
+        if (EUi.Checkbox("最寄りの FATE を最優先で狙う", ref nearest)
+            .Tip("距離だけで決めます。近いものから順に潰していく遊び方向けです。\n"
+                 + "\n"
+                 + "ボーナス・達成度・残り時間では割り込みません。\n"
+                 + "仲間と同じ FATE を狙う設定より、こちらが優先されます。\n"
+                 + "\n"
+                 + "切ると ボーナス → 達成度 → 残り時間 → 距離 の順で選びます。\n"
+                 + "距離はプレイヤーと FATE 中心の水平距離です。"))
         {
             cfg.FateNearestFirst = nearest;
             EzConfig.Save();
         }
 
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip(
-                "距離だけで決めます。近いものから順に潰していく遊び方向けです。\n"
-                + "\n"
-                + "ボーナス・達成度・残り時間では割り込みません。\n"
-                + "仲間と同じ FATE を狙う設定より、こちらが優先されます。\n"
-                + "\n"
-                + "切ると ボーナス → 達成度 → 残り時間 → 距離 の順で選びます。\n"
-                + "距離はプレイヤーと FATE 中心の水平距離です。");
-        }
-
         var follow = cfg.FateFollowParty;
-        if (ImGui.Checkbox("パーティの仲間と同じ FATE を狙う", ref follow))
+        if (EUi.Checkbox("パーティの仲間と同じ FATE を狙う", ref follow)
+            .Tip("仲間が入っている FATE が候補にあれば、そちらを選びます。\n"
+                 + "\n"
+                 + "同期はしません。仲間の居場所を見て選ぶだけなので、\n"
+                 + "相手がこのプラグインを使っている必要はありません。\n"
+                 + "\n"
+                 + "条件（残り時間・達成度など）は曲げません。\n"
+                 + "仲間の FATE が条件から外れていれば、ふつうに選び直します。"))
         {
             cfg.FateFollowParty = follow;
             EzConfig.Save();
         }
 
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip(
-                "仲間が入っている FATE が候補にあれば、そちらを選びます。\n"
-                + "\n"
-                + "同期はしません。仲間の居場所を見て選ぶだけなので、\n"
-                + "相手がこのプラグインを使っている必要はありません。\n"
-                + "\n"
-                + "条件（残り時間・達成度など）は曲げません。\n"
-                + "仲間の FATE が条件から外れていれば、ふつうに選び直します。");
-        }
-
         var swap = cfg.FateSwapZoneWhenEmpty;
-        if (ImGui.Checkbox("FATE が無ければ次のマップへ移る", ref swap))
+        if (EUi.Checkbox("FATE が無ければ次のマップへ移る", ref swap))
         {
             cfg.FateSwapZoneWhenEmpty = swap;
             EzConfig.Save();
@@ -301,23 +288,20 @@ public sealed class FateTab(Plugin plugin)
 
         if (cfg.FateSwapZoneWhenEmpty)
         {
-            ImGui.Indent();
-            var wait = cfg.FateZoneSwapWaitSeconds;
-            ImGui.SetNextItemWidth(120);
-            if (ImGui.InputInt("移るまでに待つ秒数", ref wait))
+            using (EUi.Indent())
             {
-                // **下限は 0。**待たずに次のマップへ移れるようにする。
-                // 以前は 5 秒を下回れなかったため、FATE が無いマップで
-                // 必ず 5 秒以上立ち止まっていた。
-                cfg.FateZoneSwapWaitSeconds = Math.Clamp(wait, 0, 600);
-                EzConfig.Save();
+                var wait = cfg.FateZoneSwapWaitSeconds;
+                if (EUi.InputInt("移るまでに待つ秒数##fatezoneswapwait", ref wait, min: 0, max: 600, width: 120f))
+                {
+                    // **下限は 0。**待たずに次のマップへ移れるようにする。
+                    // 以前は 5 秒を下回れなかったため、FATE が無いマップで
+                    // 必ず 5 秒以上立ち止まっていた。
+                    cfg.FateZoneSwapWaitSeconds = Math.Clamp(wait, 0, 600);
+                    EzConfig.Save();
+                }
+
+                EUi.MutedParagraph("  0 にすると、FATE が無いと分かった時点ですぐ次のマップへ移ります");
             }
-
-            ImGui.TextColored(
-                ImGuiColors.DalamudGrey,
-                "  0 にすると、FATE が無いと分かった時点ですぐ次のマップへ移ります");
-
-            ImGui.Unindent();
         }
     }
 
@@ -325,75 +309,60 @@ public sealed class FateTab(Plugin plugin)
 
     private static void DrawConditions(Config cfg)
     {
-        ImGui.Text("狙う FATE の条件");
+        EUi.Heading("狙う FATE の条件");
 
         var minTime = cfg.FateMinTimeRemainingSec;
-        ImGui.SetNextItemWidth(120);
-        if (ImGui.InputInt("残り時間がこれ未満なら狙わない（秒）", ref minTime))
+        if (EUi.InputInt("残り時間がこれ未満なら狙わない（秒）##fatemintime", ref minTime, min: 0, max: 1800, width: 120f))
         {
             cfg.FateMinTimeRemainingSec = Math.Clamp(minTime, 0, 1800);
             EzConfig.Save();
         }
 
         var maxProgress = cfg.FateMaxProgressPct;
-        ImGui.SetNextItemWidth(120);
-        if (ImGui.InputInt("達成度がこれを超えたら狙わない（%）", ref maxProgress))
+        if (EUi.InputInt("達成度がこれを超えたら狙わない（%）##fatemaxprogress", ref maxProgress, min: 0, max: 100, width: 120f))
         {
             cfg.FateMaxProgressPct = Math.Clamp(maxProgress, 0, 100);
             EzConfig.Save();
         }
 
         var collect = cfg.FateCollectEnabled;
-        if (ImGui.Checkbox("納品 FATE も回す", ref collect))
+        if (EUi.Checkbox("納品 FATE も回す", ref collect)
+            .Tip("納品 FATE は達成度 100% の時点では報酬が入っていません。\n"
+                 + "1 分後に FATE が消えるときに入るため、それまで同じマップに留まります。\n"
+                 + "（円から出て次の FATE を回すことはできます）"))
         {
             cfg.FateCollectEnabled = collect;
             EzConfig.Save();
         }
 
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip(
-                "納品 FATE は達成度 100% の時点では報酬が入っていません。\n"
-                + "1 分後に FATE が消えるときに入るため、それまで同じマップに留まります。\n"
-                + "（円から出て次の FATE を回すことはできます）");
-        }
-
         var levelFilter = cfg.FateLevelFilterEnabled;
-        if (ImGui.Checkbox("レベル差で絞る", ref levelFilter))
+        if (EUi.Checkbox("レベル差で絞る", ref levelFilter)
+            .Tip("既定では絞りません。\n"
+                 + "レベルシンクが働くため、高レベルでも低レベルの FATE を完了できます。\n"
+                 + "絞ると、選んだマップの FATE が一つも対象にならないことがあります。"))
         {
             cfg.FateLevelFilterEnabled = levelFilter;
             EzConfig.Save();
         }
 
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip(
-                "既定では絞りません。\n"
-                + "レベルシンクが働くため、高レベルでも低レベルの FATE を完了できます。\n"
-                + "絞ると、選んだマップの FATE が一つも対象にならないことがあります。");
-        }
-
         if (cfg.FateLevelFilterEnabled)
         {
-            ImGui.Indent();
-
-            var below = cfg.FateMaxLevelBelow;
-            ImGui.SetNextItemWidth(100);
-            if (ImGui.InputInt("自分より下に許す差", ref below))
+            using (EUi.Indent())
             {
-                cfg.FateMaxLevelBelow = Math.Clamp(below, 0, 100);
-                EzConfig.Save();
-            }
+                var below = cfg.FateMaxLevelBelow;
+                if (EUi.InputInt("自分より下に許す差##fatelvbelow", ref below, min: 0, max: 100, width: 100f))
+                {
+                    cfg.FateMaxLevelBelow = Math.Clamp(below, 0, 100);
+                    EzConfig.Save();
+                }
 
-            var above = cfg.FateMaxLevelAbove;
-            ImGui.SetNextItemWidth(100);
-            if (ImGui.InputInt("自分より上に許す差", ref above))
-            {
-                cfg.FateMaxLevelAbove = Math.Clamp(above, 0, 100);
-                EzConfig.Save();
+                var above = cfg.FateMaxLevelAbove;
+                if (EUi.InputInt("自分より上に許す差##fatelvabove", ref above, min: 0, max: 100, width: 100f))
+                {
+                    cfg.FateMaxLevelAbove = Math.Clamp(above, 0, 100);
+                    EzConfig.Save();
+                }
             }
-
-            ImGui.Unindent();
         }
     }
 
@@ -401,49 +370,34 @@ public sealed class FateTab(Plugin plugin)
 
     private static void DrawCombat(Config cfg)
     {
-        ImGui.Text("戦闘と離脱");
+        EUi.Heading("戦闘と離脱");
 
-        ImGui.TextColored(
-            ImGuiColors.DalamudGrey,
-            "空欄のままで構いません。周回を始めるときに、こちらで専用のプリセットを");
-        ImGui.TextColored(
-            ImGuiColors.DalamudGrey,
-            $"BossMod Reborn へ用意します（「{FateCombatPreset.Name}」）。");
+        EUi.MutedParagraph("空欄のままで構いません。周回を始めるときに、こちらで専用のプリセットを");
+        EUi.MutedParagraph($"BossMod Reborn へ用意します（「{FateCombatPreset.Name}」）。");
 
         var preset = cfg.FateCombatPreset;
-        ImGui.SetNextItemWidth(240);
-        if (ImGui.InputText("使うプリセット名（空欄 = 自動）", ref preset, 128))
+        if (EUi.TextInput("使うプリセット名（空欄 = 自動）##fatecombatpreset", ref preset, maxLength: 128, width: 240f)
+            .Tip("空欄なら、こちらで作ったプリセットを使います。設定はこうなっています:\n"
+                 + "\n"
+                 + "  ・FATE の中のモンスターは自分から攻撃しに行く\n"
+                 + "  ・FATE 以外のモンスターには自分から絡まない\n"
+                 + "  ・ただし攻撃を受けたら殴り返す\n"
+                 + "\n"
+                 + "すでに同じ名前のプリセットがあれば作り直しません。\n"
+                 + "中身を変えたいときは BossMod Reborn 側で編集してください。")
+            .Changed)
         {
             cfg.FateCombatPreset = preset;
             EzConfig.Save();
         }
 
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip(
-                "空欄なら、こちらで作ったプリセットを使います。設定はこうなっています:\n"
-                + "\n"
-                + "  ・FATE の中のモンスターは自分から攻撃しに行く\n"
-                + "  ・FATE 以外のモンスターには自分から絡まない\n"
-                + "  ・ただし攻撃を受けたら殴り返す\n"
-                + "\n"
-                + "すでに同じ名前のプリセットがあれば作り直しません。\n"
-                + "中身を変えたいときは BossMod Reborn 側で編集してください。");
-        }
-
         var prefetch = cfg.FatePrefetchPct;
-        ImGui.SetNextItemWidth(120);
-        if (ImGui.InputInt("次の FATE を決め始める達成度（%）", ref prefetch))
+        if (EUi.InputInt("次の FATE を決め始める達成度（%）##fateprefetch", ref prefetch, min: 0, max: 100, width: 120f)
+            .Tip("達成度がこれを超えたら、次に向かう FATE を先に決めておきます。\n"
+                 + "100% を見てから探し始めると、その間その場に立ち尽くすことになります。"))
         {
             cfg.FatePrefetchPct = Math.Clamp(prefetch, 0, 100);
             EzConfig.Save();
-        }
-
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip(
-                "達成度がこれを超えたら、次に向かう FATE を先に決めておきます。\n"
-                + "100% を見てから探し始めると、その間その場に立ち尽くすことになります。");
         }
     }
 
@@ -451,10 +405,10 @@ public sealed class FateTab(Plugin plugin)
 
     private static void DrawBuddy(Config cfg)
     {
-        ImGui.Text("バディ（チョコボ）");
+        EUi.Heading("バディ（チョコボ）");
 
         var enabled = cfg.FateBuddyEnabled;
-        if (ImGui.Checkbox("自動で呼び出す", ref enabled))
+        if (EUi.Checkbox("自動で呼び出す", ref enabled))
         {
             cfg.FateBuddyEnabled = enabled;
             EzConfig.Save();
@@ -465,65 +419,54 @@ public sealed class FateTab(Plugin plugin)
             return;
         }
 
-        ImGui.Indent();
+        // 以前はここから先の 3 つの出口それぞれで Unindent を呼んでいた。
+        // using なら、どこから返っても閉じる。
+        using var indent = EUi.Indent();
 
         // 持っていない人がいる。持っていなければ呼び出しは行わない。
         if (!BuddyService.HasBuddy)
         {
-            ImGui.TextColored(
-                ImGuiColors.DalamudYellow,
-                "バディを持っていないため、呼び出しは行いません（周回はそのまま続きます）");
-            ImGui.Unindent();
+            EUi.WrapColored(
+                "バディを持っていないため、呼び出しは行いません（周回はそのまま続きます）",
+                NoteKind.Warning);
             return;
         }
 
         if (BuddyService.IsStabled)
         {
-            ImGui.TextColored(
-                ImGuiColors.DalamudYellow,
-                "バディを厩舎に預けているため、呼び出しは行いません");
-            ImGui.Unindent();
+            EUi.WrapColored("バディを厩舎に預けているため、呼び出しは行いません", NoteKind.Warning);
             return;
         }
 
         var left = (int)BuddyService.TimeLeftSeconds;
         var greens = BuddyService.GreensCount;
-        ImGui.TextColored(
-            ImGuiColors.DalamudGrey,
-            $"いまの残り {left / 60}分{left % 60:00}秒 ／ ギサールの野菜 {greens} 個");
+        EUi.MutedParagraph($"いまの残り {left / 60}分{left % 60:00}秒 ／ ギサールの野菜 {greens} 個");
 
         var minSec = cfg.FateBuddyMinSecondsRemaining;
-        ImGui.SetNextItemWidth(120);
-        if (ImGui.InputInt("残りがこれを切ったら呼び直す（秒）", ref minSec))
+        if (EUi.InputInt("残りがこれを切ったら呼び直す（秒）##fatebuddymin", ref minSec, min: 0, max: 3600, width: 120f))
         {
             cfg.FateBuddyMinSecondsRemaining = Math.Clamp(minSec, 0, 3600);
             EzConfig.Save();
         }
 
         var minGreens = cfg.FateGysahlMinCount;
-        ImGui.SetNextItemWidth(120);
-        if (ImGui.InputInt("野菜がこれを切ったら買う", ref minGreens))
+        if (EUi.InputInt("野菜がこれを切ったら買う##fategysahlmin", ref minGreens, min: 0, max: 999, width: 120f))
         {
             cfg.FateGysahlMinCount = Math.Clamp(minGreens, 0, 999);
             EzConfig.Save();
         }
 
-        ImGui.TextColored(
-            ImGuiColors.DalamudGrey,
-            "買い出しは未実装です。いまは残量の表示と、在庫があるときの呼び出しだけを行います。");
-
-        ImGui.Unindent();
+        EUi.MutedParagraph("買い出しは未実装です。いまは残量の表示と、在庫があるときの呼び出しだけを行います。");
     }
 
     // ---- その他 ----
 
     private void DrawMisc(Config cfg)
     {
-        ImGui.Text("その他");
+        EUi.Heading("その他");
 
         var deathIndex = (int)cfg.FateDeathAction;
-        ImGui.SetNextItemWidth(220);
-        if (ImGui.Combo("戦闘不能になったら", ref deathIndex, DeathActionNames, DeathActionNames.Length))
+        if (EUi.Combo("戦闘不能になったら##fatedeath", ref deathIndex, DeathActionNames, width: 220f))
         {
             cfg.FateDeathAction = (FateDeathAction)deathIndex;
             EzConfig.Save();
@@ -531,55 +474,50 @@ public sealed class FateTab(Plugin plugin)
 
         if (cfg.FateDeathAction != FateDeathAction.Return)
         {
-            ImGui.Indent();
-            var wait = cfg.FateRaiseWaitSeconds;
-            ImGui.SetNextItemWidth(120);
-            if (ImGui.InputInt("レイズを待つ秒数", ref wait))
+            using (EUi.Indent())
             {
-                cfg.FateRaiseWaitSeconds = Math.Clamp(wait, 0, 600);
-                EzConfig.Save();
+                var wait = cfg.FateRaiseWaitSeconds;
+                if (EUi.InputInt("レイズを待つ秒数##fateraisewait", ref wait, min: 0, max: 600, width: 120f))
+                {
+                    cfg.FateRaiseWaitSeconds = Math.Clamp(wait, 0, 600);
+                    EzConfig.Save();
+                }
             }
-
-            ImGui.Unindent();
         }
 
         var exactSpot = cfg.FateReturnToExactSpot;
-        if (ImGui.Checkbox("交換のあと、離れた座標まで戻る", ref exactSpot))
+        if (EUi.Checkbox("交換のあと、離れた座標まで戻る", ref exactSpot)
+            .Tip("交換から戻ったあと、離れたときの座標まで移動します。\n"
+                 + "\n"
+                 + "入れなくてもエリアには必ず戻り、いちばん近い FATE から回り直します。\n"
+                 + "そのため、ふだんは入れなくて構いません。"))
         {
             cfg.FateReturnToExactSpot = exactSpot;
             EzConfig.Save();
         }
 
-        if (ImGui.IsItemHovered())
+        EUi.Spacing();
+        EUi.Muted("ベンチャー回収");
+
+        using (EUi.Indent())
         {
-            ImGui.SetTooltip(
-                "交換から戻ったあと、離れたときの座標まで移動します。\n"
-                + "\n"
-                + "入れなくてもエリアには必ず戻り、いちばん近い FATE から回り直します。\n"
-                + "そのため、ふだんは入れなくて構いません。");
+            this.DrawVentureSettings(cfg);
         }
 
-        ImGui.Spacing();
-        ImGui.TextColored(ImGuiColors.DalamudGrey, "ベンチャー回収");
-        ImGui.Indent();
-        this.DrawVentureSettings(cfg);
-        ImGui.Unindent();
+        EUi.Spacing();
+        EUi.Muted("交換との関係");
 
-        ImGui.Spacing();
-        ImGui.TextColored(ImGuiColors.DalamudGrey, "交換との関係");
-        ImGui.Indent();
-        ImGui.TextWrapped(
-            "バイカラージェムなどが設定した量に届くと、周回を中断して交換所へ向かい、"
-            + "交換が済んだら元のエリアへ戻って周回を再開します。");
-        ImGui.TextWrapped(
-            "中断するのは FATE の切れ目です。戦っている最中や、"
-            + "納品 FATE の報酬を待っている間は中断しません。");
-        ImGui.Unindent();
+        using (EUi.Indent())
+        {
+            EUi.Paragraph(
+                "バイカラージェムなどが設定した量に届くと、周回を中断して交換所へ向かい、"
+                + "交換が済んだら元のエリアへ戻って周回を再開します。");
+            EUi.Paragraph(
+                "中断するのは FATE の切れ目です。戦っている最中や、"
+                + "納品 FATE の報酬を待っている間は中断しません。");
+        }
     }
 
-    /// <summary>
-    /// 検証のための仕掛け。
-    ///
     /// <summary>
     /// ベンチャー回収の設定。
     ///
@@ -590,7 +528,15 @@ public sealed class FateTab(Plugin plugin)
     private void DrawVentureSettings(Config cfg)
     {
         var enabled = cfg.FateVentureCollectEnabled;
-        if (ImGui.Checkbox("ベンチャーが回収できたら街へ戻って回収する", ref enabled))
+        if (EUi.Checkbox("ベンチャーが回収できたら街へ戻って回収する", ref enabled)
+            .Tip("周回を始めるとベンチャーを見張り、回収できるようになったら\n"
+                 + "街へ戻って回収し、元のマップへ戻って周回を続けます。\n"
+                 + "\n"
+                 + "中断するのは FATE の切れ目です。戦っている最中や、\n"
+                 + "納品している間は中断しません。\n"
+                 + "\n"
+                 + "周回を止めると、見張りも止まります。\n"
+                 + "回収そのものは AutoRetainer が行います。"))
         {
             cfg.FateVentureCollectEnabled = enabled;
             EzConfig.Save();
@@ -602,25 +548,8 @@ public sealed class FateTab(Plugin plugin)
         // なぜ切ってあるのかと、戻せることを書いておく。
         if (!enabled)
         {
-            ImGui.TextColored(
-                ImGuiColors.DalamudYellow,
-                "  いまは切ってあります（周回そのものが安定するまでの措置です）");
-            ImGui.TextColored(
-                ImGuiColors.DalamudGrey,
-                "  周回の開始を奪う不具合と、街で棒立ちになる不具合が実機で出たため。上の印で戻せます");
-        }
-
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip(
-                "周回を始めるとベンチャーを見張り、回収できるようになったら\n"
-                + "街へ戻って回収し、元のマップへ戻って周回を続けます。\n"
-                + "\n"
-                + "中断するのは FATE の切れ目です。戦っている最中や、\n"
-                + "納品している間は中断しません。\n"
-                + "\n"
-                + "周回を止めると、見張りも止まります。\n"
-                + "回収そのものは AutoRetainer が行います。");
+            EUi.WrapColored("  いまは切ってあります（周回そのものが安定するまでの措置です）", NoteKind.Warning);
+            EUi.MutedParagraph("  周回の開始を奪う不具合と、街で棒立ちになる不具合が実機で出たため。上の印で戻せます");
         }
 
         if (!cfg.FateVentureCollectEnabled)
@@ -634,10 +563,7 @@ public sealed class FateTab(Plugin plugin)
         {
             // **一覧が空でも「未アクセス」と決めつけない。**
             // コンテンツの中では空になる。
-            ImGui.TextColored(
-                ImGuiColors.DalamudGrey,
-                "エーテライトの一覧を読めません（コンテンツの中かもしれません）");
-
+            EUi.MutedParagraph("エーテライトの一覧を読めません（コンテンツの中かもしれません）");
             return;
         }
 
@@ -645,40 +571,39 @@ public sealed class FateTab(Plugin plugin)
 
         if (list.Count == 0)
         {
-            ImGui.TextColored(
-                ImGuiColors.DalamudOrange,
-                "回収に行ける街がありません。エーテライトを解放してください");
-
+            EUi.WrapColored("回収に行ける街がありません。エーテライトを解放してください", NoteKind.Warning);
             return;
         }
 
         var home = towns.HomeTerritory();
         var current = cfg.FateVentureTownTerritory;
-        var currentName = towns.Resolve(current)?.Name ?? "（未設定）";
 
-        ImGui.SetNextItemWidth(220f);
+        // 先頭に「（未設定）」を置く。まだ選んでいない状態を表す行が要る。
+        var names = new List<string>(list.Count + 1) { "（未設定）" };
 
-        if (ImGui.BeginCombo("回収に行く街", currentName))
+        foreach (var town in list)
         {
-            for (var i = 0; i < list.Count; i++)
+            names.Add(home != 0 && town.TerritoryId == home
+                ? $"{town.Name}（ホームタウン・デジョン）"
+                : town.Name);
+        }
+
+        var picked = -1;
+        for (var i = 0; i < list.Count; i++)
+        {
+            if (list[i].TerritoryId == current)
             {
-                var town = list[i];
-
-                // **一意な名札を付ける。**
-                // 同じ名札を使い回すと、当たり判定がまとまって
-                // 先頭しか選べなくなる（通貨の一覧で実際に起きた）。
-                var label = home != 0 && town.TerritoryId == home
-                    ? $"{town.Name}（ホームタウン・デジョン）##venture_town{i}"
-                    : $"{town.Name}##venture_town{i}";
-
-                if (ImGui.Selectable(label, town.TerritoryId == current))
-                {
-                    cfg.FateVentureTownTerritory = town.TerritoryId;
-                    EzConfig.Save();
-                }
+                picked = i;
+                break;
             }
+        }
 
-            ImGui.EndCombo();
+        var comboIndex = picked < 0 ? 0 : picked + 1;
+
+        if (EUi.Combo("回収に行く街##fateventuretown", ref comboIndex, names.ToArray(), width: 220f))
+        {
+            cfg.FateVentureTownTerritory = comboIndex == 0 ? 0 : list[comboIndex - 1].TerritoryId;
+            EzConfig.Save();
         }
 
         // どちらで行くかを見せる。料金がかかるかが分かる。
@@ -693,35 +618,41 @@ public sealed class FateTab(Plugin plugin)
                 _ => "いまその街にいます",
             };
 
-            ImGui.TextColored(ImGuiColors.DalamudGrey, $"  {describe}");
+            EUi.MutedParagraph($"  {describe}");
         }
 
         if (home == 0)
         {
-            ImGui.TextColored(
-                ImGuiColors.DalamudGrey,
-                "  ホームタウンを読めないため、テレポで行きます");
+            EUi.MutedParagraph("  ホームタウンを読めないため、テレポで行きます");
         }
     }
 
     /// <summary>
+    /// 検証のための仕掛け。
+    ///
     /// <b>マップの FATE が枯れる状況は、待っていても滅多に起きない。</b>
     /// 次のマップへ移る動きを確かめられないので、
     /// 「見つからない」と思い込ませる口を用意する。
     /// </summary>
     private void DrawTestTools()
     {
-        ImGui.Spacing();
+        EUi.Spacing();
 
-        if (!ImGui.CollapsingHeader("動作確認用"))
+        using var node = EUi.Section("動作確認用", defaultOpen: false, id: "fatetesttools");
+        if (!node.IsVisible)
         {
             return;
         }
 
-        ImGui.Indent();
-
         var pretend = this.plugin.FateScanner.PretendEmpty;
-        if (ImGui.Checkbox("FATE が見つからないことにする", ref pretend))
+        if (EUi.Checkbox("FATE が見つからないことにする", ref pretend)
+            .Tip("このマップに狙える FATE が 1 つも無い、と思い込ませます。\n"
+                 + "次のマップへテレポするかを確かめるために使います。\n"
+                 + "\n"
+                 + "いま参加している FATE には効きません。\n"
+                 + "戦っている最中に切ると、後始末を通らずに離脱してしまうためです。\n"
+                 + "\n"
+                 + "設定には保存しません。読み込み直すと戻ります。"))
         {
             this.plugin.FateScanner.PretendEmpty = pretend;
 
@@ -734,47 +665,26 @@ public sealed class FateTab(Plugin plugin)
                     : "【動作確認】FATE を通常どおり探します");
         }
 
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip(
-                "このマップに狙える FATE が 1 つも無い、と思い込ませます。\n"
-                + "次のマップへテレポするかを確かめるために使います。\n"
-                + "\n"
-                + "いま参加している FATE には効きません。\n"
-                + "戦っている最中に切ると、後始末を通らずに離脱してしまうためです。\n"
-                + "\n"
-                + "設定には保存しません。読み込み直すと戻ります。");
-        }
-
         if (pretend)
         {
-            ImGui.TextColored(
-                ImGuiColors.DalamudOrange,
-                "  FATE を探さない状態です。確認が済んだら外してください");
+            EUi.WrapColored("  FATE を探さない状態です。確認が済んだら外してください", NoteKind.Warning);
         }
 
-        ImGui.Spacing();
+        EUi.Spacing();
 
         // **詰まったときの逃げ道を、手元にも置く。**
         // 周回が止まっている間は自動の脱出が働かないため、
         // 入り組んだ場所に取り残されたときに自力で戻れるようにする。
-        if (ImGui.Button("いまの場所から脱出する"))
+        if (EUi.Button("いまの場所から脱出する")
+            .Tip("地形に挟まって動けなくなったときに押してください。\n"
+                 + "\n"
+                 + "まず移動を止め、立てる場所を探して飛びます。\n"
+                 + "それでも動けなければ、帰還してホームポイントへ戻ります。\n"
+                 + "\n"
+                 + "周回中でなくても使えます。"))
         {
             this.plugin.FateRunner.EscapeNow();
         }
-
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip(
-                "地形に挟まって動けなくなったときに押してください。\n"
-                + "\n"
-                + "まず移動を止め、立てる場所を探して飛びます。\n"
-                + "それでも動けなければ、帰還してホームポイントへ戻ります。\n"
-                + "\n"
-                + "周回中でなくても使えます。");
-        }
-
-        ImGui.Unindent();
     }
 
     private static readonly string[] DeathActionNames =
