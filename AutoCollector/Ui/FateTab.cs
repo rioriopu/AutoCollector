@@ -17,7 +17,6 @@ namespace AutoCollector.Ui;
 /// 拡張 ID で保存すると、パッチでマップが追加されたときに
 /// ユーザーが選んだ覚えのないマップで周回が始まってしまう。
 ///
-/// <b>EstellUtils へ移し終えたタブ。</b><c>RawTabScope</c> で囲まない。
 /// </summary>
 public sealed class FateTab(Plugin plugin)
 {

@@ -66,8 +66,7 @@ public sealed partial class MainWindow
         EUi.Separator();
         EUi.Spacing();
 
-        // 以前は TextColored だったが、折り返しは RawTabScope の
-        // PushTextWrapPos に頼っていた。囲みを外すので、折り返す版を明示する。
+        // 折り返す版を明示する。色付きの 1 行テキストは折り返さない。
         EUi.WrapColored(
             "※ Patreon サイトの利用は外部サービスとして行われます。Auto Collector は寄付処理には一切関与しません。",
             ImGuiColors.DalamudGrey);

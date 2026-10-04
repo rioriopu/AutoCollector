@@ -5,13 +5,10 @@ using AutoCollector.Automation;
 using AutoCollector.Diagnostics;
 using AutoCollector.Game;
 using System.Numerics;
-using Dalamud.Bindings.ImGui;
 using EstellUtils.UI;
 using EstellUtils.UI.Core;
 using EstellUtils.UI.Layout;
 using EstellUtils.UI.Windowing;
-using Dalamud.Interface.Colors;
-using Dalamud.Interface.Utility.Raii;
 using ECommons.Configuration;
 using ECommons.DalamudServices;
 
@@ -39,15 +36,11 @@ public sealed partial class MainWindow : EuWindow
         this.Size = new Vector2(760f, 560f);
         this.MinSize = new Vector2(520f, 360f);
 
-        // **送りは 1 つだけにする。**
+        // 中身を EstellUtils へ移し終えたので、窓の送りに任せる。
         //
-        // EuWindow の自動スクロールと、中の生 ImGui が持つ送りが二重になり、
-        // つまみが 2 本並んで重なっていた。
-        //
-        // いまは RawImGui が残り高さをちょうど埋めるので外側は動かないが、
-        // 中身が生 ImGui のあいだは手引きどおり、そちら側の送りに任せる。
-        // 中身を EstellUtils へ移し終えたら、ここを true に戻す。
-        this.AutoScroll = false;
+        // 移行中は、EuWindow の自動スクロールと生 ImGui 側の送りが二重になり
+        // つまみが 2 本並んでいたため false にしていた。その生 ImGui はもう無い。
+        this.AutoScroll = true;
     }
 
     private bool onlyWithLocation = true;
@@ -72,9 +65,6 @@ public sealed partial class MainWindow : EuWindow
         // 入り切らないぶんは折り返すので、窓を狭めても
         // 後ろのタブ（寄付・デバッグ）へ辿り着ける。
         // 生の ImGui では省略されて行き先が消えていた。
-        //
-        // 中身はタブごとに RawTabScope を開いて、まだ生の ImGui で描く。
-        // 移し終えたタブから、その囲みを外していく。
         var labels = new List<string> { "状況", "プリセット", "FATE 周回" };
 
         // 開発・調査用のタブはデバッグモードのときだけ出す。
@@ -206,7 +196,6 @@ public sealed partial class MainWindow : EuWindow
     /// <summary>
     /// ショップ照合タブ（デバッグモードのみ）。
     ///
-    /// <b>EstellUtils へ移し終えたタブ。</b><c>RawTabScope</c> で囲まない。
     /// </summary>
     private void DrawShopTab()
     {
@@ -683,7 +672,6 @@ public sealed partial class MainWindow : EuWindow
     /// 通貨を選ぶと、その通貨で買えるものをゲームデータから解決して一覧表示する。
     /// ここではゲーム状態を変更しない（「行って交換」を押したときだけ予約を立てる）。
     ///
-    /// <b>EstellUtils へ移し終えたタブ。</b><c>RawTabScope</c> で囲まない。
     /// </summary>
     private void DrawExchangeTab()
     {
@@ -1094,7 +1082,6 @@ public sealed partial class MainWindow : EuWindow
     /// <summary>
     /// 診断タブ。
     ///
-    /// <b>EstellUtils へ移し終えたタブ。</b><c>RawTabScope</c> で囲まない。
     /// </summary>
     private void DrawDiagnosticsTab()
     {
@@ -1237,7 +1224,6 @@ public sealed partial class MainWindow : EuWindow
     /// <summary>
     /// 設定タブ。
     ///
-    /// <b>EstellUtils へ移し終えたタブ。</b><c>RawTabScope</c> で囲まない。
     ///
     /// 補足説明は <see cref="EUi.MutedParagraph"/> で出している。
     /// 以前は <c>TextColored</c> で、折り返しは囲みの <c>PushTextWrapPos</c> に

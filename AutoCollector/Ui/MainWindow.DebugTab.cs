@@ -18,7 +18,6 @@ namespace AutoCollector.Ui;
 ///
 /// 通常の運用では触る必要がなく、出しておくと設定タブが読みにくくなるものを集める。
 ///
-/// <b>EstellUtils へ移し終えたタブ。</b><c>RawTabScope</c> で囲まない。
 /// </summary>
 public sealed partial class MainWindow
 {

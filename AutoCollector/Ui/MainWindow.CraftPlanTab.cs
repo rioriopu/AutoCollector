@@ -16,7 +16,6 @@ namespace AutoCollector.Ui;
 /// 目で確かめられるようにする。
 /// リテイナーの中身を触る処理は、この計算が正しいと確認できてから足す。
 ///
-/// <b>EstellUtils へ移し終えたタブ。</b><c>RawTabScope</c> で囲まない。
 /// </summary>
 public sealed partial class MainWindow
 {

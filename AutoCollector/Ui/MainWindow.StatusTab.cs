@@ -19,7 +19,6 @@ namespace AutoCollector.Ui;
 /// 判定はここで書かない。MonitorService のスナップショットを描くだけにする。
 /// 画面の条件と実際に発火する条件がずれると、最も説明しにくい壊れ方になる。
 ///
-/// <b>EstellUtils へ移し終えたタブ。</b><c>RawTabScope</c> で囲まない。
 /// </summary>
 public sealed partial class MainWindow
 {
