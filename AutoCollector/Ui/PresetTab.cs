@@ -132,17 +132,18 @@ public sealed class PresetTab(Plugin plugin)
             ? this.numberEditText
             : value.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
-        // **名札に key を混ぜる。**
+        // **名札に key を混ぜ、`###` で識別子を固定する。**
         //
         // 以前は label だけを渡していた。key は C# 側の照合にしか使って
         // おらず、画面から見ると同じ名前の欄が複数あることになる。
         //
         // さらに閾値の欄は、条件のモードによって label の文字列が変わる。
-        // 名札で欄を見分けるので、<b>モードを変えた瞬間に別の欄と見なされ、
-        // 打ちかけの内容が捨てられていた</b>。
+        // <b>`##` だと識別子はラベル全体から作られる</b>（EuId.FromLabel）ので、
+        // モードを変えた瞬間に別の欄と見なされ、打ちかけの内容が捨てられる。
         //
-        // key はプリセットごとに作ってあるので、これで一意になる。
-        var result = EUi.TextInput($"{label}##num_{key}", ref text, maxLength: 12, width: width);
+        // `###` なら以降だけが識別子になる。key はプリセットごとに
+        // 作ってあるので、表示が変わっても同じ欄であり続ける。
+        var result = EUi.TextInput($"{label}###num_{key}", ref text, maxLength: 12, width: width);
 
         if (tip is { Length: > 0 })
         {
