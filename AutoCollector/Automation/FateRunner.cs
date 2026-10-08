@@ -100,7 +100,8 @@ public sealed class FateRunner(
     AetheryteService aetherytes,
     VnavmeshIpc vnavmesh,
     FateZoneCatalog zoneCatalog,
-    VentureWatcher ventures)
+    VentureWatcher ventures,
+    RotationSolverControl rotation)
 {
     /// <summary>FATE の円へ入ったとみなす距離の余裕。</summary>
     private const float FateArrivalSlack = 5f;
@@ -1689,6 +1690,16 @@ public sealed class FateRunner(
 
         if (action == FateDeathAction.Wait)
         {
+            // **いまレイズが飛んできているなら、時間切れでも帰らない。**
+            //
+            // 詠唱の途中で帰ると、かけてくれた人の詠唱を無駄にしたうえで
+            // 街から戻り直すことになる。かかるのを待つほうが早い。
+            if (IsBeingRaised())
+            {
+                this.StatusDetail = "レイズが飛んできています。かかるのを待ちます";
+                return;
+            }
+
             var waited = DateTime.UtcNow - this.deadSinceUtc;
             var remaining = cfg.FateRaiseWaitSeconds - (int)waited.TotalSeconds;
             if (remaining > 0)
@@ -4834,6 +4845,12 @@ public sealed class FateRunner(
         this.presetCheckedUtc = DateTime.UtcNow;
         this.ApplyFateStrategies(cfg, name);
 
+        // **技を撃つのは RSR。**
+        //
+        // BMR は「どこへ動き、誰を狙うか」までしか決めない。
+        // RSR が切れていると、FATE に着いて敵を狙ったまま棒立ちになる。
+        rotation.Enable("F.A.T.E 周回");
+
         // 本当に有効になったかを確かめる。SetActive が true を返しても、
         // 別の機能があとから解除していることがある。
         this.bossMod.TryGetActivePreset(out var active);
@@ -5019,6 +5036,9 @@ public sealed class FateRunner(
         this.targets.ReleaseTarget();
         this.targets.StopAutoAttack();
 
+        // 自分が入れたぶんだけ戻す。利用者が自分で入れていたものは触らない。
+        rotation.Release("F.A.T.E 周回の終了");
+
         if (!this.presetApplied)
         {
             return;
@@ -5105,26 +5125,67 @@ public sealed class FateRunner(
     /// 別の処理が出した はい/いいえ を承諾しない。担当の見分け方は
     /// bundleoftweaks の InstantReturn と同じ（agent の AddonId と窓の Id を比べる）。
     /// </summary>
+    /// <summary>
+    /// いま誰かがレイズをかけてくれているか。
+    ///
+    /// <see cref="FFXIVClientStructs.FFXIV.Client.UI.Agent.AgentRevive"/> が
+    /// かけ手の ID を持っている。0 でなければ詠唱が飛んできている。
+    /// </summary>
+    private static unsafe bool IsBeingRaised()
+    {
+        try
+        {
+            var revive = FFXIVClientStructs.FFXIV.Client.UI.Agent.AgentRevive.Instance();
+            return revive is not null && revive->ResurrectingPlayerId != 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private static unsafe void ReturnAfterDeath()
     {
         if (!EzThrottler.Throttle("AutoCollector.FateDeathReturn", 3000)) return;
 
-        if (ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>("SelectYesno", out var yesno) &&
-            ECommons.GenericHelpers.IsAddonReady(yesno))
+        // **帰還の窓は AgentRevive が出す。**
+        //
+        // 以前は "DeathScreen" という名前のアドオンを探していたが、
+        // ゲームにその名前のアドオンは無い。したがって押す相手が見つからず、
+        // 待ち時間が過ぎても何も起きないまま倒れ続けていた。
+        //
+        // 正しい手順は AutoDuty の DeathHelper と同じ:
+        //   窓が出ていなければ AgentRevive.ShowAddon() で出す
+        //   出ている SelectYesno を承諾する
+        var revive = FFXIVClientStructs.FFXIV.Client.UI.Agent.AgentRevive.Instance();
+
+        var hasYesno =
+            ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>("SelectYesno", out var yesno) &&
+            ECommons.GenericHelpers.IsAddonReady(yesno);
+
+        if (hasYesno)
         {
-            var agent = FFXIVClientStructs.FFXIV.Client.UI.Agent.AgentModule.Instance()->GetAgentByInternalId(
+            // **押してよい確認を見分ける。**
+            //
+            // 帰還の確認は AgentRevive か AgentReturn のどちらかが出す。
+            // どちらでもないものは別の処理が出した確認なので触らない。
+            var returnAgent = FFXIVClientStructs.FFXIV.Client.UI.Agent.AgentModule.Instance()->GetAgentByInternalId(
                 FFXIVClientStructs.FFXIV.Client.UI.Agent.AgentId.Return);
 
-            if (agent is not null && agent->AddonId == yesno->Id)
+            var mine = (revive is not null && revive->AddonId == yesno->Id) ||
+                       (returnAgent is not null && returnAgent->AddonId == yesno->Id);
+
+            if (mine)
             {
                 ECommons.Automation.Callback.Fire(yesno, true, 0);
                 return;
             }
         }
 
-        if (ECommons.GenericHelpers.TryGetAddonByName<FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase>("DeathScreen", out var addon) &&
-            ECommons.GenericHelpers.IsAddonReady(addon))
-            ECommons.Automation.Callback.Fire(addon, true, 1);
+        if (revive is not null && !revive->IsAddonShown())
+        {
+            revive->ShowAddon();
+        }
     }
 
     /// <summary>

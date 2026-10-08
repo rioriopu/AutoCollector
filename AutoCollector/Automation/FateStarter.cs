@@ -28,6 +28,12 @@ public sealed unsafe class FateStarter : IDisposable
     private DateTime nextMove;
     private bool moving;
     private uint dialogNpc;
+
+    /// <summary>この会話で窓が一度でも出たか。猶予の長さを変えるのに使う。</summary>
+    private bool sawDialog;
+
+    /// <summary>選択肢を選んだか。同じ選択肢を押し続けない。</summary>
+    private bool pickedMenu;
     private DateTime started;
 
     public FateStarter(AnomalyLog log)
@@ -126,33 +132,78 @@ public sealed unsafe class FateStarter : IDisposable
             this.EndDialog();
             return false;
         }
-        // 自分が話しかけた同じ個体を対象にしている間だけ進める。
-        if (Svc.Targets.Target?.EntityId != this.dialogNpc)
-        {
-            this.EndDialog();
-            return false;
-        }
+
         if (DateTime.UtcNow < this.nextDialogAction) return true;
         this.nextDialogAction = DateTime.UtcNow.AddMilliseconds(400);
+
         if (this.ownership.TryGetOwnedSince("Talk", this.dialogStarted, out _))
+        {
+            this.sawDialog = true;
             return this.interaction.TryAdvanceTalk();
+        }
+
         if (this.ownership.TryGetOwnedSince("SelectYesno", this.dialogStarted, out var yesno))
         {
+            this.sawDialog = true;
             Callback.Fire(yesno, true, 0);
             return true;
         }
-        // 会話の次ページが来る短い間も、NPC への再接近はしない。
-        if (DateTime.UtcNow - this.dialogStarted < TimeSpan.FromSeconds(3)) return true;
+
+        // **選択肢も進める。**
+        //
+        // 開始役が「手伝う／やめておく」のような選択肢を出す FATE がある。
+        // Talk と SelectYesno しか見ていなかったため、ここで止まり、
+        // 猶予が切れると窓を閉じて二度と話しかけなかった。
+        //
+        // 先頭を選ぶ。開始役の選択肢は「始める」が先頭に来る。
+        // 何を選んだかは記録に残すので、違っていれば追える。
+        foreach (var name in new[] { "SelectString", "SelectIconString" })
+        {
+            if (!this.ownership.TryGetOwnedSince(name, this.dialogStarted, out var menu))
+            {
+                continue;
+            }
+
+            this.sawDialog = true;
+
+            if (this.pickedMenu)
+            {
+                return true;
+            }
+
+            this.pickedMenu = true;
+            this.log.Info("Fate", $"開始役の選択肢（{name}）の先頭を選びます");
+            Callback.Fire(menu, true, 0);
+            return true;
+        }
+
+        // **窓が出るまでの猶予。**
+        //
+        // 以前は 3 秒で諦めていた。話しかけてから窓が開くまでは
+        // 通信の往復ぶんかかるうえ、混んでいるときはさらに延びる。
+        // 短すぎると、出かかった窓を閉じて「止まったまま」に見える。
+        //
+        // 一度でも窓が出ていれば、次のページを待つ猶予として使う。
+        var grace = this.sawDialog ? TimeSpan.FromSeconds(3) : TimeSpan.FromSeconds(8);
+        if (DateTime.UtcNow - this.dialogStarted < grace) return true;
+
+        if (!this.sawDialog)
+        {
+            this.log.Warn("Fate", "開始役に声をかけましたが、会話の窓が出ませんでした");
+        }
+
         this.EndDialog();
         return false;
     }
 
     private void EndDialog()
     {
-        foreach (var name in new[] { "Talk", "SelectYesno" })
+        foreach (var name in new[] { "Talk", "SelectYesno", "SelectString", "SelectIconString" })
             if (this.ownership.TryGetOwnedSince(name, this.dialogStarted, out var addon)) addon->Close(true);
         this.dialogStarted = default;
         this.dialogNpc = 0;
+        this.sawDialog = false;
+        this.pickedMenu = false;
         this.ownership.Clear();
     }
 

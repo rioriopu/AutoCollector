@@ -138,6 +138,11 @@ public sealed class Plugin : IDalamudPlugin
 
     internal BossModIpc BossMod { get; private set; } = null!;
 
+
+    /// <summary>Rotation Solver Reborn の自動実行。技を撃つのはこちら。</summary>
+
+    internal RotationSolverControl RotationSolver { get; private set; } = null!;
+
     internal FateScanner FateScanner { get; private set; } = null!;
 
     internal FateZoneCatalog FateZoneCatalog { get; private set; } = null!;
@@ -553,6 +558,7 @@ public sealed class Plugin : IDalamudPlugin
         // 片方を止めたときにもう片方の経路まで消える。
         this.FateTrace = new FateTrace(this.AnomalyLog);
         this.BossMod = new BossModIpc(this.AnomalyLog);
+        this.RotationSolver = new RotationSolverControl(this.AnomalyLog);
         this.FateScanner = new FateScanner(this.AnomalyLog);
         this.FateZoneCatalog = new FateZoneCatalog(this.AnomalyLog);
         this.FateTokens = new FateTokenService(this.AnomalyLog);
@@ -588,7 +594,8 @@ public sealed class Plugin : IDalamudPlugin
             this.AetheryteService,
             this.Vnavmesh,
             this.FateZoneCatalog,
-            this.VentureWatcher);
+            this.VentureWatcher,
+            this.RotationSolver);
         this.Fate = new FateEarner(this.FateRunner, this.FateTokens, this.AnomalyLog);
 
         this.Earners.Register(this.Combat);

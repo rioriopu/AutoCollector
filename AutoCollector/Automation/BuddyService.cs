@@ -290,6 +290,7 @@ public sealed unsafe class BuddyService(AnomalyLog anomalyLog)
         if (left > this.timeLeftAtRequest + 1f)
         {
             this.anomalyLog.Info("Buddy", $"バディを呼び出しました（残り {left / 60f:0.0} 分・試行 {this.attempts} 回）");
+            this.EnsureHealerStance();
             this.Reset();
             return false;
         }
@@ -317,6 +318,109 @@ public sealed unsafe class BuddyService(AnomalyLog anomalyLog)
 
     /// <summary>野菜が足りているか。買い出しの判断に使う。</summary>
     public static bool NeedsRestock(int minGreensCount) => GreensCount < minGreensCount;
+
+    /// <summary>
+    /// スタンスをヒーラーにする。覚えていなければフリースタンス。
+    ///
+    /// <b>行番号は埋め込まない。</b>BuddyAction のシートから名前で引く。
+    /// シートにはスタンスの種類を表す列が無いため、名前で見分けるしかない。
+    /// 日本語と英語の両方を見るので、クライアントの言語が変わっても当たる。
+    ///
+    /// <b>撃ったことを成功としない。</b>
+    /// いまのスタンスは <c>CompanionInfo.ActiveCommand</c> に BuddyAction の
+    /// 行番号で入っている。読み直して、変わっていなければ次の呼び出しで撃ち直す。
+    ///
+    /// ヒーラーはチョコボのランクが足りないと覚えていない。
+    /// その場合はフリースタンスにする。どちらも引けなければ何もしない。
+    /// 周回そのものは続ける。
+    /// </summary>
+    private void EnsureHealerStance()
+    {
+        try
+        {
+            var ui = UIState.Instance();
+            if (ui is null)
+            {
+                return;
+            }
+
+            ref var companion = ref ui->Buddy.CompanionInfo;
+
+            // _levels は 0=ディフェンダー 1=アタッカー 2=ヒーラー。
+            // 0 なら、その型をまだ覚えていない。
+            var levels = companion.Levels;
+            var healerKnown = levels.Length > 2 && levels[2] > 0;
+
+            var wanted = healerKnown
+                ? FindStanceRow("ヒーラースタンス", "Healer Stance")
+                : null;
+
+            var fellBack = false;
+
+            if (wanted is null)
+            {
+                wanted = FindStanceRow("フリースタンス", "Free Stance");
+                fellBack = true;
+            }
+
+            if (wanted is not { } row)
+            {
+                this.anomalyLog.Warn("Buddy", "スタンスの行をシートから引けませんでした。スタンスは変えません");
+                return;
+            }
+
+            if (companion.ActiveCommand == row)
+            {
+                return;
+            }
+
+            var manager = ActionManager.Instance();
+            if (manager is null)
+            {
+                return;
+            }
+
+            var sent = manager->UseAction(ActionType.BuddyAction, row);
+
+            this.anomalyLog.Info(
+                "Buddy",
+                $"スタンスを{(fellBack ? "フリー" : "ヒーラー")}へ変えます" +
+                $"（行 {row} / いま {companion.ActiveCommand} / 送信 {sent}）");
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Warn("Buddy", $"スタンスを変えられませんでした: {ex.Message}");
+        }
+    }
+
+    /// <summary>BuddyAction のシートから、名前でスタンスの行を引く。</summary>
+    private static uint? FindStanceRow(params string[] names)
+    {
+        var sheet = Svc.Data.GetExcelSheet<Lumina.Excel.Sheets.BuddyAction>();
+        if (sheet is null)
+        {
+            return null;
+        }
+
+        foreach (var row in sheet)
+        {
+            var name = row.Name.ExtractText();
+            if (string.IsNullOrEmpty(name))
+            {
+                continue;
+            }
+
+            foreach (var want in names)
+            {
+                if (string.Equals(name, want, StringComparison.OrdinalIgnoreCase))
+                {
+                    return row.RowId;
+                }
+            }
+        }
+
+        return null;
+    }
 
     /// <summary>ギサールの野菜を使う。実際に呼び出されたかは別途確認すること。</summary>
     private void UseGreens()
