@@ -675,6 +675,9 @@ public sealed class FateRunner(
     /// <summary>vnavmesh で歩かせるためにプリセットの移動を止めているか。止めたぶんは必ず戻す。</summary>
     private bool movementParked;
 
+    /// <summary>FATE の外で反撃している最中か。</summary>
+    private bool defending;
+
     /// <summary>プリセットが有効かを最後に確かめた時刻。</summary>
     private DateTime presetCheckedUtc = DateTime.MinValue;
 
@@ -1673,11 +1676,92 @@ public sealed class FateRunner(
             this.FinishCurrentFate();
         }
 
+        // 5.5 絡まれているなら反撃する。
+        if (this.TickSelfDefense(cfg))
+        {
+            return;
+        }
+
         // 6. 狙う FATE を決めて向かう。
         this.TickSeek(cfg);
     }
 
     // ---- 各段階 ----
+
+    /// <summary>
+    /// FATE の外で絡まれたら反撃する。
+    ///
+    /// <b>棒立ちにしない。</b>
+    /// FATE が終わると戦う用意を手放すので、次の FATE へ向かう途中で
+    /// 野良に絡まれても何もしなかった。殴られ続けたまま移動もできず、
+    /// 立ち止まっているように見える（2026-10-08 実機）。
+    ///
+    /// <b>自分が狙われているときだけ。</b>
+    /// 戦闘中というだけで始めると、近くの他人の戦闘に巻き込まれて
+    /// 関係のない敵を殴りに行く。敵視を持たれているかで判断する。
+    ///
+    /// 倒すまで付き合う。逃げても敵視は消えないので、
+    /// 振り切ろうとするより倒したほうが早い。
+    /// </summary>
+    /// <returns>反撃に入ったら true。その場合この回は先へ進まない。</returns>
+    private bool TickSelfDefense(Config cfg)
+    {
+        if (!Svc.Condition[ConditionFlag.InCombat] || this.targets.CountAggroOnMe() == 0)
+        {
+            // 絡まれていない。用意を手放すのは FATE の段取りに任せる。
+            if (this.defending)
+            {
+                this.defending = false;
+                this.trace.Decision("反撃をやめた", "絡まれなくなった");
+            }
+
+            return false;
+        }
+
+        // 乗ったままでは戦えない。降りるのは既存の段取りに任せたいので、
+        // ここでは降りられるまで待つ。
+        if (MountService.IsMounted)
+        {
+            return false;
+        }
+
+        this.ApplyCombat(cfg);
+
+        // FATE の番号は 0。敵視を持たれているかだけで選ばせる。
+        var target = this.targets.AcquireTarget(0, Player.Position, 0f);
+
+        if (target is null)
+        {
+            return false;
+        }
+
+        if (!this.defending)
+        {
+            this.defending = true;
+            this.navigation.Stop();
+            this.trace.Decision("反撃する", $"{target.Name} に絡まれた");
+            this.anomalyLog.Info("Fate", $"絡まれたので反撃します: {target.Name}");
+        }
+
+        this.StatusDetail = $"絡まれたので反撃しています（{target.Name}）";
+
+        // 近接は間合いを詰める。遠隔はその場で届く。
+        if (IsMeleeRole())
+        {
+            var toTarget = Vector3.Distance(Player.Position, target.Position) - target.HitboxRadius;
+
+            if (toTarget > MeleeReachMeters)
+            {
+                this.BeginApproach(target.Position, $"反撃の間合いまで {toTarget:F0}m", MeleeReachMeters);
+            }
+            else if (this.approaching)
+            {
+                this.StopApproach();
+            }
+        }
+
+        return true;
+    }
 
     private void TickDead(Config cfg)
     {
