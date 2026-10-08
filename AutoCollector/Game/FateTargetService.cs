@@ -7,6 +7,7 @@ using Dalamud.Game.ClientState.Objects.Enums;
 using Dalamud.Game.ClientState.Objects.SubKinds;
 using Dalamud.Game.ClientState.Objects.Types;
 using ECommons.DalamudServices;
+using ECommons.Throttlers;
 using ECommons.GameHelpers;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.Game.UI;
@@ -265,7 +266,77 @@ public sealed unsafe class FateTargetService(AnomalyLog anomalyLog)
             IsDead: false,
         } npc
         && npc.CurrentHp > 0
-        && npc.StatusFlags.HasFlag(StatusFlags.Hostile);
+        && IsHostileToPlayer(npc);
+
+    /// <summary>
+    /// こちらに敵対しているか。
+    ///
+    /// <b>ゲーム側の旗を直接読む。</b>
+    /// <c>CharacterData.Flags</c> の 0 ビットが IsHostile で、
+    /// <c>CharacterData.Battalion</c> は「敵味方の判別に使う」と
+    /// FFXIVClientStructs に明記されている（CharacterData.cs:31,34）。
+    ///
+    /// 読めないときは Dalamud の StatusFlags へ落とす。
+    /// </summary>
+    private static bool IsHostileToPlayer(IGameObject obj)
+    {
+        try
+        {
+            var native = (FFXIVClientStructs.FFXIV.Client.Game.Character.Character*)obj.Address;
+            if (native is not null)
+            {
+                return native->IsHostile;
+            }
+        }
+        catch
+        {
+            // 下へ落とす。
+        }
+
+        return obj is IBattleNpc npc && npc.StatusFlags.HasFlag(StatusFlags.Hostile);
+    }
+
+    /// <summary>
+    /// 自分と同じ陣営か。FATE で一緒に戦ってくれる NPC はこちら側になる。
+    ///
+    /// <b>向きを決め打ちしない。</b>
+    /// 「0 なら味方」のように値を覚えると、違っていたときに
+    /// 敵を 1 匹も狙わなくなる。自分の値と比べるだけにすれば、
+    /// どちらの向きでも正しい。
+    ///
+    /// 読めないときは false。今までどおりの選び方へ落ちる。
+    /// </summary>
+    /// <summary>ゲーム側の旗で見た敵意。走査からも使う。</summary>
+    public static bool IsHostileToGame(IGameObject obj) => IsHostileToPlayer(obj);
+
+    /// <summary>自分と同じ陣営か。走査からも使う。</summary>
+    public static bool SharesBattalionWithPlayer(IGameObject obj) => SharesPlayerBattalion(obj);
+
+    private static bool SharesPlayerBattalion(IGameObject obj)
+    {
+        try
+        {
+            var me = Player.Object;
+            if (me is null)
+            {
+                return false;
+            }
+
+            var mine = (FFXIVClientStructs.FFXIV.Client.Game.Character.Character*)me.Address;
+            var theirs = (FFXIVClientStructs.FFXIV.Client.Game.Character.Character*)obj.Address;
+
+            if (mine is null || theirs is null)
+            {
+                return false;
+            }
+
+            return mine->Battalion == theirs->Battalion;
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
     /// <summary>
     /// フォーローン（BNpcName 6738）・フォーローン・メイデン（6737）か。
@@ -310,17 +381,10 @@ public sealed unsafe class FateTargetService(AnomalyLog anomalyLog)
             return forlorn;
         }
 
-        // いま狙っている相手がまだ有効なら、そのまま。
-        if (Svc.Targets.Target is { } current &&
-            this.MayAttack(current, fateId, fateCentre, fateRadius))
-        {
-            this.ownedTarget = current.GameObjectId;
-            return current;
-        }
-
         var here = Player.Position;
 
         IGameObject? best = null;
+        var bestAlly = true;
         var bestHp = 0u;
         var bestDistance = float.MaxValue;
 
@@ -331,20 +395,54 @@ public sealed unsafe class FateTargetService(AnomalyLog anomalyLog)
                 continue;
             }
 
+            // **同じ陣営のものは後回しにする。**
+            //
+            // FATE で一緒に戦ってくれる NPC（イエロージャケットなど）を
+            // 狙ってしまい、討伐すべき敵を殴らないことがあった
+            // （2026-10-08 実機）。
+            //
+            // 弾くのではなく後回しにするのは、陣営を読めなかったときに
+            // 今までどおりの選び方へ落とすため。読めなければ全部が
+            // 「味方ではない」と見えるので、並びは変わらない。
+            var ally = SharesPlayerBattalion(obj);
             var hp = obj is IBattleNpc npc ? npc.MaxHp : 0u;
             var distance = Vector3.Distance(here, obj.Position);
 
-            if (best is null || hp > bestHp || (hp == bestHp && distance < bestDistance))
+            var better = best is null
+                || (bestAlly && !ally)
+                || (bestAlly == ally && (hp > bestHp || (hp == bestHp && distance < bestDistance)));
+
+            if (better)
             {
                 best = obj;
+                bestAlly = ally;
                 bestHp = hp;
                 bestDistance = distance;
             }
         }
 
+        // **いま狙っている相手を、そのまま使ってよいか。**
+        //
+        // 有効であっても、味方で、ほかに敵が居るなら乗り換える。
+        // 乗り換えないと、一度味方を狙った時点で動けなくなる。
+        if (Svc.Targets.Target is { } current &&
+            this.MayAttack(current, fateId, fateCentre, fateRadius) &&
+            (!SharesPlayerBattalion(current) || best is null || bestAlly))
+        {
+            this.ownedTarget = current.GameObjectId;
+            return current;
+        }
+
         if (best is null)
         {
             return null;
+        }
+
+        if (bestAlly && EzThrottler.Throttle("AutoCollector.FateAllyTarget", 10000))
+        {
+            this.anomalyLog.Warn(
+                "Fate",
+                $"敵を見分けられないため、同じ陣営の {best.Name} を狙います");
         }
 
         Svc.Targets.Target = best;

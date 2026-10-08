@@ -416,6 +416,7 @@ public sealed unsafe class FateScanner(AnomalyLog anomalyLog)
             var nearestDistance = float.MaxValue;
             var found = false;
             var foundForlorn = false;
+            var foundAlly = true;
 
             foreach (var obj in Svc.Objects)
             {
@@ -425,7 +426,7 @@ public sealed unsafe class FateScanner(AnomalyLog anomalyLog)
                 }
 
                 if (!npc.IsTargetable || npc.IsDead || npc.CurrentHp == 0 ||
-                    !npc.StatusFlags.HasFlag(Dalamud.Game.ClientState.Objects.Enums.StatusFlags.Hostile))
+                    !FateTargetService.IsHostileToGame(npc))
                 {
                     continue;
                 }
@@ -448,9 +449,26 @@ public sealed unsafe class FateScanner(AnomalyLog anomalyLog)
                     new Vector2(from.X, from.Z),
                     new Vector2(npc.Position.X, npc.Position.Z));
 
+                // **同じ陣営のものは後回しにする。**
+                //
+                // FATE で一緒に戦ってくれる NPC（イエロージャケットなど）を
+                // 「最寄りの敵」として拾い、そちらへ歩いて行っていた
+                // （2026-10-08 実機）。
+                //
+                // 弾かずに後回しにするのは、陣営を読めなかったときに
+                // 今までどおりへ落とすため。読めなければ全部が
+                // 「味方ではない」と見えるので、並びは変わらない。
+                var ally = FateTargetService.SharesBattalionWithPlayer(npc);
+
                 var forlorn = FateTargetService.IsForlorn(npc);
-                if ((!foundForlorn && forlorn) || (foundForlorn == forlorn && distance < nearestDistance))
+                var better = !found
+                    || (!foundForlorn && forlorn)
+                    || (foundForlorn == forlorn && foundAlly && !ally)
+                    || (foundForlorn == forlorn && foundAlly == ally && distance < nearestDistance);
+
+                if (better)
                 {
+                    foundAlly = ally;
                     foundForlorn = forlorn;
                     nearestDistance = distance;
                     nearest = npc.Position;
