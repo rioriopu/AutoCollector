@@ -171,6 +171,14 @@ public sealed class FateRunner(
     private const float ApproachHysteresisMeters = 5f;
 
     /// <summary>
+    /// 近接が戦闘中に詰める間合い。
+    ///
+    /// 近接の攻撃が届くのは 3m。少し余裕を持たせて、
+    /// 的が動くたびに引き直さないようにする。
+    /// </summary>
+    private const float MeleeReachMeters = 3.5f;
+
+    /// <summary>
     /// FATE に入ってから、参加扱いになるのを待つ猶予。
     ///
     /// CurrentFate は円に入っただけでは埋まらない。レベルシンクが
@@ -3581,13 +3589,21 @@ public sealed class FateRunner(
             return;
         }
 
-        // 戦闘に入っていれば BMR に任せる。近づく必要はない。
-        if (Svc.Condition[ConditionFlag.InCombat])
+        // **戦闘中でも、近接なら間合いを詰める。**
+        //
+        // 以前は戦闘に入った時点で BMR に任せていた。
+        // しかし ApplyCombat で BMR の AI は切ってある（切らないと
+        // プリセットが外される）。AI が無いと BMR は動かないので、
+        // 近接は届く敵しか殴らず、少し離れた敵には寄らなかった
+        // （2026-10-08 実機。遠隔は立ったまま届くので気づきにくい）。
+        //
+        // 遠隔と回復役はその場で届く。動かすと却って的を外すので触らない。
+        if (Svc.Condition[ConditionFlag.InCombat] && !IsMeleeRole())
         {
             if (this.approaching)
             {
                 this.StopApproach();
-                this.trace.Decision("近づくのをやめた", "戦闘に入った");
+                this.trace.Decision("近づくのをやめた", "戦闘に入った（遠隔）");
             }
 
             return;
@@ -3631,6 +3647,40 @@ public sealed class FateRunner(
             return;
         }
 
+        // **戦闘中の近接は、狙っている相手まで詰める。**
+        //
+        // 近づく・やめるの判定は下の往復防止と同じ考え方だが、
+        // 距離が違う（届くのは 3m、湧き待ちの寄りは 15m 前後）。
+        if (Svc.Condition[ConditionFlag.InCombat])
+        {
+            var target = Svc.Targets.Target;
+
+            if (target is null)
+            {
+                if (this.approaching)
+                {
+                    this.StopApproach();
+                }
+
+                return;
+            }
+
+            var toTarget = Vector3.Distance(Player.Position, target.Position) - target.HitboxRadius;
+
+            if (toTarget <= MeleeReachMeters)
+            {
+                if (this.approaching)
+                {
+                    this.StopApproach();
+                }
+
+                return;
+            }
+
+            this.BeginApproach(target.Position, $"近接の間合いまで {toTarget:F0}m", MeleeReachMeters);
+            return;
+        }
+
         // 十分近い。BMR が拾うはずなので任せる。
         //
         // **やめる距離と、始める距離を変える。**
@@ -3664,9 +3714,42 @@ public sealed class FateRunner(
         this.BeginApproach(mob.Position, $"最寄りの敵まで {mob.Distance:F0}m");
     }
 
-    /// <summary>近づく移動を始める。すでに向かっていれば何もしない。</summary>
-    private void BeginApproach(Vector3 destination, string why)
+    /// <summary>
+    /// いまのジョブが近接かどうか。
+    ///
+    /// ClassJob シートの Role で見る（1=タンク 2=近接 3=遠隔 4=回復）。
+    /// タンクも殴りに行く必要があるので近接に含める。
+    /// 読めないときは false。動かさないほうが害が小さい。
+    /// </summary>
+    private static bool IsMeleeRole()
     {
+        try
+        {
+            var job = ECommons.GameHelpers.Player.ClassJob;
+            return job.ValueNullable is { } data && data.Role is 1 or 2;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 近づく移動を始める。すでに向かっていれば何もしない。
+    /// </summary>
+    /// <param name="destination">向かう先。</param>
+    /// <param name="why">記録に残す理由。</param>
+    /// <param name="reach">
+    /// ここまで近づいたら止める距離。
+    ///
+    /// 既定は <see cref="MobReachMeters"/>（15m）で、「BMR が拾える距離まで寄る」用。
+    /// 近接が殴りに行くときは届く距離（<see cref="MeleeReachMeters"/>）を渡す。
+    /// 渡さないと 15m で止まり、手が届かないまま立ち尽くす。
+    /// </param>
+    private void BeginApproach(Vector3 destination, string why, float? reach = null)
+    {
+        var stopAt = reach ?? MobReachMeters;
+
         if (this.approaching)
         {
             // **追いかける先は、動いた分だけ引き直す。**
@@ -3693,14 +3776,14 @@ public sealed class FateRunner(
             // 進んでいないなら、なおさら間を置く。
             if (DateTime.UtcNow - this.approachIssuedUtc < ApproachRepathInterval)
             {
-                this.navigation.Tick(this.approachTarget, MobReachMeters);
+                this.navigation.Tick(this.approachTarget, stopAt);
                 return;
             }
 
             // 間隔が空いていても、狙う先がほとんど動いていないなら引き直さない。
             // 同じ場所へ何度も引き直しても結果は変わらない。
             if (moved <= ApproachRepathMeters &&
-                this.navigation.Tick(this.approachTarget, MobReachMeters) is MoveStatus.Moving)
+                this.navigation.Tick(this.approachTarget, stopAt) is MoveStatus.Moving)
             {
                 return;
             }
@@ -3708,7 +3791,7 @@ public sealed class FateRunner(
             this.approaching = false;
         }
 
-        if (!this.navigation.BeginMove(destination, MobReachMeters, false, out var failure))
+        if (!this.navigation.BeginMove(destination, stopAt, false, out var failure))
         {
             // 経路探索の最中なら、ただ待つ。失敗ではない。
             if (this.navigation.Busy)

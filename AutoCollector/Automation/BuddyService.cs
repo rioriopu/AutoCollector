@@ -68,6 +68,12 @@ public sealed unsafe class BuddyService(AnomalyLog anomalyLog)
     private int attempts;
     private float timeLeftAtRequest;
 
+    /// <summary>次にスタンスを見る時刻。毎フレーム撃たないために持つ。</summary>
+    private DateTime nextStanceCheckUtc = DateTime.MinValue;
+
+    /// <summary>引けた行を 1 度だけ記録したか。名前が合っているかの確認用。</summary>
+    private bool stanceRowsLogged;
+
     /// <summary>いまの状態。</summary>
     public BuddyStep Step { get; private set; } = BuddyStep.Idle;
 
@@ -234,6 +240,13 @@ public sealed unsafe class BuddyService(AnomalyLog anomalyLog)
                 this.anomalyLog.Info("Buddy", $"バディを呼び出しました（残り {left / 60f:0.0} 分・試行 {this.attempts} 回）");
             }
 
+            // **出ているあいだは、スタンスを見張る。**
+            //
+            // 以前は呼び出しに成功した直後にしか設定していなかった。
+            // すでに出ているチョコボには一度も触れないので、
+            // フリースタンスのままだった（2026-10-08 実機）。
+            this.EnsureHealerStance();
+
             this.Reset();
             return false;
         }
@@ -336,6 +349,14 @@ public sealed unsafe class BuddyService(AnomalyLog anomalyLog)
     /// </summary>
     private void EnsureHealerStance()
     {
+        // 毎フレーム撃たない。変わるまで間を置いて試し直す。
+        if (DateTime.UtcNow < this.nextStanceCheckUtc)
+        {
+            return;
+        }
+
+        this.nextStanceCheckUtc = DateTime.UtcNow.AddSeconds(3);
+
         try
         {
             var ui = UIState.Instance();
@@ -346,20 +367,39 @@ public sealed unsafe class BuddyService(AnomalyLog anomalyLog)
 
             ref var companion = ref ui->Buddy.CompanionInfo;
 
+            // 出ていないあいだは変えられない。
+            if (companion.TimeLeft <= 0f)
+            {
+                return;
+            }
+
             // _levels は 0=ディフェンダー 1=アタッカー 2=ヒーラー。
             // 0 なら、その型をまだ覚えていない。
             var levels = companion.Levels;
             var healerKnown = levels.Length > 2 && levels[2] > 0;
 
-            var wanted = healerKnown
-                ? FindStanceRow("ヒーラースタンス", "Healer Stance")
-                : null;
+            var healerRow = FindStanceRow("ヒーラースタンス", "Healer Stance");
+            var freeRow = FindStanceRow("フリースタンス", "Free Stance");
 
+            // **引けた行を 1 度だけ残す。**
+            // 名前で引いているので、合っていなければここを見れば分かる。
+            if (!this.stanceRowsLogged)
+            {
+                this.stanceRowsLogged = true;
+                this.anomalyLog.Info(
+                    "Buddy",
+                    $"スタンスの行: ヒーラー={healerRow?.ToString() ?? "引けず"} / " +
+                    $"フリー={freeRow?.ToString() ?? "引けず"} / " +
+                    $"覚えている段位={string.Join(",", levels.ToArray())} / " +
+                    $"いま={companion.ActiveCommand}");
+            }
+
+            var wanted = healerKnown ? healerRow : null;
             var fellBack = false;
 
             if (wanted is null)
             {
-                wanted = FindStanceRow("フリースタンス", "Free Stance");
+                wanted = freeRow;
                 fellBack = true;
             }
 
