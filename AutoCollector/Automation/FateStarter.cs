@@ -34,6 +34,9 @@ public sealed unsafe class FateStarter : IDisposable
 
     /// <summary>選択肢を選んだか。同じ選択肢を押し続けない。</summary>
     private bool pickedMenu;
+
+    /// <summary>Talk を進めたか。自分が触ったものだけ閉じるために持つ。</summary>
+    private bool advancedTalk;
     private DateTime started;
 
     public FateStarter(AnomalyLog log)
@@ -136,9 +139,23 @@ public sealed unsafe class FateStarter : IDisposable
         if (DateTime.UtcNow < this.nextDialogAction) return true;
         this.nextDialogAction = DateTime.UtcNow.AddMilliseconds(400);
 
-        if (this.ownership.TryGetOwnedSince("Talk", this.dialogStarted, out _))
+        // **Talk は所有権で見分けられない。**
+        //
+        // AddonLifecycle の PostSetup は、その名前のアドオンが
+        // 「組み立てられた」ときだけ発火する。Talk は一度作られたあと
+        // 使い回されるため、2 回目以降の会話では発火しない。
+        // そのため所有権が付かず、進めることも閉じることもできないまま
+        // 窓が開いた状態で止まっていた（2026-10-08 実機）。
+        //
+        // ここへ来るのは、自分が Interact を撃った直後の 20 秒以内だけ。
+        // その窓で開いている Talk は自分のものとみなしてよい。
+        // 「はい／いいえ」と選択肢は作り直されるので、所有権で見分けられる。
+        // 誤って押すと取り返しがつかないのはそちらなので、判定は残す。
+        if (ECommons.GenericHelpers.TryGetAddonByName<AtkUnitBase>("Talk", out var talk) &&
+            ECommons.GenericHelpers.IsAddonReady(talk))
         {
             this.sawDialog = true;
+            this.advancedTalk = true;
             return this.interaction.TryAdvanceTalk();
         }
 
@@ -198,12 +215,23 @@ public sealed unsafe class FateStarter : IDisposable
 
     private void EndDialog()
     {
-        foreach (var name in new[] { "Talk", "SelectYesno", "SelectString", "SelectIconString" })
+        foreach (var name in new[] { "SelectYesno", "SelectString", "SelectIconString" })
             if (this.ownership.TryGetOwnedSince(name, this.dialogStarted, out var addon)) addon->Close(true);
+
+        // Talk は所有権が付かないので、自分が進めたかどうかで判断する。
+        // 開いたままにすると、次の FATE へ向かうあいだ操作が塞がれる。
+        if (this.advancedTalk &&
+            ECommons.GenericHelpers.TryGetAddonByName<AtkUnitBase>("Talk", out var talk) &&
+            ECommons.GenericHelpers.IsAddonReady(talk))
+        {
+            talk->Close(true);
+        }
+
         this.dialogStarted = default;
         this.dialogNpc = 0;
         this.sawDialog = false;
         this.pickedMenu = false;
+        this.advancedTalk = false;
         this.ownership.Clear();
     }
 
