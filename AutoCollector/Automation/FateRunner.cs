@@ -484,6 +484,9 @@ public sealed class FateRunner(
 
     public void DisposeStarter() => this.starter.Dispose();
 
+    /// <summary>開いたままの会話を閉じる。画面の「動作確認用」から呼ぶ。</summary>
+    public bool CloseStuckDialog() => this.starter.CloseStuckDialog();
+
     private readonly HashSet<ushort> blacklist = [];
 
     /// <summary>見送りを解く時刻。入り組んだ地形でも、置いてから再挑戦する。</summary>

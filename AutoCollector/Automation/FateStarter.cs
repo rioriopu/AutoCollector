@@ -218,9 +218,16 @@ public sealed unsafe class FateStarter : IDisposable
         foreach (var name in new[] { "SelectYesno", "SelectString", "SelectIconString" })
             if (this.ownership.TryGetOwnedSince(name, this.dialogStarted, out var addon)) addon->Close(true);
 
-        // Talk は所有権が付かないので、自分が進めたかどうかで判断する。
-        // 開いたままにすると、次の FATE へ向かうあいだ操作が塞がれる。
-        if (this.advancedTalk &&
+        // **自分が会話を始めたなら、開いている Talk は閉じる。**
+        //
+        // 以前は「自分が送ったか」で判断していた。撃った直後に
+        // プラグインが入れ替わると、窓が開く前に消えることになる。
+        // 新しい側は会話を始めた覚えがないので送らず、誰も閉じない。
+        // 会話中は移動もキーコマンドも受け付けないので、
+        // 操作不能のまま取り残される（2026-10-08 実機）。
+        //
+        // 撃った時点から閉じる対象にする。
+        if (this.dialogStarted != default &&
             ECommons.GenericHelpers.TryGetAddonByName<AtkUnitBase>("Talk", out var talk) &&
             ECommons.GenericHelpers.IsAddonReady(talk))
         {
@@ -250,6 +257,32 @@ public sealed unsafe class FateStarter : IDisposable
         this.approachStarted = default;
         this.nextMove = default;
         this.started = default;
+    }
+
+    /// <summary>
+    /// 開いたままの会話を閉じる。
+    ///
+    /// <b>取り残されたときの逃げ道。</b>
+    /// 会話中は移動もキーコマンドも受け付けないため、
+    /// 誰も送らない窓が残ると操作不能になる。
+    /// </summary>
+    /// <returns>閉じたら true。</returns>
+    public bool CloseStuckDialog()
+    {
+        var closed = false;
+
+        foreach (var name in new[] { "Talk", "SelectYesno", "SelectString", "SelectIconString" })
+        {
+            if (ECommons.GenericHelpers.TryGetAddonByName<AtkUnitBase>(name, out var addon) &&
+                ECommons.GenericHelpers.IsAddonReady(addon))
+            {
+                addon->Close(true);
+                closed = true;
+            }
+        }
+
+        this.Reset();
+        return closed;
     }
 
     public void Dispose() => this.ownership.Dispose();
