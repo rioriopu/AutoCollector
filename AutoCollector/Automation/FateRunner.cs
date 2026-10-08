@@ -1708,13 +1708,7 @@ public sealed class FateRunner(
     {
         if (!Svc.Condition[ConditionFlag.InCombat] || this.targets.CountAggroOnMe() == 0)
         {
-            // 絡まれていない。用意を手放すのは FATE の段取りに任せる。
-            if (this.defending)
-            {
-                this.defending = false;
-                this.trace.Decision("反撃をやめた", "絡まれなくなった");
-            }
-
+            this.StopDefending("絡まれなくなった");
             return false;
         }
 
@@ -1725,15 +1719,22 @@ public sealed class FateRunner(
             return false;
         }
 
-        this.ApplyCombat(cfg);
-
-        // FATE の番号は 0。敵視を持たれているかだけで選ばせる。
+        // **狙える相手を先に決める。用意はそのあと。**
+        //
+        // 以前は先に ApplyCombat を呼んでいた。そのため FATE が終わった直後、
+        // 敵視だけが一瞬残っている間にも RSR が入り、攻撃が続いて
+        // マウントに乗るのが遅れていた（2026-10-08 実機）。
+        //
+        // 殴る相手がいないなら、用意もしない。
         var target = this.targets.AcquireTarget(0, Player.Position, 0f);
 
         if (target is null)
         {
+            this.StopDefending("殴る相手がいない");
             return false;
         }
+
+        this.ApplyCombat(cfg);
 
         if (!this.defending)
         {
@@ -1761,6 +1762,24 @@ public sealed class FateRunner(
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// 反撃をやめ、戦う用意を手放す。
+    ///
+    /// <b>すぐ手放す。</b>残しておくと RSR が動いたままになり、
+    /// 攻撃が続いてマウントに乗れない。
+    /// </summary>
+    private void StopDefending(string why)
+    {
+        if (!this.defending)
+        {
+            return;
+        }
+
+        this.defending = false;
+        this.ReleaseCombat();
+        this.trace.Decision("反撃をやめた", why);
     }
 
     private void TickDead(Config cfg)
@@ -4985,6 +5004,16 @@ public sealed class FateRunner(
     /// </summary>
     private void ApplyCombat(Config cfg)
     {
+        // **技を撃つのは RSR。プリセットの状態と切り離す。**
+        //
+        // 以前はこの下、プリセットを入れ終わったところで呼んでいた。
+        // プリセットが入ったままで RSR だけ切れている状態だと、
+        // 下の早期 return に当たって入り直せなかった。
+        // 反撃のときに技が 1 つも出ない。
+        //
+        // Enable は自分が入れたかどうかを覚えているので、何度呼んでもよい。
+        rotation.Enable("F.A.T.E 周回");
+
         if (this.presetApplied)
         {
             return;
@@ -5012,11 +5041,6 @@ public sealed class FateRunner(
         this.presetCheckedUtc = DateTime.UtcNow;
         this.ApplyFateStrategies(cfg, name);
 
-        // **技を撃つのは RSR。**
-        //
-        // BMR は「どこへ動き、誰を狙うか」までしか決めない。
-        // RSR が切れていると、FATE に着いて敵を狙ったまま棒立ちになる。
-        rotation.Enable("F.A.T.E 周回");
 
         // 本当に有効になったかを確かめる。SetActive が true を返しても、
         // 別の機能があとから解除していることがある。
