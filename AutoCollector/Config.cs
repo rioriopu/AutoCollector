@@ -299,6 +299,30 @@ public sealed class Config
     public float NpcApproachRange { get; set; } = 3.0f;
 
     /// <summary>
+    /// 曲がり角を弧で丸めて走るか。
+    ///
+    /// vnavmesh の経路はナビメッシュの境目を結んだ折れ線なので、
+    /// そのまま辿ると「直線 → 直角 → 直線」の機械的な動きになる。
+    /// 入れると、角を二次ベジェの弧に置き換えて回り込む。
+    ///
+    /// <b>経路探索そのものには手を入れない。</b>公式が返した折れ線の
+    /// 角だけを丸め、丸めた点がナビメッシュに乗っていることを
+    /// 確かめてから渡す。乗っていない角は丸めずそのまま使う。
+    /// </summary>
+    public bool SmoothPath { get; set; }
+
+    /// <summary>弧の最大半径（ヤルム）。大きいほど大回りになる。</summary>
+    public float SmoothMaxRadius { get; set; } = 2.5f;
+
+    /// <summary>
+    /// 経路を間引くときの許容（ヤルム）。
+    ///
+    /// ナビメッシュの経路は直線の途中にも点が並ぶ。間引かずに丸めると
+    /// 角でない場所まで丸めてしまい、経路全体がうねる。
+    /// </summary>
+    public float SmoothEpsilon { get; set; } = 0.3f;
+
+    /// <summary>
     /// 収集品の納品窓口を固定する場合の ENpcBase.RowId。0 なら自動で選ぶ。
     ///
     /// 窓口は 9 都市にあり、どれを使っても納品できる。

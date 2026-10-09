@@ -1,5 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Numerics;
+using System.Threading;
+using System.Threading.Tasks;
 using AutoCollector.Diagnostics;
 using AutoCollector.Ipc;
 using Dalamud.Game.ClientState.Conditions;
@@ -175,6 +178,9 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
     private readonly VnavmeshIpc vnavmesh = vnavmesh;
     private readonly BossModIpc bossMod = bossMod;
 
+    /// <summary>曲がり角を丸める係。経路探索はしない。</summary>
+    private readonly PathSmoother smoother = new(anomalyLog, vnavmesh);
+
     /// <summary>
     /// 直前の <see cref="BeginMove(Vector3, float, bool, out string)"/> が
     /// 「別の経路探索の最中」で断られたか。
@@ -220,6 +226,22 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
 
     /// <summary>BMR の AI の移動を、こちらが止めているか。</summary>
     private bool pausedExternalMovement;
+
+    /// <summary>
+    /// いまの移動の世代。
+    ///
+    /// 角を丸めるための経路探索は非同期で、終わるころには別の移動へ
+    /// 移っていることがある。その結果で動き出すと筋が通らないので、
+    /// 番号が違えば捨てる。
+    /// </summary>
+    private int moveGeneration;
+
+    private Task<List<Vector3>>? smoothTask;
+    private CancellationTokenSource? smoothCancel;
+    private int smoothGeneration;
+
+    /// <summary>この移動で、丸めた経路をもう渡したか。渡すのは 1 度だけ。</summary>
+    private bool smoothHandedOver;
 
     public bool IsAvailable => this.vnavmesh.IsLoaded;
 
@@ -432,6 +454,8 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
         this.idleShortFrames = 0;
         this.escapes = 0;
         this.escapeJumpedUtc = default;
+        this.moveGeneration++;
+        this.CancelSmoothing();
         this.startTerritory = Svc.ClientState.TerritoryType;
         this.lastPosition = Player.Available ? Player.Position : default;
         this.lastMovementUtc = DateTime.UtcNow;
@@ -511,6 +535,13 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
         // ここから先はこちらが動かす。BMR には手を引いてもらう。
         this.TakeOverExternalMovement();
 
+        // **走り出してから、角を丸めた経路に差し替える。**
+        //
+        // 丸めるには経路の形が要るが、経路探索は非同期で数秒かかることがある。
+        // 待ってから走り出すと、街中では目に見えて固まる。
+        // 先に公式へ頼んで走らせ、形が手に入った時点で差し替える。
+        this.BeginSmoothing(target, fly);
+
         failureReason = string.Empty;
         return true;
     }
@@ -537,6 +568,9 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
 
         var position = Player.Position;
         var now = DateTime.UtcNow;
+
+        // 角を丸めた経路が出来ていれば、ここで差し替える。
+        this.TickSmoothing();
 
         // 走行状態を 3 つとも見る。1 つでも進行中なら移動継続とみなす。
         if (!this.vnavmesh.TryPathIsRunning(out var running) ||
@@ -638,6 +672,8 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
         this.vnavmesh.TryStop();
         this.moveIssued = false;
         this.escapeJumpedUtc = default;
+        this.moveGeneration++;
+        this.CancelSmoothing();
     }
 
     /// <summary>
@@ -836,12 +872,161 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
         {
             this.lastIssueUtc = DateTime.UtcNow;
             this.anomalyLog.Info("Navigation", $"{why}経路を引き直しました");
+
+            // 引き直したら、丸めもやり直す。やり直さないと
+            // 引き直した瞬間から角張ったままになる。
+            this.BeginSmoothing(this.issuedDestination, this.issuedWithFly);
             return;
         }
 
         // 断られた。次のフレームでまた試す。経路は止めてあるので
         // その間は止まったままになるが、作業の層が有限時間で拾う。
         this.anomalyLog.Info("Navigation", $"{why}経路を引き直そうとしましたが、まだ受け取れません");
+    }
+
+    /// <summary>
+    /// 角を丸めた経路を作り始める。
+    ///
+    /// <b>走り出しは止めない。</b>ここへ来た時点で、公式への移動依頼は
+    /// すでに受け取られている。丸めた経路は出来たときに差し替えるだけで、
+    /// 出来なければ公式の経路のまま進む。
+    /// </summary>
+    private void BeginSmoothing(Vector3 destination, bool fly)
+    {
+        this.CancelSmoothing();
+        this.smoothHandedOver = false;
+
+        // **飛んでいるときは触らない。**
+        //
+        // 空中の経路は FateApproach が段階を組んで降ろしており、
+        // 降下の形（垂直落下になっていないか）を自分で検査している。
+        // そこへ別の丸めを混ぜると、その検査が意味を失う。
+        if (fly || !Plugin.C.SmoothPath || !Player.Available || !this.vnavmesh.IsLoaded)
+        {
+            return;
+        }
+
+        this.smoothCancel = new CancellationTokenSource();
+        this.smoothGeneration = this.moveGeneration;
+
+        if (!this.vnavmesh.TryPathfindCancelable(
+                Player.Position, destination, false, this.smoothCancel.Token, out var task) ||
+            task is null)
+        {
+            this.CancelSmoothing();
+            return;
+        }
+
+        this.smoothTask = task;
+    }
+
+    /// <summary>
+    /// 丸めた経路が出来ていたら差し替える。
+    ///
+    /// <c>Path.MoveTo</c> は経路探索を通さず、渡した点をそのまま辿らせる。
+    /// つまりここで渡すのは「同じ道を、角だけ丸めたもの」になる。
+    /// </summary>
+    private void TickSmoothing()
+    {
+        if (this.smoothTask is not { } task || !task.IsCompleted)
+        {
+            return;
+        }
+
+        var mine = this.smoothGeneration == this.moveGeneration;
+
+        this.smoothTask = null;
+        this.CancelSmoothing();
+
+        if (!mine || this.smoothHandedOver || !Player.Available ||
+            task.IsFaulted || task.IsCanceled)
+        {
+            return;
+        }
+
+        var smoothed = this.smoother.Smooth(
+            task.Result, Plugin.C.SmoothEpsilon, Plugin.C.SmoothMaxRadius);
+
+        if (smoothed is null || smoothed.Count < 2)
+        {
+            return;
+        }
+
+        // **探索の間に進んでいる。** 後ろの点を残したまま渡すと、
+        // いま来た道を少し戻ってから走り出すことになる。
+        TrimBehind(smoothed, Player.Position);
+
+        if (smoothed.Count < 2)
+        {
+            // もう終点の近く。差し替える意味が無い。
+            return;
+        }
+
+        if (!this.vnavmesh.TryMoveAlong(smoothed, false))
+        {
+            return;
+        }
+
+        this.smoothHandedOver = true;
+        this.lastIssueUtc = DateTime.UtcNow;
+    }
+
+    /// <summary>走らせている探索を捨てる。</summary>
+    private void CancelSmoothing()
+    {
+        var cts = this.smoothCancel;
+        this.smoothCancel = null;
+        this.smoothTask = null;
+
+        if (cts is null)
+        {
+            return;
+        }
+
+        // **取り消しに失敗しても必ず捨てる。**
+        // Cancel と Dispose を同じ try に入れると、Cancel が投げたときに
+        // Dispose を飛ばして漏らす。
+        try
+        {
+            cts.Cancel();
+        }
+        catch
+        {
+            // 取り消せなくても、世代番号で結果を捨てる。
+        }
+
+        try
+        {
+            cts.Dispose();
+        }
+        catch
+        {
+            // 捨てられなくても動きは変えない。
+        }
+    }
+
+    /// <summary>いまいる場所より手前の点を落とす。</summary>
+    private static void TrimBehind(List<Vector3> points, Vector3 here)
+    {
+        var nearest = 0;
+        var best = float.MaxValue;
+        var me = new Vector2(here.X, here.Z);
+
+        for (var i = 0; i < points.Count; i++)
+        {
+            var d = Vector2.DistanceSquared(new Vector2(points[i].X, points[i].Z), me);
+
+            if (d < best)
+            {
+                best = d;
+                nearest = i;
+            }
+        }
+
+        if (nearest > 0)
+        {
+            points.RemoveRange(0, nearest);
+        }
     }
 
     /// <summary>進んでいないことの数え直し。両方の層をまとめて揃える。</summary>

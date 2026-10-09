@@ -48,6 +48,12 @@ public sealed class PresetTab(Plugin plugin)
 
     private string rewardSearch = string.Empty;
 
+    /// <summary>作る収集品の絞り込み。件数が多く、目で探すのが大変なため。</summary>
+    private string craftSearch = string.Empty;
+
+    /// <summary>交換の内訳をスクロールに閉じ込め始める行数。</summary>
+    private const int PlanRowsBeforeScroll = 8;
+
     /// <summary>直前に写した名前。押した手応えを画面へ返すために持つ。</summary>
     private string copiedName = string.Empty;
 
@@ -2011,23 +2017,49 @@ public sealed class PresetTab(Plugin plugin)
         //
         // 以前は「残りが 1 個以上」で絞っていたため、端数だけ残った品が
         // 「あと 1 個 = 0 回 = 0」という読めない行になっていた。
-        foreach (var item in goal.Items.Where(x => !x.Unlimited && x.Trades > 0))
-        {
-            // **費用は 1 回あたり。数えるのは回数。**
-            // 1 回 1 個の品でも「個」と書くと、Trades を個数と読ませてしまう。
-            var trade = item.PerTrade > 1
-                ? $"{item.Trades} 回（1 回 {item.PerTrade} 個）× {item.Cost:N0}"
-                : $"{item.Trades} 回 × {item.Cost:N0}";
-
-            EUi.MutedParagraph($"  {item.Name}: {item.Want} 個まで（いま {item.Held} 個）" +
-                $" → あと {item.Remaining} 個 = {trade} = {item.Subtotal:N0}");
-        }
+        var planned = goal.Items.Where(x => !x.Unlimited && x.Trades > 0).ToList();
 
         // 端数だけ残った品は、別に書く。買えないことを明示する。
-        foreach (var item in goal.Items.Where(x => !x.Unlimited && x.Trades <= 0 && x.Remaining > 0))
+        var leftover = goal.Items.Where(x => !x.Unlimited && x.Trades <= 0 && x.Remaining > 0).ToList();
+
+        void DrawPlanRows()
         {
-            EUi.MutedParagraph($"  {item.Name}: あと {item.Remaining} 個ですが、" +
-                $"1 回で {item.PerTrade} 個入るため交換できません");
+            foreach (var item in planned)
+            {
+                // **費用は 1 回あたり。数えるのは回数。**
+                // 1 回 1 個の品でも「個」と書くと、Trades を個数と読ませてしまう。
+                var trade = item.PerTrade > 1
+                    ? $"{item.Trades} 回（1 回 {item.PerTrade} 個）× {item.Cost:N0}"
+                    : $"{item.Trades} 回 × {item.Cost:N0}";
+
+                EUi.MutedParagraph($"  {item.Name}: {item.Want} 個まで（いま {item.Held} 個）" +
+                    $" → あと {item.Remaining} 個 = {trade} = {item.Subtotal:N0}");
+            }
+
+            foreach (var item in leftover)
+            {
+                EUi.MutedParagraph($"  {item.Name}: あと {item.Remaining} 個ですが、" +
+                    $"1 回で {item.PerTrade} 個入るため交換できません");
+            }
+        }
+
+        // **行が増えたらスクロールへ閉じ込める。**
+        //
+        // 交換リストに十数件入れると、この計画だけで画面が埋まり、
+        // 下にある「作る収集品」の選択が画面の外へ出る。
+        // 肝心の選択に辿り着けなくなっていた（2026-10-09 実機）。
+        if (planned.Count + leftover.Count > PlanRowsBeforeScroll)
+        {
+            EUi.Muted($"  交換の内訳（{planned.Count + leftover.Count} 件・スクロールできます）");
+
+            using (EUi.Scroll("##goalplanrows", 190f))
+            {
+                DrawPlanRows();
+            }
+        }
+        else
+        {
+            DrawPlanRows();
         }
 
         // **費用を引けない品があるなら、合計を断言しない。**
@@ -2676,9 +2708,62 @@ public sealed class PresetTab(Plugin plugin)
             }
         }
 
+        // **いま何を作ることになっているかを、選ぶ欄のすぐ上に出す。**
+        //
+        // 以前は一覧の選択色でしか分からず、スクロールして見つけるまで
+        // 何が選ばれているのか確かめられなかった。
+        var chosen = filtered.FirstOrDefault(x => x.ItemId == preset.CraftCollectableItemId)
+                     ?? craftable.FirstOrDefault(x => x.ItemId == preset.CraftCollectableItemId);
+
+        using (EUi.HStack(wrap: true))
+        {
+            if (chosen is not null)
+            {
+                EUi.TextColored($"作る収集品: {chosen.Name}（Lv{chosen.ClassJobLevel} / 最大 {chosen.HighReward}）", NoteKind.Success);
+
+                if (EUi.SmallButton("選び直す##pcclear"))
+                {
+                    preset.CraftCollectableItemId = 0;
+                    preset.CraftToEarn = false;
+                    changed = true;
+                }
+            }
+            else
+            {
+                EUi.TextColored("作る収集品が選ばれていません。下の一覧から選んでください", NoteKind.Warning);
+            }
+        }
+
+        // **名前で絞れるようにする。**
+        // 紫貨は 1 つのレベル帯でも十数件あり、目で探すのが大変だった。
+        EUi.TextInput(
+            "##presetcraftsearch",
+            ref this.craftSearch,
+            hint: "収集品の名前で絞り込み",
+            maxLength: 64,
+            width: 280f);
+
+        var search = this.craftSearch.Trim();
+
+        if (search.Length > 0)
+        {
+            filtered = filtered
+                .Where(x => x.Name.Contains(search, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+        }
+
         EUi.MutedParagraph($"  作れる収集品 {filtered.Count} 件（製作手帳と同じ並び / 右クリックで名前をコピー）");
 
-        using (EUi.Scroll("##presetcraftlist", 150f))
+        if (filtered.Count == 0)
+        {
+            EUi.WrapColored("  絞り込みに当てはまる収集品がありません", NoteKind.Warning);
+            this.DrawCopyNotice();
+            return;
+        }
+
+        // **一覧は高めに取る。**
+        // 150 では 4 行ほどしか見えず、選ぶたびにスクロールすることになっていた。
+        using (EUi.Scroll("##presetcraftlist", 240f))
         {
             {
                 foreach (var item in filtered)
@@ -2726,11 +2811,6 @@ public sealed class PresetTab(Plugin plugin)
                     }
                 }
             }
-        }
-
-        if (preset.CraftCollectableItemId == 0)
-        {
-            EUi.MutedParagraph("作る収集品を選ぶと、必要な個数を計算します");
         }
 
         this.DrawCopyNotice();
