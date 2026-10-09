@@ -58,9 +58,19 @@
     <ProjectReference Include="$(EstellUtilsProject)" />
   </ItemGroup>
 
-  <!-- Debug ビルドは dev プラグイン置き場へ直接出力する -->
+  <!--
+    Debug ビルドは dev プラグイン置き場へ直接出力する。
+
+    **置き場は人によって違う。**
+    ここへ直接書くと、別のマシンのビルドが他人の置き場へ書きに行く。
+    EstellUtilsProject と同じく、上書きできる形にしてある。
+
+    変えたいときは、リポジトリの直上へ Directory.Build.props を置いて
+    DevPluginDir を指定する（このファイルは追跡していない）。
+  -->
   <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
-    <OutputPath>C:\DevPlugins\AutoCollector\</OutputPath>
+    <DevPluginDir Condition="'$(DevPluginDir)' == ''">C:\DevPlugins\AutoCollector\</DevPluginDir>
+    <OutputPath>$(DevPluginDir)</OutputPath>
   </PropertyGroup>
 
 </Project>

@@ -25,3 +25,6 @@ tools/fetch_rank_tables.py
 docs/【知見】*.md
 docs/【相談】*.md
 scratch_*
+
+# このマシン専用の設定（置き場・EstellUtils の場所）。人によって違うので追跡しない。
+Directory.Build.props
