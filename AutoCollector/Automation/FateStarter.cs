@@ -60,6 +60,19 @@ public sealed unsafe class FateStarter : IDisposable
     /// <summary>開始 NPC へ寄るのに与える上限。</summary>
     private static readonly TimeSpan ApproachPatience = TimeSpan.FromSeconds(45);
 
+    /// <summary>
+    /// 距離に入ってから、声をかけられるまでに与える上限。
+    ///
+    /// 戦闘が解けるのを待つぶん、少し長めに取る。
+    /// </summary>
+    private static readonly TimeSpan InteractPatience = TimeSpan.FromSeconds(25);
+
+    /// <summary>距離に入って、声をかけ始めた時刻。</summary>
+    private DateTime interactStarted;
+
+    /// <summary>直前に記録した「声をかけられない理由」。同じ理由を毎フレーム書かないために持つ。</summary>
+    private string lastBlocker = string.Empty;
+
     public FateStarter(AnomalyLog log)
     {
         this.log = log;
@@ -179,10 +192,44 @@ public sealed unsafe class FateStarter : IDisposable
 
         this.CancelMovement(navigation);
         this.approachStarted = default;
+
         // 既に開いていた選択肢や会話は、この操作の所有物ではない。
         foreach (var name in new[] { "Talk", "SelectYesno", "SelectString", "SelectIconString" })
             if (GenericHelpers.TryGetAddonByName<AtkUnitBase>(name, out var addon) && GenericHelpers.IsAddonReady(addon))
                 return false;
+
+        // **声をかける側にも時間を切る。**
+        //
+        // StepInteract は「硬直中」「戦闘中」「まだ狙えていない」で
+        // false を返すだけなので、理由が解消しないかぎり永久に回る。
+        // ここには上限が無く、東ラノシアの開始 NPC で止まったままになっていた
+        // （2026-10-09 実機。FATE の前に雑魚へ絡まれていると戦闘が解けない）。
+        if (this.interactStarted == default) this.interactStarted = DateTime.UtcNow;
+
+        var blocker = InteractionService.DescribeInteractBlocker(npc);
+
+        if (DateTime.UtcNow - this.interactStarted > InteractPatience)
+        {
+            this.talked.Add(npc.GameObjectId);
+            this.log.Warn(
+                "Fate",
+                $"開始 NPC {npc.Name} に声をかけられませんでした（{(blocker.Length > 0 ? blocker : "理由不明")}）。" +
+                "この出現では再試行しません");
+
+            this.interactStarted = default;
+            return false;
+        }
+
+        // 理由が変わったときだけ記録する。毎フレーム書くとログが埋まる。
+        if (blocker != this.lastBlocker)
+        {
+            this.lastBlocker = blocker;
+
+            if (blocker.Length > 0)
+            {
+                this.log.Info("Fate", $"{npc.Name} にまだ声をかけられません: {blocker}");
+            }
+        }
 
         this.ownership.IsClaiming = true;
         var now = DateTime.UtcNow;
@@ -192,10 +239,15 @@ public sealed unsafe class FateStarter : IDisposable
             this.talked.Add(npc.GameObjectId);
             this.dialogStarted = now;
             this.dialogNpc = npc.EntityId;
+            this.interactStarted = default;
             this.log.Info("Fate", $"開始 NPC に声をかけました: {npc.Name} ({npc.EntityId:X})");
         }
         else this.ownership.IsClaiming = false;
-        this.Detail = $"開始 NPC {npc.Name} に声をかけています";
+
+        this.Detail = blocker.Length > 0
+            ? $"開始 NPC {npc.Name} に声をかけています（{blocker}）"
+            : $"開始 NPC {npc.Name} に声をかけています";
+
         return true;
     }
 
@@ -347,6 +399,8 @@ public sealed unsafe class FateStarter : IDisposable
         this.hasStandSpot = false;
         this.standCursor = 0;
         this.standSpot = default;
+        this.interactStarted = default;
+        this.lastBlocker = string.Empty;
     }
 
     /// <summary>

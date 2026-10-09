@@ -2,6 +2,7 @@ using System;
 using System.Linq;
 using System.Numerics;
 using AutoCollector.Diagnostics;
+using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.ClientState.Objects.Enums;
 using Dalamud.Game.ClientState.Objects.Types;
 using ECommons;
@@ -91,6 +92,46 @@ public sealed unsafe class InteractionService(AnomalyLog anomalyLog)
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// いま話しかけられない理由。話しかけられるなら空文字。
+    ///
+    /// <b>「進まない」を「理由の分かる進まない」に変えるために置く。</b>
+    /// <see cref="StepInteract"/> は false を返すだけなので、
+    /// 外からは「硬直しているのか」「戦闘中なのか」「狙えていないのか」が
+    /// 区別できず、止まったまま時間だけが過ぎていた。
+    /// </summary>
+    public static string DescribeInteractBlocker(IGameObject npc)
+    {
+        if (!npc.IsTargetable)
+        {
+            return "相手を狙える状態ではありません";
+        }
+
+        if (Svc.Condition[ConditionFlag.InCombat])
+        {
+            // 戦闘中は会話そのものが始められない。
+            // FATE の前に雑魚へ絡まれていると、ここで止まり続ける。
+            return "戦闘中です";
+        }
+
+        if (Player.IsAnimationLocked)
+        {
+            return "技の硬直が解けていません";
+        }
+
+        if (GenericHelpers.IsOccupied())
+        {
+            return "ほかの操作の最中です";
+        }
+
+        if (Svc.Targets.Target?.Address != npc.Address)
+        {
+            return "相手を狙っているところです";
+        }
+
+        return string.Empty;
     }
 
     /// <summary>
