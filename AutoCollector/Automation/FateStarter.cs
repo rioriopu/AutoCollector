@@ -35,8 +35,6 @@ public sealed unsafe class FateStarter : IDisposable
     /// <summary>選択肢を選んだか。同じ選択肢を押し続けない。</summary>
     private bool pickedMenu;
 
-    /// <summary>Talk を進めたか。自分が触ったものだけ閉じるために持つ。</summary>
-    private bool advancedTalk;
     private DateTime started;
 
     public FateStarter(AnomalyLog log)
@@ -155,7 +153,6 @@ public sealed unsafe class FateStarter : IDisposable
             ECommons.GenericHelpers.IsAddonReady(talk))
         {
             this.sawDialog = true;
-            this.advancedTalk = true;
             return this.interaction.TryAdvanceTalk();
         }
 
@@ -238,7 +235,6 @@ public sealed unsafe class FateStarter : IDisposable
         this.dialogNpc = 0;
         this.sawDialog = false;
         this.pickedMenu = false;
-        this.advancedTalk = false;
         this.ownership.Clear();
     }
 

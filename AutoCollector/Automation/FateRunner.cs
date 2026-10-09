@@ -217,8 +217,15 @@ public sealed class FateRunner(
     /// </summary>
     private const float TightPathTolerance = 0.05f;
 
-    /// <summary>vnavmesh の既定の許容値。詰めたあとはここへ戻す。</summary>
-    private const float DefaultPathTolerance = 0.25f;
+    /// <summary>
+    /// 詰めたあとに戻す許容値。
+    ///
+    /// <b>この設定は vnavmesh 全体で 1 つしかない。</b>
+    /// 持ち主は <see cref="NavigationService"/> に 1 つへまとめてある。
+    /// ここで直に <c>SetTolerance</c> を呼ぶと、移動を始め直したときに
+    /// 既定へ戻されて、詰めたつもりが効かない。
+    /// </summary>
+    private const float DefaultPathTolerance = NavigationService.DefaultTolerance;
 
     /// <summary>降りられる場所を探すとき、中心から何周ぶん見るか。</summary>
     private const int LandableSearchRings = 4;
@@ -728,6 +735,10 @@ public sealed class FateRunner(
     {
         this.trace.Decision("開始を押した", $"段階={this.Step}");
 
+        // 移動権の受け渡しを差し込む。歩かせる場所を数え上げなくて済むように、
+        // 移動の入れ物の側から呼んでもらう。
+        this.WireMovementGate();
+
         if (this.IsRunning)
         {
             reason = "すでに動いています";
@@ -1143,7 +1154,7 @@ public sealed class FateRunner(
         }
 
         this.tightenedPath = false;
-        this.vnavmesh.TrySetPathTolerance(DefaultPathTolerance);
+        this.navigation.SetTolerance(DefaultPathTolerance);
     }
 
     /// <summary>
@@ -2730,7 +2741,7 @@ public sealed class FateRunner(
             if (!this.tightenedPath)
             {
                 this.tightenedPath = true;
-                this.vnavmesh.TrySetPathTolerance(TightPathTolerance);
+                this.navigation.SetTolerance(TightPathTolerance);
             }
 
             this.trace.Decision(
@@ -5091,6 +5102,31 @@ public sealed class FateRunner(
     }
 
     /// <summary>
+    /// 移動の入れ物へ「移動権の受け渡し」を差し込む。
+    ///
+    /// <b>手で止める場所を数え上げるのをやめる。</b>
+    /// これまでは、歩かせる場所ごとに <see cref="ParkPresetMovement"/> を
+    /// 置いていた。置き忘れた経路（FATE へ向かう移動、終わったあとの離脱）では
+    /// プリセットの移動と vnavmesh が取り合っていた。
+    ///
+    /// <see cref="NavigationService"/> は「いつ動かし始めて、いつ終わったか」を
+    /// 必ず知っている。そこから呼んでもらえば、置き忘れが無くなる。
+    /// プリセットの名前を知っているのはこちらだけなので、中身はこちらが持つ。
+    /// </summary>
+    private void WireMovementGate()
+        => this.navigation.ExternalMovementGate = park =>
+        {
+            if (park)
+            {
+                this.ParkPresetMovement();
+            }
+            else
+            {
+                this.ResumePresetMovement();
+            }
+        };
+
+    /// <summary>
     /// vnavmesh で歩かせる間、プリセットの移動（NormalMovement）を止める。
     ///
     /// <b>両方が同時に動かすと取り合いになる。</b>
@@ -5271,38 +5307,14 @@ public sealed class FateRunner(
     }
 
     /// <summary>
-    /// 跳ぶ。段差や small な引っかかりは、これだけで外れる。
+    /// 跳ぶ。段差や小さな引っかかりは、これだけで外れる。
     ///
-    /// 飛んでいる最中は跳べないので何もしない。
-    /// ICE も詰まったときの手当てとして同じことをしている
-    /// （逆コンパイルして確認。CheckIfIsStuck の JumpIfStuck）。
+    /// <b>実装は <see cref="MountService.TryJumpOnGround"/> が持つ。</b>
+    /// ジャンプのアクション番号と「撃ってよい状態」の判定を
+    /// 2 か所に書くと、片方だけ直したときに食い違う。
+    /// ここと <see cref="NavigationService"/> の詰まり脱出が同じものを使う。
     /// </summary>
-    private static unsafe void TryJump()
-    {
-        try
-        {
-            if (MountService.IsFlying || Svc.Condition[ConditionFlag.Jumping] || Svc.Condition[ConditionFlag.Jumping61])
-            {
-                return;
-            }
-
-            var am = FFXIVClientStructs.FFXIV.Client.Game.ActionManager.Instance();
-            if (am is null)
-            {
-                return;
-            }
-
-            // GeneralAction 2 が「ジャンプ」。
-            if (am->GetActionStatus(FFXIVClientStructs.FFXIV.Client.Game.ActionType.GeneralAction, 2) == 0)
-            {
-                am->UseAction(FFXIVClientStructs.FFXIV.Client.Game.ActionType.GeneralAction, 2);
-            }
-        }
-        catch
-        {
-            // 跳べなくても進行は止めない。
-        }
-    }
+    private static void TryJump() => MountService.TryJumpOnGround();
 
     /// <summary>
     /// 戦闘不能の画面からホームポイントへ戻る。

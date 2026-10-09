@@ -572,7 +572,7 @@ public sealed class Plugin : IDalamudPlugin
         this.VentureBellRunner = new VentureBellRunner(
             this.AnomalyLog,
             this.FateTrace,
-            new NavigationService(this.AnomalyLog, this.Vnavmesh),
+            new NavigationService(this.AnomalyLog, this.Vnavmesh, this.BossMod),
             this.AutoRetainer);
         this.VentureWatcher = new VentureWatcher(
             this.AnomalyLog,
@@ -585,7 +585,7 @@ public sealed class Plugin : IDalamudPlugin
         this.FateRunner = new FateRunner(
             this.AnomalyLog,
             this.FateScanner,
-            new NavigationService(this.AnomalyLog, this.Vnavmesh),
+            new NavigationService(this.AnomalyLog, this.Vnavmesh, this.BossMod),
             this.BossMod,
             this.BuddyService,
             this.MountService,
@@ -607,7 +607,7 @@ public sealed class Plugin : IDalamudPlugin
             this.ShopService,
             this.CurrencyService,
             this.ExchangeResolver,
-            new NavigationService(this.AnomalyLog, this.Vnavmesh),
+            new NavigationService(this.AnomalyLog, this.Vnavmesh, this.BossMod),
             new InteractionService(this.AnomalyLog),
             this.MenuService,
             this.AddonOwnership,
@@ -648,7 +648,7 @@ public sealed class Plugin : IDalamudPlugin
 
             // 呼び鈴まで歩くための足。交換の移動とは別物にする。
             // 同時には走らない（GoalRunner が順番に動かす）ので取り合わない。
-            new NavigationService(this.AnomalyLog, this.Vnavmesh),
+            new NavigationService(this.AnomalyLog, this.Vnavmesh, this.BossMod),
             this.BellLocations);
         this.CraftRunner = new CraftRunner(this.AnomalyLog, this.CurrencyService, this.Artisan);
 

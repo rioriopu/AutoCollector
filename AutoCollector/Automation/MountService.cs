@@ -654,6 +654,52 @@ public sealed unsafe class MountService(AnomalyLog anomalyLog, FateTrace trace)
         }
     }
 
+    /// <summary>
+    /// 地上で跳ぶ。段差や小さな引っかかりは、これだけで外れる。
+    ///
+    /// <b>飛んでいる最中・跳躍中は撃たない。</b>
+    /// 空中でジャンプを撃つと、ゲーム自身の降下が終わってしまう
+    /// （それを狙う場合は <see cref="CancelDescent"/> を使う）。
+    /// 跳躍中に撃つのは無駄で、乗っているときに撃つと降車が弾かれ、
+    /// 降りようとしては跳ぶ、を繰り返す（2026-09-26 実測）。
+    ///
+    /// ICE も詰まったときの手当てとして同じことをしている
+    /// （逆コンパイルして確認。CheckIfIsStuck の JumpIfStuck）。
+    /// </summary>
+    /// <returns>撃てたら true。撃つべきでない状態なら false。</returns>
+    public static bool TryJumpOnGround()
+    {
+        try
+        {
+            if (IsFlying || IsMounted ||
+                Svc.Condition[ConditionFlag.Jumping] ||
+                Svc.Condition[ConditionFlag.Jumping61])
+            {
+                return false;
+            }
+
+            var am = ActionManager.Instance();
+            if (am is null)
+            {
+                return false;
+            }
+
+            // 撃てない状態で撃つと、無駄なエラー音が鳴る。先に状態を見る。
+            if (am->GetActionStatus(ActionType.GeneralAction, JumpAction) != 0)
+            {
+                return false;
+            }
+
+            am->UseAction(ActionType.GeneralAction, JumpAction);
+            return true;
+        }
+        catch
+        {
+            // 跳べなくても進行は止めない。
+            return false;
+        }
+    }
+
     private bool TryMount()
     {
         if (!EzThrottler.Throttle("AutoCollector.Mount", ActionThrottleMs))

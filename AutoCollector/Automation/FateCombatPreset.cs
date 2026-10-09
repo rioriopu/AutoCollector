@@ -138,6 +138,17 @@ public static class FateCombatPreset
     private const string ModuleFateUtils = "BossMod.Autorotation.MiscAI.FateUtils";
     private const string ModuleNormalMovement = "BossMod.Autorotation.MiscAI.NormalMovement";
 
+    /// <summary>
+    /// 移動先の決め方のトラック。
+    ///
+    /// 値は <c>DestinationStrategy { None, Pathfind, Explicit }</c>
+    /// （BossmodReborn/BossMod/Autorotation/MiscAI/NormalMovement.cs:8 で確認）。
+    /// <c>None</c> は "No automatic movement"、つまり動かない。
+    /// vnavmesh で動かしている間は <see cref="FateRunner"/> が
+    /// 一時方針で <c>None</c> を入れ、終わったら外す。
+    /// </summary>
+    private const string TrackDestination = "Destination";
+
     private static readonly (string Module, string Track, string Option)[] Forbidden =
     [
         (ModuleFateUtils, "Handin", "Disabled"),
@@ -205,7 +216,7 @@ public static class FateCombatPreset
         (ModuleAutoTarget, "FATE", "Enabled"),
 
         // Pathfind は 1 番。書かれていなければ移動しない。
-        (ModuleNormalMovement, "Destination", "Pathfind"),
+        (ModuleNormalMovement, TrackDestination, "Pathfind"),
     ];
 
     /// <summary>

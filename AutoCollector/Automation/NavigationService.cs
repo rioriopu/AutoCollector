@@ -1,7 +1,8 @@
-﻿using System;
+using System;
 using System.Numerics;
 using AutoCollector.Diagnostics;
 using AutoCollector.Ipc;
+using Dalamud.Game.ClientState.Conditions;
 using ECommons.DalamudServices;
 using ECommons.GameHelpers;
 
@@ -35,14 +36,57 @@ public enum MoveStatus
 /// <summary>
 /// vnavmesh を使ったエリア内の移動。
 ///
+/// <b>ここは vnavmesh の代わりではない。公式に足りない分だけを足す層。</b>
+///
+/// 経路探索・経路追従・障害物回避・飛行経路の生成は、すべて公式 vnavmesh が持つ。
+/// こちらで作り直さない。公式の実装のほうが遥かに作り込まれているうえ、
+/// 二重に持つと更新に追従できなくなる。
+///
+/// 一方で、vnavmesh は「言われた点へ経路を引いて走る」ところまでが仕事で、
+/// 自動化の側が困るところは面倒を見てくれない。その差分がここの役目になる。
+///
+/// <list type="number">
+/// <item>
+/// <b>目的地のサニタイズ。</b>
+/// NPC やモブの座標はメッシュに乗っていないことがある。
+/// vnavmesh の <c>NearestPoint</c> は到達できない孤島（柵の内側、
+/// 別の階層の棚）も平気で返すため、そこへ向かわせると永久に着かない。
+/// <c>NearestPointReachable</c> は自分がいる連結成分からだけ選ぶので、
+/// こちらを使う。どちらを使うかは公式が呼び出し側へ委ねている。
+/// </item>
+/// <item>
+/// <b>到着の自前判定。</b>
 /// vnavmesh は経路探索に失敗しても例外を握り潰してログを出すだけで、
-/// 経路が空のまま終わる。つまり「移動失敗」と「移動完了」が IPC の状態としては同じになる。
-/// そのため距離とタイムアウトの確認が必須になる。
+/// 経路が空のまま終わる。つまり「移動失敗」と「移動完了」が
+/// IPC の状態としては同じになる。距離で見るしかない。
+/// </item>
+/// <item>
+/// <b>詰まり検知と脱出。</b>
+/// vnavmesh 側の自動再試行は、こちらが何をしたいかを知らない。
+/// 進めていないことを自分で測り、跳ねて外して引き直す。
+/// </item>
+/// <item>
+/// <b>引き直しの間隔制御。</b>
+/// vnavmesh は毎フレーム <c>MoveTo</c> を投げても受け取ってしまい、
+/// 探索を積んでは捨てるを繰り返して暴れる。最短間隔をこちらで持つ。
+/// </item>
+/// <item>
+/// <b>追従の許容値（Tolerance）の持ち主を 1 つにする。</b>
+/// この設定は vnavmesh 全体で 1 つしかない。他のプラグインが
+/// 変えていることがあるので、移動を始めるたびに入れ直す。
+/// </item>
+/// <item>
+/// <b>外部プラグインとの移動権の受け渡し。</b>
+/// BMR の AI も同じキャラクターを動かそうとする。取り合うと
+/// 前にも後ろにも進まない。こちらが動かしている間だけ
+/// 協調的に止めてもらい、<b>終わったら必ず戻す</b>。
+/// </item>
+/// </list>
 ///
 /// また vnavmesh 側の設定でスタック時に自動再試行が働くため、
 /// 走行フラグは false と true を往復する。1 回 false を見ただけで完了と判定してはいけない。
 /// </summary>
-public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmesh)
+public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmesh, BossModIpc bossMod)
 {
     /// <summary>
     /// 到着したと認める前に、条件を満たし続ける必要のある判定回数。
@@ -52,10 +96,72 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
     /// </summary>
     private const int RequiredStableFrames = 3;
 
-    private static readonly TimeSpan StuckWindow = TimeSpan.FromSeconds(15);
+    /// <summary>
+    /// 経路を引き直す最短間隔。
+    ///
+    /// <b>毎フレーム投げてはいけない。</b>
+    /// vnavmesh の MoveTo は探索を積むだけで、積んだ時点では何も起きない
+    /// （AsyncMoveRequest.cs: _pendingTask を置き、Update が IsCompleted を
+    /// 見てから _follow.Move を呼ぶ）。毎フレーム投げると、終わる前に
+    /// 次の探索で上書きされ続け、いつまでも走り出さない。
+    /// </summary>
+    private static readonly TimeSpan ReissueInterval = TimeSpan.FromMilliseconds(500);
+
+    /// <summary>
+    /// 移動の層の詰まり判定。この時間の間に <see cref="StallProgressMeters"/>
+    /// も進めていなければ、引っかかっているものとして手当てする。
+    ///
+    /// 走っていれば毎秒 6 ヤルム前後は進むので、1 ヤルムはかなり低い線引き。
+    /// 普通に走れているときに踏むことはない。
+    /// </summary>
+    private static readonly TimeSpan StallWindow = TimeSpan.FromMilliseconds(1000);
+
+    /// <summary>詰まっていないと認める、<see cref="StallWindow"/> の間の移動量。</summary>
+    private const float StallProgressMeters = 1.0f;
+
+    /// <summary>
+    /// 跳んだあと、引き直すまでに置く間。
+    ///
+    /// 着地した直後はまだ姿勢が戻っていない。その場で引き直すと
+    /// 跳ぶ前と同じ場所から同じ経路を引くことになる。
+    /// </summary>
+    private static readonly TimeSpan JumpSettleDelay = TimeSpan.FromMilliseconds(300);
+
+    /// <summary>
+    /// 作業の層の詰まり判定。これを過ぎたら呼び出し側へ返して、
+    /// 別の手（迂回・力づくの脱出・その目的地を諦める）を打たせる。
+    ///
+    /// <b>移動の層より十分長く取る。</b>
+    /// 跳ねて外す手当てが効くかどうかを見てから返したい。
+    /// </summary>
+    private static readonly TimeSpan StuckWindow = TimeSpan.FromSeconds(10);
+
+    /// <summary><see cref="StuckWindow"/> の間に、これだけ進めば詰まっていない。</summary>
+    private const float StuckProgressMeters = 1.0f;
+
+    /// <summary>1 回の移動で、跳ねて外すのを試す上限。</summary>
+    private const int MaxEscapes = 2;
+
+    /// <summary>
+    /// 追従の許容値の既定。vnavmesh 自身の既定と同じ値。
+    ///
+    /// 大きいほど経路を端折って曲がり角を内側に切る。
+    /// 狭い通路ではそれが壁への接触になるため、呼び出し側が
+    /// <see cref="SetTolerance"/> で詰めることがある。
+    /// </summary>
+    public const float DefaultTolerance = 0.25f;
+
+    /// <summary>目的地をメッシュへ乗せるときに広げていく探索範囲（水平, 垂直）。</summary>
+    private static readonly (float Flat, float Height)[] SanitiseSteps =
+    [
+        (3f, 5f),
+        (6f, 10f),
+        (12f, 20f),
+    ];
 
     private readonly AnomalyLog anomalyLog = anomalyLog;
     private readonly VnavmeshIpc vnavmesh = vnavmesh;
+    private readonly BossModIpc bossMod = bossMod;
 
     /// <summary>
     /// 直前の <see cref="BeginMove(Vector3, float, bool, out string)"/> が
@@ -70,14 +176,69 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
 
     /// <summary>直前の移動を飛行で頼んだか。引き直すときに同じ条件を使う。</summary>
     private bool issuedWithFly;
+
+    /// <summary>
+    /// 実際に vnavmesh へ渡した目的地。
+    ///
+    /// 呼び出し側が渡してきた生の座標とは違うことがある
+    /// （メッシュへ乗せ直しているため）。引き直すときはこちらを使う。
+    /// </summary>
+    private Vector3 issuedDestination;
+
     private int stableFrames;
     private int idleShortFrames;
     private uint startTerritory;
+
+    /// <summary>移動の層の見張り。</summary>
+    private Vector3 stallPosition;
+    private DateTime stallSinceUtc;
+
+    /// <summary>作業の層の見張り。</summary>
     private Vector3 lastPosition;
     private DateTime lastMovementUtc;
-    private bool retriedAfterStuck;
+
+    private DateTime lastIssueUtc;
+    private int escapes;
+
+    /// <summary>跳んだ時刻。<c>default</c> なら跳んでいない。</summary>
+    private DateTime escapeJumpedUtc;
+
+    /// <summary>いま入れてある追従の許容値。移動を始めるたびに入れ直す。</summary>
+    private float desiredTolerance = DefaultTolerance;
+
+    /// <summary>BMR の AI の移動を、こちらが止めているか。</summary>
+    private bool pausedExternalMovement;
 
     public bool IsAvailable => this.vnavmesh.IsLoaded;
+
+    /// <summary>
+    /// 移動権の受け渡し先。
+    ///
+    /// <b>プリセットの移動は、プリセットの名前を知っている側にしか止められない。</b>
+    /// BMR で実際にキャラクターを動かすのは、有効なプリセットの中の
+    /// NormalMovement モジュール。それを黙らせるには
+    /// 一時方針をそのプリセットへ入れる必要があり、名前を持っているのは
+    /// <see cref="FateRunner"/>。こちらは「いつ動かし始めて、いつ終わったか」
+    /// しか知らない。そこで、知っている側に差し込んでもらう。
+    ///
+    /// true で呼ばれたら黙る、false で呼ばれたら戻す。
+    /// 差し込まれていなければ何もしない（交換や呼び鈴の移動では
+    /// プリセットを入れていないため、止めるものが無い）。
+    /// </summary>
+    public Action<bool>? ExternalMovementGate { get; set; }
+
+    /// <summary>
+    /// 追従の許容値を決める。
+    ///
+    /// <b>この設定は vnavmesh 全体で 1 つしかない。</b>
+    /// 直に <c>SetTolerance</c> を呼ぶと、こちらが移動を始め直したときに
+    /// 既定へ戻してしまい、詰めたつもりが効かない。持ち主をここに 1 つへまとめる。
+    /// </summary>
+    public void SetTolerance(float meters)
+    {
+        this.desiredTolerance = meters;
+        this.vnavmesh.TrySetPathTolerance(meters);
+    }
 
     /// <summary>
     /// 目的地をナビメッシュ上の床へスナップする。
@@ -88,8 +249,12 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
         snapped = position;
 
         // まずメッシュ上の最近傍を探す。建物の中でもその場の床に乗る。
-        // 探索範囲を狭くしているのは、遠くの別の場所を拾わないため。
-        if (this.vnavmesh.TryNearestPoint(position, 2f, 2f, out var nearest) &&
+        //
+        // **NearestPoint ではなく NearestPointReachable を使う。**
+        // NearestPoint は距離だけで選ぶので、柵の内側や別の階層の棚のように
+        // 到達できない点を返す。そこへ向かわせると、経路が引けないまま
+        // 延々と引き直すことになる。Reachable は自分がいる連結成分からだけ選ぶ。
+        if (this.vnavmesh.TryNearestPointReachable(position, 2f, 2f, out var nearest) &&
             nearest is not null &&
             Vector3.Distance(nearest.Value, position) <= 3f)
         {
@@ -128,9 +293,21 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
     /// </summary>
     public bool Reissue(Vector3 destination, float range, out string failureReason)
     {
+        // **引き直しには最短間隔を置く。**
+        //
+        // 呼び出し側は動く相手（モブ、納品 NPC）を追うために毎フレーム
+        // ここへ来る。そのたびに探索を積むと、終わる前に次で上書きされ続け、
+        // いつまでも走り出さない。間隔の内なら「いま引き直す必要はない」として
+        // 成功を返す。元の経路はまだ生きているので、歩き続ける。
+        if (this.moveIssued && DateTime.UtcNow - this.lastIssueUtc < ReissueInterval)
+        {
+            failureReason = string.Empty;
+            return true;
+        }
+
         var wasMoving = this.moveIssued;
 
-        if (this.BeginMove(destination, range, out failureReason))
+        if (this.BeginMove(destination, range, this.issuedWithFly, out failureReason))
         {
             return true;
         }
@@ -163,10 +340,13 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
         this.moveIssued = false;
         this.stableFrames = 0;
         this.idleShortFrames = 0;
-        this.retriedAfterStuck = false;
+        this.escapes = 0;
+        this.escapeJumpedUtc = default;
         this.startTerritory = Svc.ClientState.TerritoryType;
         this.lastPosition = Player.Available ? Player.Position : default;
         this.lastMovementUtc = DateTime.UtcNow;
+        this.stallPosition = this.lastPosition;
+        this.stallSinceUtc = this.lastMovementUtc;
 
         // **入口で Busy を倒す。**
         //
@@ -202,7 +382,16 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
             return false;
         }
 
-        if (!this.vnavmesh.TryMoveCloseTo(destination, fly, range, out var accepted))
+        // **追従の許容値を毎回入れ直す。**
+        //
+        // この設定は vnavmesh 全体で 1 つしかなく、他のプラグインが
+        // 変えていることがある。移動のたびに、こちらが望む値へ揃える。
+        this.vnavmesh.TrySetPathTolerance(this.desiredTolerance);
+
+        // 目的地をメッシュへ乗せ直す。飛ぶときは空中の点を狙っているので触らない。
+        var target = fly ? destination : this.Sanitise(destination);
+
+        if (!this.vnavmesh.TryMoveCloseTo(target, fly, range, out var accepted))
         {
             failureReason = "vnavmesh へ移動を依頼できませんでした";
             return false;
@@ -226,6 +415,12 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
 
         this.moveIssued = true;
         this.issuedWithFly = fly;
+        this.issuedDestination = target;
+        this.lastIssueUtc = DateTime.UtcNow;
+
+        // ここから先はこちらが動かす。BMR には手を引いてもらう。
+        this.TakeOverExternalMovement();
+
         failureReason = string.Empty;
         return true;
     }
@@ -235,7 +430,7 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
     {
         if (!this.moveIssued)
         {
-            return MoveStatus.Failed;
+            return this.Finish(MoveStatus.Failed);
         }
 
         if (!Player.Available)
@@ -247,17 +442,18 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
         if (Svc.ClientState.TerritoryType != this.startTerritory)
         {
             this.anomalyLog.Warn("Navigation", "移動中にエリアが変わりました");
-            return MoveStatus.Failed;
+            return this.Finish(MoveStatus.Failed);
         }
 
         var position = Player.Position;
+        var now = DateTime.UtcNow;
 
         // 走行状態を 3 つとも見る。1 つでも進行中なら移動継続とみなす。
         if (!this.vnavmesh.TryPathIsRunning(out var running) ||
             !this.vnavmesh.TryNavPathfindInProgress(out var navPathfinding) ||
             !this.vnavmesh.TrySimpleMovePathfindInProgress(out var simplePathfinding))
         {
-            return MoveStatus.Failed;
+            return this.Finish(MoveStatus.Failed);
         }
 
         var idle = !running && !navPathfinding && !simplePathfinding;
@@ -268,6 +464,13 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
             this.stableFrames++;
             if (this.stableFrames >= RequiredStableFrames)
             {
+                // **ここでは移動権を返さない。**
+                //
+                // 着いたことを返しても、呼び出し側が動かすのを
+                // やめたとは限らない（動く相手を追っている最中は、
+                // 着いた・引き直すを行き来する）。そのたびに BMR へ
+                // 返して奪い直すと、相手の移動が途切れ途切れになる。
+                // 返すのは Stop() を受けたとき。呼び出し側は到着時に必ず呼ぶ。
                 return MoveStatus.Arrived;
             }
 
@@ -278,7 +481,7 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
 
         // vnavmesh が走り終わったのに届いていない。
         //
-        // この状態から放置しても二度と動かない。以前はスタック判定（15 秒）が
+        // この状態から放置しても二度と動かない。以前はスタック判定が
         // 拾うまで棒立ちになっていた。走り終わったことはその場で分かるので待つ必要がない。
         //
         // 目的地に届かない理由の多くは、NPC がカウンターの内側など
@@ -292,6 +495,8 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
                 this.anomalyLog.Info(
                     "Navigation",
                     $"経路の終点に着きましたが目的地まで {distance:F1} ヤルム残っています");
+
+                // 到着と同じ扱い。返すのは Stop() を受けたとき。
                 return MoveStatus.ShortOfTarget;
             }
 
@@ -300,40 +505,41 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
 
         this.idleShortFrames = 0;
 
-        // スタック判定。座標がほとんど動いていない状態が続いたら 1 度だけ再発行する。
-        if (Vector3.DistanceSquared(position, this.lastPosition) > 0.01f)
+        // ---- 移動の層：跳ねて外し、引き直す ----
+        this.TickStallEscape(position, now, running, navPathfinding || simplePathfinding, range);
+
+        // ---- 作業の層：ここまで来たら呼び出し側へ返す ----
+        //
+        // **移動の層より長く待つ。** 跳ねて外す手当てが効いたかどうかを
+        // 見てから返したい。返したあとは、呼び出し側が迂回なり
+        // 力づくの脱出なり、別の手を打つ。
+        if (Vector3.DistanceSquared(position, this.lastPosition) > StuckProgressMeters * StuckProgressMeters)
         {
             this.lastPosition = position;
-            this.lastMovementUtc = DateTime.UtcNow;
+            this.lastMovementUtc = now;
         }
-        else if (DateTime.UtcNow - this.lastMovementUtc > StuckWindow)
+        else if (now - this.lastMovementUtc > StuckWindow)
         {
-            if (this.retriedAfterStuck)
-            {
-                return MoveStatus.Stuck;
-            }
+            this.anomalyLog.Warn(
+                "Navigation",
+                $"{StuckWindow.TotalSeconds:F0} 秒間 {StuckProgressMeters:F0} ヤルムも進めていません");
 
-            this.anomalyLog.Warn("Navigation", "移動が止まったため、経路を引き直します");
-            this.retriedAfterStuck = true;
-            this.lastMovementUtc = DateTime.UtcNow;
-
-            this.vnavmesh.TryStop();
-
-            // **元の移動のしかたを引き継ぐ。**
-            // ここで fly=false に固定していたため、飛んで向かっていたのに
-            // 引き直した途端、地上の経路になっていた。
-            if (!this.vnavmesh.TryMoveCloseTo(destination, this.issuedWithFly, range, out var accepted) || !accepted)
-            {
-                return MoveStatus.Stuck;
-            }
+            return this.Finish(MoveStatus.Stuck);
         }
 
         return MoveStatus.Moving;
     }
 
-    /// <summary>移動を止める。自分が開始していない場合は何もしない。</summary>
+    /// <summary>移動を止める。</summary>
     public void Stop()
     {
+        // **移動権の返却は、自分が発行したかどうかに関わらず行う。**
+        //
+        // 以前は moveIssued を見て早々に返していた。移動を頼んだあとに
+        // 経路が失敗して moveIssued が倒れると、BMR を止めたまま
+        // 誰も戻さないことになり、BMR が二度と動かなかった。
+        this.ReleaseExternalMovement();
+
         if (!this.moveIssued)
         {
             return;
@@ -341,5 +547,286 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
 
         this.vnavmesh.TryStop();
         this.moveIssued = false;
+        this.escapeJumpedUtc = default;
+    }
+
+    /// <summary>
+    /// 外部プラグインから奪った移動権を返す。
+    ///
+    /// <b>緊急停止やプラグインの終了時にも必ず通す。</b>
+    /// 戻し忘れると、こちらを止めたあとも BMR が動けないままになる。
+    /// </summary>
+    public void ReleaseExternalMovement()
+    {
+        if (!this.pausedExternalMovement)
+        {
+            return;
+        }
+
+        this.pausedExternalMovement = false;
+
+        // 外せなくても立て直さない。立てたままにするより、
+        // 外れていないことを記録に残して先へ進む。
+        if (!this.bossMod.TryPauseMovement(false))
+        {
+            this.anomalyLog.Warn("Navigation", "BMR の AI の移動の停止を解除できませんでした");
+        }
+
+        // **こちらは必ず通す。** 一時方針を入れたまま戻さないと、
+        // 戦闘へ渡したあとも BMR が動かず、敵に近づかなくなる。
+        try
+        {
+            this.ExternalMovementGate?.Invoke(false);
+        }
+        catch (Exception ex)
+        {
+            this.anomalyLog.Warn("Navigation", $"BMR の移動を戻せませんでした: {ex.Message}");
+        }
+    }
+
+    // ---- 部品 ----
+
+    /// <summary>
+    /// 目的地をメッシュへ乗せ直す。
+    ///
+    /// <b>乗せられなくても失敗にしない。</b>
+    /// 乗せられるならそのほうが良いが、乗せられないからといって
+    /// 向かわないのは行き過ぎ。公式の <c>MoveCloseTo</c> は
+    /// 自身でも近傍を探すため、生の座標で頼んでも着くことがある。
+    /// ここは「分かる範囲で良くする」だけに留める。
+    /// </summary>
+    private Vector3 Sanitise(Vector3 destination)
+    {
+        // まず真下の床。段差の上に立つ NPC はこれで乗る。
+        var seed = destination;
+
+        if (this.vnavmesh.TryPointOnFloor(destination, out var floor) &&
+            floor is { } onFloor &&
+            Vector3.Distance(onFloor, destination) <= 5f)
+        {
+            seed = onFloor;
+        }
+
+        // **到達できる点を選ぶ。**
+        // NearestPoint では柵の内側や別の階層の棚を返しうる。
+        // そこへ向かわせると経路が引けず、延々と引き直すことになる。
+        for (var i = 0; i < SanitiseSteps.Length; i++)
+        {
+            var (flat, height) = SanitiseSteps[i];
+
+            if (!this.vnavmesh.TryNearestPointReachable(seed, flat, height, out var near) ||
+                near is not { } reachable)
+            {
+                continue;
+            }
+
+            if (i > 0)
+            {
+                this.anomalyLog.Info(
+                    "Navigation",
+                    $"目的地をメッシュへ乗せるのに範囲を {flat:F0} ヤルムまで広げました" +
+                    $"（{Vector3.Distance(reachable, destination):F1} ヤルムずれます）");
+            }
+
+            return reachable;
+        }
+
+        // 乗せられなかった。生の座標のまま公式へ渡す。
+        this.anomalyLog.Info(
+            "Navigation",
+            "目的地をナビメッシュへ乗せられませんでした。そのまま vnavmesh へ渡します");
+
+        return seed;
+    }
+
+    /// <summary>
+    /// 移動の層の詰まり手当て。
+    ///
+    /// <b>公式の自動再試行とは役目が違う。</b>
+    /// vnavmesh 側の RetryOnStuck は「経路から外れたら引き直す」もので、
+    /// 段差や柵に正面から押し付けられている状態は抜けられない。
+    /// 跳ねれば外れることが多いので、まずそれを試す。
+    ///
+    /// ICE も詰まったときは「跳ぶ」と「経路を止めて引き直させる」の
+    /// 2 つだけで抜けている（逆コンパイルして確認。CheckIfIsStuck）。
+    /// </summary>
+    private void TickStallEscape(Vector3 position, DateTime now, bool running, bool pathfinding, float range)
+    {
+        // 跳んだあと。着地して落ち着いてから引き直す。
+        if (this.escapeJumpedUtc != default)
+        {
+            if (Svc.Condition[ConditionFlag.Jumping] ||
+                Svc.Condition[ConditionFlag.Jumping61] ||
+                now - this.escapeJumpedUtc < JumpSettleDelay)
+            {
+                return;
+            }
+
+            this.escapeJumpedUtc = default;
+
+            // **ここでは先に止める。**
+            //
+            // 目的地を変える引き直し（Reissue）では止めてはいけないが、
+            // 詰まりの手当ては逆。いま積まれている経路は、まさに
+            // 引っかかっている壁へ向かっている。残したまま引き直すと、
+            // 新しい経路が出来るまでの間、同じ壁を押し続ける。
+            this.vnavmesh.TryStop();
+            this.ReissueAfterEscape(range, "跳ねて外したので");
+            this.ResetProgress(position, now);
+            return;
+        }
+
+        // 経路を探している間は進まないのが当たり前。詰まりと数えない。
+        if (pathfinding || !running)
+        {
+            this.ResetProgress(position, now);
+            return;
+        }
+
+        // 自分の都合で止まっている間も数えない。
+        if (IsOccupied())
+        {
+            this.ResetProgress(position, now);
+            return;
+        }
+
+        if (Vector3.DistanceSquared(position, this.stallPosition) > StallProgressMeters * StallProgressMeters)
+        {
+            this.stallPosition = position;
+            this.stallSinceUtc = now;
+            return;
+        }
+
+        if (now - this.stallSinceUtc <= StallWindow)
+        {
+            return;
+        }
+
+        // 進めていない。手当てする。
+        this.stallSinceUtc = now;
+
+        // 跳ねて外す。乗っているとき・飛んでいるときは跳ばない
+        // （乗車中は降車が弾かれ、空中では降下が終わってしまう）。
+        if (this.escapes < MaxEscapes && MountService.TryJumpOnGround())
+        {
+            this.escapes++;
+            this.escapeJumpedUtc = now;
+
+            this.anomalyLog.Info(
+                "Navigation",
+                $"{StallWindow.TotalSeconds:F1} 秒で {StallProgressMeters:F0} ヤルムも進めないため跳ねます" +
+                $"（{this.escapes}/{MaxEscapes} 回目）");
+
+            return;
+        }
+
+        // 跳べない、あるいは跳んでも駄目だった。引き直すだけにする。
+        // ここで抜けられなければ、作業の層が Stuck を返して
+        // 呼び出し側の別の手（迂回・力づくの脱出）へ渡る。
+        this.vnavmesh.TryStop();
+        this.ReissueAfterEscape(range, "進めないので");
+    }
+
+    /// <summary>
+    /// 詰まりの手当てとして、同じ目的地へ引き直す。
+    ///
+    /// 目的地は <see cref="issuedDestination"/> を使う。呼び出し側が渡す
+    /// 生の座標ではなく、メッシュへ乗せ直した点のほうが経路が引ける。
+    /// </summary>
+    private void ReissueAfterEscape(float range, string why)
+    {
+        if (DateTime.UtcNow - this.lastIssueUtc < ReissueInterval)
+        {
+            return;
+        }
+
+        if (this.vnavmesh.TryMoveCloseTo(this.issuedDestination, this.issuedWithFly, range, out var accepted) &&
+            accepted)
+        {
+            this.lastIssueUtc = DateTime.UtcNow;
+            this.anomalyLog.Info("Navigation", $"{why}経路を引き直しました");
+            return;
+        }
+
+        // 断られた。次のフレームでまた試す。経路は止めてあるので
+        // その間は止まったままになるが、作業の層が有限時間で拾う。
+        this.anomalyLog.Info("Navigation", $"{why}経路を引き直そうとしましたが、まだ受け取れません");
+    }
+
+    /// <summary>進んでいないことの数え直し。両方の層をまとめて揃える。</summary>
+    private void ResetProgress(Vector3 position, DateTime now)
+    {
+        this.stallPosition = position;
+        this.stallSinceUtc = now;
+        this.lastPosition = position;
+        this.lastMovementUtc = now;
+    }
+
+    /// <summary>
+    /// こちらが動かしている間、BMR の AI には手を引いてもらう。
+    ///
+    /// <b>強制停止ではない。</b>BMR の移動だけを止める協調的な依頼で、
+    /// 戦闘はそのまま続く。止めなければ、同じキャラクターを
+    /// 2 つが別の向きへ動かそうとして、前にも後ろにも進まない
+    /// （とくに騎乗中は飛び上がれなくなる）。
+    /// </summary>
+    private void TakeOverExternalMovement()
+    {
+        if (this.pausedExternalMovement || !this.bossMod.IsLoaded)
+        {
+            return;
+        }
+
+        // 先に立てる。IPC が片方だけ通ったときに、戻す側が走らなくなるのを防ぐ。
+        this.pausedExternalMovement = true;
+
+        // ① AI の移動。
+        //
+        // こちらは AI を使わない方針（FateRunner が /bmrai off を送る）なので
+        // 普段は何も起きない。ただし利用者が自分で入れていることがあり、
+        // そのときは AI が同じキャラクターを別の向きへ動かそうとする。
+        this.bossMod.TryPauseMovement(true);
+
+        // ② プリセットの移動（NormalMovement）。
+        //
+        // AI を使わなくても、有効なプリセットがこれを持っていれば動く。
+        // 止められるのはプリセットの名前を知っている側だけ。
+        this.ExternalMovementGate?.Invoke(true);
+    }
+
+    /// <summary>
+    /// もう動かせない。移動権を返してから結果を返す。
+    ///
+    /// <b>行き止まりのときだけ通す。</b>
+    /// 到着（Arrived / ShortOfTarget）では返さない。呼び出し側が
+    /// 動かすのをやめたとは限らず、返して奪い直すと相手の移動が途切れる。
+    /// </summary>
+    private MoveStatus Finish(MoveStatus status)
+    {
+        this.ReleaseExternalMovement();
+        return status;
+    }
+
+    /// <summary>
+    /// 自分の都合で止まっている状態か。
+    ///
+    /// 詠唱・エリア移動・ムービーの間は進まないのが当たり前で、
+    /// これを詰まりと数えると、そのたびに無駄に跳ねて引き直すことになる。
+    /// </summary>
+    private static bool IsOccupied()
+    {
+        var c = Svc.Condition;
+
+        return c[ConditionFlag.Casting] ||
+               c[ConditionFlag.BetweenAreas] ||
+               c[ConditionFlag.BetweenAreas51] ||
+               c[ConditionFlag.WatchingCutscene] ||
+               c[ConditionFlag.WatchingCutscene78] ||
+               c[ConditionFlag.OccupiedInCutSceneEvent] ||
+               c[ConditionFlag.Mounting] ||
+               c[ConditionFlag.Mounting71] ||
+               c[ConditionFlag.Jumping] ||
+               c[ConditionFlag.Jumping61] ||
+               c[ConditionFlag.Unconscious];
     }
 }
