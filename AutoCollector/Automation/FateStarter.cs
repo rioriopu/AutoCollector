@@ -35,7 +35,30 @@ public sealed unsafe class FateStarter : IDisposable
     /// <summary>選択肢を選んだか。同じ選択肢を押し続けない。</summary>
     private bool pickedMenu;
 
+    /// <summary>いま向かっている立ち位置。</summary>
+    private Vector3 standSpot;
+
+    /// <summary>立ち位置が決まっているか。着いても用が足せなければ倒して、次を探す。</summary>
+    private bool hasStandSpot;
+
+    /// <summary>立ち位置をどこまで試したか。<see cref="NavigationService.TryPlanApproachSpot"/> が進める。</summary>
+    private int standCursor;
+
     private DateTime started;
+
+    /// <summary>立ち位置に着いたと認める距離。立ち位置そのものが目的地なので短くてよい。</summary>
+    private const float StandArrivalRange = 1.5f;
+
+    /// <summary>
+    /// 立ち位置として認める、相手までの距離。
+    ///
+    /// <see cref="InteractionService.IsWithinInteractRange"/> は 5.5 ヤルムで見る。
+    /// ぎりぎりを狙うと、着いた時点で判定から外れることがあるので余裕を取る。
+    /// </summary>
+    private const float StandMaxRange = 4.8f;
+
+    /// <summary>開始 NPC へ寄るのに与える上限。</summary>
+    private static readonly TimeSpan ApproachPatience = TimeSpan.FromSeconds(45);
 
     public FateStarter(AnomalyLog log)
     {
@@ -73,23 +96,84 @@ public sealed unsafe class FateStarter : IDisposable
         if (!InteractionService.IsWithinInteractRange(npc))
         {
             if (this.approachStarted == default) this.approachStarted = DateTime.UtcNow;
-            if (DateTime.UtcNow - this.approachStarted > TimeSpan.FromSeconds(30))
+            if (DateTime.UtcNow - this.approachStarted > ApproachPatience)
             {
                 this.talked.Add(npc.GameObjectId);
                 this.CancelMovement(navigation);
                 this.log.Warn("Fate", $"開始 NPC {npc.Name} に近づけませんでした。この出現では再試行しません");
                 return false;
             }
+
             this.Detail = $"開始 NPC {npc.Name} へ向かっています";
-            if (this.moving && navigation.Tick(npc.Position, 3f) == MoveStatus.Moving)
-                return true;
-            this.moving = false;
-            if (DateTime.UtcNow >= this.nextMove)
+
+            // **NPC の座標そのものを目的地にしない。**
+            //
+            // イエロージャケットのように柵やカウンターの内側に立つ NPC は
+            // ナビメッシュに乗らない。その座標へ頼むと、vnavmesh は
+            // 近づけるところまで行って終わり、対話できる距離に入らない。
+            // 以前はそれを検知できず、同じ場所へ 2 秒ごとに頼み直して
+            // 棒立ちのまま時間切れになっていた（2026-10-09 実機）。
+            //
+            // 相手の周りの「立てる場所」を、手前の側から順に当たっていく。
+            if (this.moving)
             {
-                this.nextMove = DateTime.UtcNow.AddSeconds(2);
-                this.moving |= navigation.BeginMove(npc.Position, 3f, false, out _);
-                if (this.moving) this.Destination = npc.Position;
+                var status = navigation.Tick(this.standSpot, StandArrivalRange);
+
+                if (status == MoveStatus.Moving)
+                {
+                    return true;
+                }
+
+                // 経路が終わった。ここで用が足せるかは、次のフレームの
+                // IsWithinInteractRange が決める。足せなければ次の立ち位置へ。
+                navigation.Stop();
+                this.moving = false;
+                this.hasStandSpot = false;
+                this.nextMove = DateTime.UtcNow.AddMilliseconds(300);
+
+                this.log.Info(
+                    "Fate",
+                    $"{npc.Name} への立ち位置に着きました（{status}）。" +
+                    $"残り {Vector3.Distance(Player.Position, npc.Position):F1} ヤルム");
+
+                return true;
             }
+
+            if (DateTime.UtcNow < this.nextMove)
+            {
+                return true;
+            }
+
+            this.nextMove = DateTime.UtcNow.AddMilliseconds(500);
+
+            // 立ち位置がまだ無ければ探す。見つからなければ、もう寄りようがない。
+            if (!this.hasStandSpot)
+            {
+                if (!navigation.TryPlanApproachSpot(
+                        npc.Position, StandMaxRange, ref this.standCursor, out var spot))
+                {
+                    this.talked.Add(npc.GameObjectId);
+                    this.CancelMovement(navigation);
+                    this.log.Warn(
+                        "Fate",
+                        $"開始 NPC {npc.Name} に話しかけられる立ち位置が見つかりませんでした。" +
+                        "この出現では再試行しません");
+
+                    return false;
+                }
+
+                this.standSpot = spot;
+                this.hasStandSpot = true;
+            }
+
+            // 断られたら（経路探索が混んでいる等）、立ち位置は変えずに次のフレームで出し直す。
+            this.moving = navigation.BeginMove(this.standSpot, StandArrivalRange, false, out _);
+
+            if (this.moving)
+            {
+                this.Destination = this.standSpot;
+            }
+
             return true;
         }
 
@@ -240,8 +324,15 @@ public sealed unsafe class FateStarter : IDisposable
 
     public void CancelMovement(NavigationService navigation)
     {
-        if (this.moving) navigation.Stop();
+        // **moving を見てから止めない。**
+        //
+        // 経路が終わった時点で moving は倒れる。そこで条件を付けていたため、
+        // 止める側が一度も呼ばれず、BMR から借りた移動権が返らないことがあった。
+        // Stop() は二重に呼んでも害が無い。
+        navigation.Stop();
+
         this.moving = false;
+        this.hasStandSpot = false;
         this.Destination = null;
     }
 
@@ -253,6 +344,9 @@ public sealed unsafe class FateStarter : IDisposable
         this.approachStarted = default;
         this.nextMove = default;
         this.started = default;
+        this.hasStandSpot = false;
+        this.standCursor = 0;
+        this.standSpot = default;
     }
 
     /// <summary>

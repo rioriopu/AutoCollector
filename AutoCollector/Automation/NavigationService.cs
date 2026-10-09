@@ -151,6 +151,18 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
     /// </summary>
     public const float DefaultTolerance = 0.25f;
 
+    /// <summary>
+    /// 立ち位置を探す向き（度）。相手から見て、いま自分がいる側を 0 度とする。
+    ///
+    /// <b>手前から順に試す。</b>いちばん近い側から当たれば移動が短く済む。
+    /// 当たらなければ左右へ広げ、最後は相手の裏側まで回る。
+    /// </summary>
+    private static readonly float[] ApproachAngles =
+        [0f, 30f, -30f, 60f, -60f, 90f, -90f, 120f, -120f, 150f, -150f, 180f];
+
+    /// <summary>立ち位置を探す距離。対話できる距離（5.5）の内側に収める。</summary>
+    private static readonly float[] ApproachDistances = [2.5f, 4f, 5f];
+
     /// <summary>目的地をメッシュへ乗せるときに広げていく探索範囲（水平, 垂直）。</summary>
     private static readonly (float Flat, float Height)[] SanitiseSteps =
     [
@@ -275,6 +287,84 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
 
         snapped = result.Value;
         return true;
+    }
+
+    /// <summary>
+    /// 相手に用があるときの「立ち位置」を探す。
+    ///
+    /// <b>相手の座標そのものを目的地にしてはいけない。</b>
+    /// カウンターの内側、柵の向こう、台の上に立つ NPC はナビメッシュに乗らない。
+    /// その座標へ頼むと、vnavmesh は近づけるところまで行って終わる。
+    /// 対話できる距離（5.5 ヤルム）に入らなければ、そこから先は何も起きず、
+    /// 同じ場所へ頼み直すだけになる
+    /// （2026-10-09 実機。中央ラノシアのイエロージャケットで棒立ちになっていた）。
+    ///
+    /// <b>公式はここまで面倒を見ない。</b>
+    /// vnavmesh は「言われた点のいちばん近くまで行く」のが仕事で、
+    /// 「用が足せる場所はどこか」は呼び出し側の問題になる。
+    ///
+    /// 相手の周りを、いま自分がいる側から順に当たっていく。
+    /// 見つかるのは「ナビメッシュに乗っていて、相手から
+    /// <paramref name="maxRange"/> 以内」の点。
+    ///
+    /// <paramref name="cursor"/> は、どこまで試したかの覚え。呼び出し側が持ち、
+    /// 着いても用が足せなかったらそのまま次を呼ぶ。0 から始める。
+    /// </summary>
+    /// <returns>見つかれば true。全部試しても無ければ false。</returns>
+    public bool TryPlanApproachSpot(Vector3 target, float maxRange, ref int cursor, out Vector3 spot)
+    {
+        spot = target;
+
+        if (!Player.Available || !this.vnavmesh.IsLoaded)
+        {
+            return false;
+        }
+
+        // 相手から見て、いま自分がいる向き。ここを 0 度にする。
+        var here = Player.Position;
+        var away = new Vector2(here.X - target.X, here.Z - target.Z);
+
+        var basis = away.LengthSquared() > 0.01f
+            ? Vector2.Normalize(away)
+            : new Vector2(1f, 0f);
+
+        var total = ApproachAngles.Length * ApproachDistances.Length;
+
+        for (; cursor < total; cursor++)
+        {
+            var distance = ApproachDistances[cursor / ApproachAngles.Length];
+            var radians = ApproachAngles[cursor % ApproachAngles.Length] * MathF.PI / 180f;
+            var cos = MathF.Cos(radians);
+            var sin = MathF.Sin(radians);
+
+            var direction = new Vector2(
+                (basis.X * cos) - (basis.Y * sin),
+                (basis.X * sin) + (basis.Y * cos));
+
+            var probe = new Vector3(
+                target.X + (direction.X * distance),
+                target.Y,
+                target.Z + (direction.Y * distance));
+
+            // **到達できる点だけを採る。** 柵の内側を返されては意味がない。
+            if (!this.vnavmesh.TryNearestPointReachable(probe, 2f, 5f, out var near) ||
+                near is not { } candidate)
+            {
+                continue;
+            }
+
+            // 乗せ直した結果、相手から遠ざかっていることがある。
+            if (Vector3.Distance(candidate, target) > maxRange)
+            {
+                continue;
+            }
+
+            cursor++;
+            spot = candidate;
+            return true;
+        }
+
+        return false;
     }
 
     /// <summary>
