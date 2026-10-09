@@ -85,7 +85,17 @@ public sealed class PathSmoother(AnomalyLog anomalyLog, VnavmeshIpc vnavmesh)
     /// <param name="path">vnavmesh が返した経路。</param>
     /// <param name="epsilon">間引きの許容（ヤルム）。</param>
     /// <param name="maxRadius">弧の最大半径（ヤルム）。</param>
-    public List<Vector3>? Smooth(List<Vector3>? path, float epsilon, float maxRadius)
+    /// <param name="validateOnMesh">
+    /// 作った点がナビメッシュに乗っているかを確かめるか。
+    ///
+    /// <b>地上の経路では必ず true にする。</b>
+    /// 空中の経路では false にするしかない。vnavmesh が公開している
+    /// 問い合わせは <c>Query.Mesh.*</c> だけで、<b>空中が空いているかを
+    /// 聞く口が無い</b>（実ソースで確認: vnavmesh/IPCProvider.cs:35-39）。
+    /// 乗っていないのが当たり前の空中の点を地上の判定にかけると、
+    /// すべて外れて 1 つも丸まらない。
+    /// </param>
+    public List<Vector3>? Smooth(List<Vector3>? path, float epsilon, float maxRadius, bool validateOnMesh)
     {
         if (path is null || path.Count < 3)
         {
@@ -117,7 +127,7 @@ public sealed class PathSmoother(AnomalyLog anomalyLog, VnavmeshIpc vnavmesh)
             }
 
             // **検査してから採る。** 切り込んだ先が壁の中かもしれない。
-            if (!this.IsArcOnMesh(arc))
+            if (validateOnMesh && !this.IsArcOnMesh(arc))
             {
                 rejected++;
                 result.Add(b);
@@ -138,12 +148,17 @@ public sealed class PathSmoother(AnomalyLog anomalyLog, VnavmeshIpc vnavmesh)
 
         Deduplicate(result);
 
-        if (rejected > 0)
-        {
-            this.anomalyLog.Info(
-                "Navigation",
-                $"経路の角を {rounded} 箇所丸めました（{rejected} 箇所はメッシュから外れるため角のまま）");
-        }
+        // **丸めたときは必ず記録する。**
+        //
+        // 以前は弾かれた角があるときしか書いていなかった。そのため
+        // 「効いているのに見た目が変わらない」のか「そもそも効いていない」のかを
+        // 区別できなかった（2026-10-09 実機で、どちらか分からず切り分けに困った）。
+        this.anomalyLog.Info(
+            "Navigation",
+            $"経路の角を {rounded} 箇所丸めました" +
+            (rejected > 0 ? $"（{rejected} 箇所はメッシュから外れるため角のまま）" : string.Empty) +
+            $" {simplified.Count} 点 → {result.Count} 点" +
+            (validateOnMesh ? string.Empty : "・空中のため検査なし"));
 
         return result;
     }

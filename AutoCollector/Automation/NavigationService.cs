@@ -155,6 +155,13 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
     public const float DefaultTolerance = 0.25f;
 
     /// <summary>
+    /// 空中で許す弧の最大半径。
+    ///
+    /// 空いているかを確かめる手立てが無いので、地上より小さく抑える。
+    /// </summary>
+    private const float FlyMaxRadius = 2f;
+
+    /// <summary>
     /// 立ち位置を探す向き（度）。相手から見て、いま自分がいる側を 0 度とする。
     ///
     /// <b>手前から順に試す。</b>いちばん近い側から当たれば移動が短く済む。
@@ -242,6 +249,9 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
 
     /// <summary>この移動で、丸めた経路をもう渡したか。渡すのは 1 度だけ。</summary>
     private bool smoothHandedOver;
+
+    /// <summary>いま丸めようとしている経路が飛行のものか。</summary>
+    private bool smoothedWithFly;
 
     public bool IsAvailable => this.vnavmesh.IsLoaded;
 
@@ -896,21 +906,32 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
         this.CancelSmoothing();
         this.smoothHandedOver = false;
 
-        // **飛んでいるときは触らない。**
-        //
-        // 空中の経路は FateApproach が段階を組んで降ろしており、
-        // 降下の形（垂直落下になっていないか）を自分で検査している。
-        // そこへ別の丸めを混ぜると、その検査が意味を失う。
-        if (fly || !Plugin.C.SmoothPath || !Player.Available || !this.vnavmesh.IsLoaded)
+        if (!Plugin.C.SmoothPath || !Player.Available || !this.vnavmesh.IsLoaded)
         {
             return;
         }
 
+        // **飛ぶ経路も対象にする。**
+        //
+        // 当初は地上だけにしていたが、FATE 周回の移動はほとんどが飛行で、
+        // それでは一度も丸まらない（2026-10-09 実機。利用者から
+        // 「全く曲線を描いていない」と報告があった）。
+        //
+        // 空中は、作った点が空いているかを確かめられない。vnavmesh が
+        // 公開している問い合わせは Query.Mesh.* だけで、空中を聞く口が無い
+        // （vnavmesh/IPCProvider.cs:35-39 で確認）。
+        // 弧は必ず「角とその両隣を結んだ三角形の内側」に収まり、
+        // 元の経路から離れる量は半径で頭打ちになる。半径を小さく取って、
+        // ぶつかったら詰まり検知が引き直す、という形にする。
+        //
+        // <b>FateApproach には影響しない。</b>あちらは NavigationService を
+        // 通さず、自分で経路を求めて検査してから渡している。
         this.smoothCancel = new CancellationTokenSource();
         this.smoothGeneration = this.moveGeneration;
+        this.smoothedWithFly = fly;
 
         if (!this.vnavmesh.TryPathfindCancelable(
-                Player.Position, destination, false, this.smoothCancel.Token, out var task) ||
+                Player.Position, destination, fly, this.smoothCancel.Token, out var task) ||
             task is null)
         {
             this.CancelSmoothing();
@@ -944,8 +965,14 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
             return;
         }
 
+        // 空中は弧を小さめに取る。空いているかを確かめられないぶん、
+        // 元の経路から離れる量を抑える。
+        var radius = this.smoothedWithFly
+            ? MathF.Min(Plugin.C.SmoothMaxRadius, FlyMaxRadius)
+            : Plugin.C.SmoothMaxRadius;
+
         var smoothed = this.smoother.Smooth(
-            task.Result, Plugin.C.SmoothEpsilon, Plugin.C.SmoothMaxRadius);
+            task.Result, Plugin.C.SmoothEpsilon, radius, validateOnMesh: !this.smoothedWithFly);
 
         if (smoothed is null || smoothed.Count < 2)
         {
@@ -962,7 +989,13 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
             return;
         }
 
-        if (!this.vnavmesh.TryMoveAlong(smoothed, false))
+        // **飛ぶかどうかを引き継ぐ。**
+        //
+        // Path.MoveTo は受け取った真偽値を反転して渡しており
+        // （vnavmesh/IPCProvider.cs:41 followPath.Move(..., !fly)）、
+        // 高さを見るかどうかがここで決まる。固定していると、
+        // 飛んでいる経路を地上あつかいで辿らせることになる。
+        if (!this.vnavmesh.TryMoveAlong(smoothed, this.smoothedWithFly))
         {
             return;
         }
