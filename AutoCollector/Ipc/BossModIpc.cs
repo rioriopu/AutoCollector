@@ -21,8 +21,19 @@ namespace AutoCollector.Ipc;
 /// 本家 BossMod（InternalName: BossMod）も同じ IPC を公開しているが、
 /// ユーザー指定により BMR を対象にする。
 ///
-/// 実ソースで確認した版: 615b38b54（2026-09-21）。
-/// 公開 IPC は 62 件で、ここで使う 8 件はすべて実在する。
+/// 実ソースで確認した版: FFXIV-CombatReborn/BossmodReborn main <b>33456ced</b>（2026-10-09 に更新）。
+/// ここで使う 9 件はすべて実在する。
+///
+/// <b>参照するクローンを間違えないこと。</b>
+/// <c>TempRepos\BossmodReborn</c> は <c>ultimatepilot</c> ブランチ（UltimatePilot フォーク）で、
+/// 本家には無い独自の IPC（<c>// --- Custom OmniDuty Endpoints ---</c>）が入っている。
+/// 本家は <c>TempRepos\_src\BossmodReborn</c>（main）。
+///
+/// <b>登録が Action か Func かを、呼び出す前に必ず見ること。</b>
+/// BMR の <c>Register</c> には Action と Func の多重定義があり、
+/// ラムダの本体が値を持つと（代入式など）Func の側が選ばれる。
+/// 見た目が「操作」でも <c>InvokeAction</c> では呼べない
+/// （<see cref="TryPauseMovement"/> の説明を参照）。
 /// </summary>
 public sealed class BossModIpc(AnomalyLog anomalyLog) : IpcGateBase("BossModReborn", anomalyLog)
 {
@@ -132,9 +143,34 @@ public sealed class BossModIpc(AnomalyLog anomalyLog) : IpcGateBase("BossModRebo
     /// true を渡すと BMR は移動しなくなる（戦闘は続ける）。
     /// こちらが vnavmesh で移動させたい場面で、BMR と取り合いにならないようにする。
     /// <b>立てたら必ず戻すこと。</b>戻し忘れると BMR が二度と動かない。
+    ///
+    /// 【これは Action ではなく Func で登録されている】
+    ///
+    /// BMR 側の登録は
+    ///
+    ///     Register("AI.PauseMovement", static (bool pause) =&gt;
+    ///         Service.Config.Get&lt;AIConfig&gt;().ForbidMovement = pause);
+    ///
+    /// で、見た目は「値を返さない操作」だが、<b>代入式は代入した値を返す</b>。
+    /// そのためラムダの戻り値型は bool と推論され、
+    /// <c>Register&lt;T1&gt;(string, Action&lt;T1&gt;)</c> ではなく
+    /// <c>Register&lt;T1, TRet&gt;(string, Func&lt;T1, TRet&gt;)</c> が選ばれる。
+    /// 実体は <c>GetIpcProvider&lt;bool, bool&gt;(...).RegisterFunc(...)</c>。
+    ///
+    /// ここを <c>InvokeAction</c> で呼ぶと、Dalamud は
+    /// 「IPC method BossMod.AI.PauseMovement has not been registered」を投げる
+    /// （2026-10-09 実機で確認。警告が毎フレーム出ていた）。
+    /// <c>InvokeFunc</c> で呼ぶこと。
+    ///
+    /// 実ソースで確認した版: FFXIV-CombatReborn/BossmodReborn main 33456ced
+    /// （Framework/IPCProvider.cs:197、Register の多重定義は 575 行と 625 行）。
     /// </summary>
+    /// <returns>送れたら true。戻り値そのものは渡した値がそのまま返るだけなので使わない。</returns>
     public bool TryPauseMovement(bool pause)
-        => this.TryAction("AI.PauseMovement", () => this.Func<bool, object>(Prefix + "AI.PauseMovement").InvokeAction(pause));
+        => this.TryInvoke(
+            "AI.PauseMovement",
+            () => this.Func<bool, bool>(Prefix + "AI.PauseMovement").InvokeFunc(pause),
+            out _);
 
     // ---- AI の有効化（IPC が無いのでコマンドで送る） ----
 

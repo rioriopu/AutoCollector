@@ -565,12 +565,13 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
 
         this.pausedExternalMovement = false;
 
-        // 外せなくても立て直さない。立てたままにするより、
-        // 外れていないことを記録に残して先へ進む。
-        if (!this.bossMod.TryPauseMovement(false))
-        {
-            this.anomalyLog.Warn("Navigation", "BMR の AI の移動の停止を解除できませんでした");
-        }
+        // 外せなくても立て直さない。立てたままにするより、先へ進む。
+        //
+        // **ここでは記録しない。** 失敗の記録は IPC の層が持っており、
+        // そちらは同じ内容を間引いてくれる。ここでも書くと、
+        // 移動のたびに同じ警告が並んで他が読めなくなる
+        // （2026-10-09 実測。FATE 周回中、警告がログを埋めていた）。
+        this.bossMod.TryPauseMovement(false);
 
         // **こちらは必ず通す。** 一時方針を入れたまま戻さないと、
         // 戦闘へ渡したあとも BMR が動かず、敵に近づかなくなる。
