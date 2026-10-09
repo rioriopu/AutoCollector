@@ -734,6 +734,18 @@ public sealed class PresetTab(Plugin plugin)
             return;
         }
 
+        // ───────────────────────────────────────────────
+        // ① 何と交換するか
+        //
+        // **②（元手の作りかた）と混ぜない。**
+        // 以前は「製作するジョブ」を系統と種別のあいだに置き、
+        // ジョブを選ぶと交換の表を製作の一覧へ差し替えていた。
+        // 見た目が同じ部品が交互に並ぶため、どれが「欲しい物を選ぶ欄」で
+        // どれが「作る物を選ぶ欄」なのか分からなかった（2026-10-09 指摘）。
+        // ───────────────────────────────────────────────
+        EUi.Label("① 交換で手に入れる物");
+        EUi.MutedParagraph("  この通貨で何を買うかを決めます。複数選べます。");
+
         // --- 名前で探す（横断） ---
         if (EUi.TextInput("##rewardsearch", ref this.rewardSearch, hint: "アイテム名で探す（系統をまたいで探します）", maxLength: 64, width: 280f))
         {
@@ -777,6 +789,7 @@ public sealed class PresetTab(Plugin plugin)
             }
 
             EUi.MutedParagraph("  検索欄を空にすると、系統から辿る表示に戻ります");
+            this.DrawCraftSection(preset, currencyItemId, ref changed);
             return;
         }
 
@@ -790,38 +803,12 @@ public sealed class PresetTab(Plugin plugin)
         if (EUi.Combo("系統##category", ref this.categoryIndex, categoryNames, width: 360f))
         {
             // 系統が変われば種別の並びも変わる。選び直しになる。
+            //
+            // **作る物の選択は消さない。**
+            // 以前はここで消していたが、それは表を差し替えていたころの名残。
+            // 欲しい物を選び直すことと、その元手を何で作るかは別の話で、
+            // 消されると選び直しのたびに製作の設定がやり直しになっていた。
             this.seriesIndex = 0;
-
-            // 系統を選び直すのは、欲しいアイテムを選び直す場面。
-            // 表を装備品へ戻すため、製作するジョブは未設定に戻す。
-            ClearCraftChoice(preset);
-            changed = true;
-        }
-
-        // --- 製作するジョブ（系統の右） ---
-        //
-        // **製作で稼げる通貨のときだけ出す。**
-        // トームストーンは収集品の納品では増えない。周回で貯めるもの。
-        // 出していると、戦闘のプリセットに製作の操作が並び、
-        // 「作る収集品が選ばれていません」という的外れな指示まで出る。
-        var craftable = this.plugin.Crafter.CanEarn(currencyItemId);
-
-        if (craftable)
-        {
-            this.DrawCraftJobCombo(preset, ref changed);
-
-            // ジョブを選んでいるあいだは、表を製作リストに差し替える。
-            if (preset.CraftJob >= 0)
-            {
-                this.DrawCraftPicker(preset, currencyItemId, ref changed);
-                return;
-            }
-        }
-        else if (preset.CraftJob >= 0 || preset.CraftCollectableItemId != 0 || preset.CraftToEarn)
-        {
-            // 通貨を選び直して製作で稼げなくなった場合、古い選択が残る。
-            // 残ったままだと、画面に出ていない設定が動きに効いてしまう。
-            ClearCraftChoice(preset);
             changed = true;
         }
 
@@ -845,6 +832,7 @@ public sealed class PresetTab(Plugin plugin)
         if (offers.Count == 0)
         {
             EUi.MutedParagraph("この種別に、いま選んでいる通貨で買えるものはありません");
+            this.DrawCraftSection(preset, currencyItemId, ref changed);
             return;
         }
 
@@ -873,6 +861,55 @@ public sealed class PresetTab(Plugin plugin)
                 }
             }
         }
+
+        this.DrawCraftSection(preset, currencyItemId, ref changed);
+    }
+
+    /// <summary>
+    /// ② 交換の元手を作る。
+    ///
+    /// <b>①（何と交換するか）とは別の枠にする。</b>
+    /// この 2 つは目的が違う。①は「欲しい物」、②は「その代金の稼ぎ方」。
+    /// 以前は同じ列に交互に並べ、しかもジョブを選ぶと①の表が
+    /// ②の一覧へ差し替わっていた。どちらを操作しているのか分からず、
+    /// 欲しい物を選び直すたびに製作の設定が消えていた。
+    ///
+    /// <b>製作で稼げる通貨のときだけ出す。</b>
+    /// トームストーンは収集品の納品では増えない。周回で貯めるもの。
+    /// 出していると、戦闘のプリセットに製作の操作が並び、
+    /// 「作る収集品が選ばれていません」という的外れな指示まで出る。
+    /// </summary>
+    private void DrawCraftSection(ExchangePreset preset, uint currencyItemId, ref bool changed)
+    {
+        if (!this.plugin.Crafter.CanEarn(currencyItemId))
+        {
+            // 通貨を選び直して製作で稼げなくなった場合、古い選択が残る。
+            // 残ったままだと、画面に出ていない設定が動きに効いてしまう。
+            if (preset.CraftJob >= 0 || preset.CraftCollectableItemId != 0 || preset.CraftToEarn)
+            {
+                ClearCraftChoice(preset);
+                changed = true;
+            }
+
+            return;
+        }
+
+        EUi.Spacing();
+        EUi.Separator();
+        EUi.Label("② 交換の元手を作る（任意）");
+        EUi.MutedParagraph(
+            "  収集品を作って納品し、①の代金になる通貨を自分で稼ぎます。" +
+            "手持ちの通貨だけで交換するなら、ここは触らなくて構いません。");
+
+        this.DrawCraftJobCombo(preset, ref changed);
+
+        if (preset.CraftJob < 0)
+        {
+            EUi.MutedParagraph("  「製作するジョブ」を選ぶと、作れる収集品が並びます");
+            return;
+        }
+
+        this.DrawCraftPicker(preset, currencyItemId, ref changed);
     }
 
     /// <summary>
@@ -2586,11 +2623,11 @@ public sealed class PresetTab(Plugin plugin)
     }
 
     /// <summary>
-    /// 製作するジョブを選ぶ。系統の右に置く。
+    /// 製作するジョブを選ぶ。②（元手を作る）の先頭に置く。
     ///
-    /// 「未設定」のあいだは、表には交換で手に入る装備品が並ぶ。
-    /// ジョブを選ぶと、表はそのジョブで作れる収集品に切り替わる。
-    /// 欲しいアイテムを選ぶ場面と、その元手を作る場面は別なので、表も分ける。
+    /// 「未設定」を選ぶと、製作の設定はまとめて解ける。
+    /// 以前は押せないようにしていたため、一度ジョブを選ぶと
+    /// 「やっぱり作らない」へ戻す手段が無かった。
     /// </summary>
     private void DrawCraftJobCombo(ExchangePreset preset, ref bool changed)
     {
@@ -2614,9 +2651,15 @@ public sealed class PresetTab(Plugin plugin)
             return;
         }
 
-        // 一覧の中の「--選択して下さい--」は見出しであって選択肢ではない。
-        // 押しても意味が無いので、押せないことが分かるよう無効で出す。
-        EUi.Selectable($"{UnsetJobLabel}##jobunset", preset.CraftJob < 0, disabled: true);
+        // **「作らない」へ戻せるようにする。**
+        // 以前は無効にしていたため、一度ジョブを選ぶと解除できなかった。
+        if (EUi.Selectable($"{UnsetJobLabel}##jobunset", preset.CraftJob < 0))
+        {
+            ClearCraftChoice(preset);
+            changed = true;
+            combo.Close();
+            return;
+        }
 
         foreach (var job in jobs)
         {
