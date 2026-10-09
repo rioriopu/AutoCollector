@@ -247,8 +247,23 @@ public sealed class PresetTab(Plugin plugin)
             }
         }
 
-        // 監視は常に動いている。有効なプリセットが閾値へ達したら自動で交換所へ向かう。
-        EUi.MutedParagraph("有効なプリセットが閾値に達したら、自動で交換所へ向かいます");
+        // **有効にしただけでは動かない。**
+        //
+        // チェックは「この条件で交換してよい」という宣言でしかなく、
+        // 動き出すのは「開始」を押したとき。ここを
+        // 「有効なプリセットが閾値に達したら自動で向かいます」とだけ
+        // 書いていたため、チェックを入れただけで走り出すものと読めた。
+        if (Plugin.C.AutomationEnabled)
+        {
+            EUi.MutedParagraph("有効なプリセットが閾値に達したら、自動で交換所へ向かいます");
+        }
+        else
+        {
+            EUi.WrapColored(
+                "止めています。チェックを入れただけでは動きません。" +
+                "状況タブの「開始」を押すまで、自分からは動き出しません",
+                NoteKind.Warning);
+        }
 
         if (!string.IsNullOrEmpty(this.plugin.MonitorService.LastDecision))
         {
@@ -935,20 +950,48 @@ public sealed class PresetTab(Plugin plugin)
                 var fateBusy = this.plugin.ExchangeExecutor.IsBusy || this.plugin.GoalRunner.IsRunning ||
                     this.plugin.CraftRunner.IsRunning || this.plugin.RetainerRestock.IsRunning ||
                     this.plugin.CollectableCycle.IsRunning || !Player.Available || Player.IsInDuty;
+                // **押せない理由を必ず言う。**
+                //
+                // 以前は無効にするだけだったので、なぜ押せないのかが
+                // どこにも出ず、押せるようにする手立てが分からなかった。
+                var fateRunning = this.plugin.FateRunner.IsRunning;
+
+                var blocked =
+                    !preset.Enabled ? "このプリセットが有効になっていません" :
+                    fateRunning ? "すでに周回しています" :
+                    fateBusy ? "ほかの処理が動いています（交換・製作・納品など）" :
+                    string.Empty;
+
                 using (EUi.HStack(wrap: true))
                 {
                     if (EUi.Button(
-                        "F.A.T.E 周回を開始する",
-                        disabled: !preset.Enabled || this.plugin.FateRunner.IsRunning || fateBusy))
+                            "F.A.T.E 周回を開始する",
+                            ButtonStyle.Prominent,
+                            disabled: blocked.Length > 0)
+                        .Tip(blocked.Length > 0
+                            ? $"押せません: {blocked}"
+                            : "この通貨を F.A.T.E で稼ぎ始めます。\n" +
+                              "止めるまで回り続けます。"))
                     {
                         this.plugin.StartAutomation("F.A.T.E 周回の開始");
                         this.runControlNote = this.plugin.FateRunner.Start(out var reason) ? "F.A.T.E 周回を開始しました" : reason;
                     }
 
-                    if (EUi.Button("止める##fate"))
+                    var canHalt = fateRunning || this.plugin.FateRunner.IsRunning ||
+                                  Plugin.C.AutomationEnabled || this.plugin.ExchangeExecutor.IsBusy;
+
+                    if (EUi.Button("止める##fate", ButtonStyle.ProminentDanger, disabled: !canHalt)
+                        .Tip(canHalt
+                            ? "周回と、いま走っているものをまとめて畳みます。"
+                            : "止めるものがありません。"))
                     {
                         this.plugin.EmergencyStop("プリセットから停止");
                     }
+                }
+
+                if (blocked.Length > 0)
+                {
+                    EUi.WrapColored($"  {blocked}", NoteKind.Warning);
                 }
 
                 EUi.Paragraph(this.runControlNote);

@@ -177,6 +177,19 @@ public sealed class AutoDutyKeeper(
         {
             holdReason = "止めています";
         }
+        else if (!Plugin.C.AutomationEnabled)
+        {
+            // **元栓を見る。**
+            //
+            // ここだけが元栓（AutomationEnabled）を見ていなかった。
+            // そのため「開始」を押していなくても、プリセットに
+            // チェックを入れただけで AutoDuty が回り始めていた。
+            // 利用者から見ると「有効にしただけで勝手に動き出す」
+            // （2026-10-09 指摘）。
+            //
+            // 動き出すのは、利用者が「開始」を押したときだけにする。
+            holdReason = "止めています。「開始」を押すまで周回は維持しません";
+        }
         else if (this.setup is { NeedsAutoDutyUpdate: true })
         {
             // 古い版では設定を確かめられない。任せると交換に入れないまま回り続ける。

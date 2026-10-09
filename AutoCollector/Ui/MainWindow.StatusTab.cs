@@ -73,32 +73,56 @@ public sealed partial class MainWindow
         var halted = this.plugin.Combat.KeeperSuspended || executor.IsAborted;
         var enabled = Plugin.C.AutomationEnabled && !halted;
 
+        // **押しても変わらない操作は、押せないようにする。**
+        //
+        // 以前は「開始」がいつでも押せた。すでに動いてよい状態で押しても
+        // 何も起きないのに手応えだけが返るため、効かない操作を
+        // 試し続けることになっていた（2026-10-09 指摘）。
+        //
+        // 無効にするだけでは「なぜ押せないのか」が分からないので、
+        // 理由を必ず説明に出す。
         using (EUi.HStack(wrap: true))
         {
-            // 動いてよい状態なら、開始は押しても変わらない。
-            if (EUi.Button("開始##runstart", enabled ? ButtonStyle.Normal : ButtonStyle.Primary, width: 110f)
-                .Tip("自動で動いてよい状態にします。\n" +
-                     "「すべて止める」で立てた旗も、ここで下ろします。"))
+            // 開始と停止は同じ大きさで並べる組。Prominent / ProminentDanger は
+            // そのために用意されている（EstellUtils の ButtonStyle の説明）。
+            if (EUi.Button("開始##runstart", ButtonStyle.Prominent, width: 130f, disabled: enabled)
+                .Tip(enabled
+                    ? "すでに動いてよい状態です。止めるには「停止」。"
+                    : "自動で動いてよい状態にします。\n" +
+                      "「すべて止める」で立てた旗も、ここで下ろします。"))
             {
                 this.plugin.StartAutomation("状況タブ");
             }
 
-            if (EUi.Button("停止##runstop", width: 110f, disabled: !enabled)
-                .Tip("新しく始めないようにします。\n" +
-                     "いま走っているものは、切れ目まで進んでから止まります。\n" +
-                     "すぐ畳みたいときは「すべて止める」。"))
+            // 元栓が開いているかだけで見る。「すべて止める」で旗が立っていても、
+            // 元栓が開いたままなら閉じられるようにしておく。
+            if (EUi.Button(
+                    "停止##runstop",
+                    ButtonStyle.ProminentDanger,
+                    width: 130f,
+                    disabled: !Plugin.C.AutomationEnabled)
+                .Tip(Plugin.C.AutomationEnabled
+                    ? "新しく始めないようにします。\n" +
+                      "いま走っているものは、切れ目まで進んでから止まります。\n" +
+                      "すぐ畳みたいときは「すべて止める」。"
+                    : "すでに止めています。"))
             {
                 this.plugin.StopAutomation("状況タブ");
             }
 
             // 色を直接押し込むのはやめた。テーマの「破壊的な操作」で出す。
             // 何も動いていないときは目立たせない。
+            var canHalt = running || Plugin.C.AutomationEnabled || halted;
+
             if (EUi.Button(
                 "すべて止める##emergencystop",
                 running ? ButtonStyle.Danger : ButtonStyle.Normal,
-                width: 160f)
-                .Tip("交換・製作・納品・周回を、いますぐ畳みます。\n" +
-                     "交換の途中なら中断するので、そのあと所持数の確認が要ります。"))
+                width: 160f,
+                disabled: !canHalt)
+                .Tip(canHalt
+                    ? "交換・製作・納品・周回を、いますぐ畳みます。\n" +
+                      "交換の途中なら中断するので、そのあと所持数の確認が要ります。"
+                    : "止めるものがありません。"))
             {
                 this.plugin.EmergencyStop("状況タブから止められました");
             }
