@@ -26,6 +26,14 @@ namespace AutoCollector.Ipc;
 /// 手動で遊ぶときに技が出なくなる。これは
 /// プロジェクト指示の「外部プラグインを強制停止しない」と同じ考え方で、
 /// AutoRetainer の抑制に持ち主を持たせているのと揃えてある。
+///
+/// <b>入れるのは Auto ではなく Henched（2026-10-10）。</b>
+/// Auto は次に撃つ技の相手へハードターゲットを書き換える（RSR の RSCommands_Actions.cs:310-316。
+/// <c>!DataCenter.IsManual</c> のときだけ）。狙いは AutoCollector が倒れるまで固定するので（FateTargetService）、
+/// Auto だと取り合いになって狙いがコロコロ変わっていた（2026-10-10 12:40 の記録で 9 秒に 6 回）。
+/// Henched は IsManual が立ち（RSCommands_StateSpecialCommand.cs:380-391）、置いたハードターゲットにだけ技を撃つ。
+/// Henched は戦闘後の自動 OFF（AutoOffAfterCombat）も受けない（ActionUpdater.cs:156）。
+/// 範囲攻撃は Henched でも周りを巻き込むが、FATE では敵をまとめて倒せるので触らない。
 /// </summary>
 public sealed class RotationSolverControl(AnomalyLog anomalyLog)
 {
@@ -65,7 +73,8 @@ public sealed class RotationSolverControl(AnomalyLog anomalyLog)
             return;
         }
 
-        if (!this.Send("/rotation Auto"))
+        // 本体のコマンドは StateCommandType の名前をそのまま受け付ける（RSCommands_BasicInfo.cs:69）。
+        if (!this.Send("/rotation Henched"))
         {
             return;
         }

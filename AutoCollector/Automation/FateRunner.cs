@@ -6,6 +6,7 @@ using AutoCollector.Diagnostics;
 using AutoCollector.Game;
 using AutoCollector.Ipc;
 using Dalamud.Game.ClientState.Conditions;
+using Dalamud.Game.ClientState.Objects.Types;
 using ECommons.DalamudServices;
 using ECommons.GameHelpers;
 using ECommons.Throttlers;
@@ -608,7 +609,7 @@ public sealed class FateRunner(
     /// <b>飛行の間はこれが移動を持つ。</b>
     /// 段階ごとに経路を引き直すので、ここで同時に経路を積まない。
     /// </summary>
-    private readonly FateApproach approach = new(anomalyLog, trace, vnavmesh, mount);
+    private readonly FateApproach approach = new(anomalyLog, trace, vnavmesh, mount, navigation.Smooth);
 
     /// <summary>
     /// 開始したときに固定した巡回ルート。
@@ -681,6 +682,61 @@ public sealed class FateRunner(
 
     /// <summary>近づく経路を引いた回数。増え続けるなら引き直しすぎている。</summary>
     private int approachIssues;
+
+    /// <summary>
+    /// いまの経路を、どこまで近づいたら止めるとして引いたか。
+    ///
+    /// <b>見張るときも同じ値で見る。</b>以前は戦闘に入った直後、15m で引いた経路を
+    /// 近接の 3.5m で見張っていた。そのため経路の終点で「目的地まで 15.1 ヤルム残っています」を
+    /// 毎フレーム記録し続けた（2026-10-10 12:40 の記録で 45 件）。
+    /// </summary>
+    private float approachStopAt;
+
+    /// <summary>狙った敵へ攻撃が届くか（射程・視線・RSR の視線）。</summary>
+    private readonly AttackReach reach = new(anomalyLog);
+
+    /// <summary>攻撃を始められない時間を数え、4 秒で迂回へ移る（利用者 2026-10-10）。</summary>
+    private readonly AttackWatch attackWatch = new();
+
+    /// <summary>迂回している行き先（メッシュの上の行ける点）。無ければ null。</summary>
+    private Vector3? detourGoal;
+
+    /// <summary>迂回の行き先の候補（<see cref="DetourGoals.Around"/>）。敵が大きく動いたら作り直す。</summary>
+    private List<Vector3> detourGoals = [];
+
+    /// <summary>近接が迂回するとき、敵の縁からどれだけの所を目指すか。近接の間合い（3m 前後）の内側。</summary>
+    private const float DetourMeleeRingMeters = 2f;
+
+    /// <summary>遠隔が迂回するとき、敵の縁からどれだけの所を目指すか。近いほど岩越しにならない。届けばその場で止まる。</summary>
+    private const float DetourRangedRingMeters = 6f;
+
+    /// <summary>迂回の行き先に着いたとみなす距離。</summary>
+    private const float DetourStopMeters = 1f;
+
+    /// <summary>迂回の間、これだけ動けば「進んでいる」とみなす。</summary>
+    private const float DetourProgressMeters = .5f;
+
+    /// <summary>迂回の間、これだけ進まなければ詰まったとみなして次の行き先へ（移動の部品の 15 秒は待たない）。</summary>
+    private static readonly TimeSpan DetourStallLimit = TimeSpan.FromSeconds(3);
+
+    /// <summary>迂回の間、最後に進んだ位置と時刻。</summary>
+    private Vector3 detourLastPosition;
+    private DateTime detourLastProgressUtc;
+
+    /// <summary>迂回の行き先をメッシュへ寄せるときに探す水平の広さ。</summary>
+    private const float DetourSnapMeters = 3f;
+
+    /// <summary>迂回の行き先をメッシュへ寄せるときに探す高さの広さ。岩の上の敵の足もとへ降ろせるよう広めに取る。</summary>
+    private const float DetourSnapHeightMeters = 6f;
+
+    /// <summary>迂回の行き先を決めたときの敵の位置。敵が大きく動いたら行き先を決め直す。</summary>
+    private Vector3 detourTargetAt;
+
+    /// <summary>迂回の行き先を最後に決めた時刻。続けて決め直さないための間隔に使う。</summary>
+    private DateTime detourIssuedUtc = DateTime.MinValue;
+
+    /// <summary>攻撃が届かない理由を最後に記録した時刻と理由（同じ理由を毎フレーム書かない）。</summary>
+    private string lastReachWhy = string.Empty;
 
     /// <summary>vnavmesh で歩かせるためにプリセットの移動を止めているか。止めたぶんは必ず戻す。</summary>
     private bool movementParked;
@@ -1740,7 +1796,8 @@ public sealed class FateRunner(
         // マウントに乗るのが遅れていた（2026-10-08 実機）。
         //
         // 殴る相手がいないなら、用意もしない。
-        var target = this.targets.AcquireTarget(0, Player.Position, 0f);
+        // FATE の番号 0＝FATE の外。自分に敵視を持っている敵だけを狙う。
+        var target = this.targets.AcquireTarget(0);
 
         if (target is null)
         {
@@ -3402,10 +3459,9 @@ public sealed class FateRunner(
     /// <summary>
     /// 狙う相手を決めて、ハードターゲットに置く。
     ///
-    /// <b>自分から仕掛けるのは FATE の敵だけ。絡まれたら反撃する。</b>
+    /// <b>狙うのはこの FATE の敵（名札に紫の FATE の印がある敵）だけで、一番近い敵から。倒れるまで替えない。</b>
+    /// フィールドのモンスターは、絡まれても FATE の中では狙わない（利用者 2026-10-10 夕）。
     /// 判定は <see cref="FateTargetService"/> が持つ。
-    /// 「絡まれたか」はゲームの敵視リスト（<c>UIState.Hater</c>）で見る。
-    /// BMR も同じものを読んでいる（WorldStateGameSync.cs:258-265）。
     ///
     /// <b>納品中は呼ばない。</b>納品へ向かう最中に敵を狙うと、
     /// BMR がそちらへ走って納品に行かない。
@@ -3417,7 +3473,7 @@ public sealed class FateRunner(
             return;
         }
 
-        var picked = this.targets.AcquireTarget(current.Id, current.Position, current.Radius);
+        var picked = this.targets.AcquireTarget(current.Id);
 
         if (picked is null)
         {
@@ -3434,22 +3490,24 @@ public sealed class FateRunner(
 
         this.lastTargetId = picked.GameObjectId;
 
+        // 狙いは倒れるまで固定する（FateTargetService・TargetLock）。理由と、他から替えられて戻した回数を残す。
         this.trace.Decision(
             "狙う相手を決めた",
             $"{picked.Name} ({picked.GameObjectId:X}) " +
             $"{Vector3.Distance(Player.Position, picked.Position):F0}m " +
-            $"敵視={this.targets.CountAggroOnMe()}件");
+            $"敵視={this.targets.CountAggroOnMe()}件 理由={this.targets.LastDecision.Reason} 戻した={this.targets.Restores}回");
     }
 
     /// <summary>
-    /// 納品の最中に絡まれた敵を狙う。
+    /// 納品の最中に、戦闘になっていたら FATE の敵を狙う。
     ///
-    /// 納品へ向かう間は新しい敵を狙わないが、絡まれたら振り払う。
+    /// 納品へ向かう間は新しい敵を狙わないが、戦闘が続いていれば振り払う。
     /// ダイアログは戦闘中に開かないので、片付けないと納品できない。
+    /// ここでも狙うのはこの FATE の敵だけ（フィールドのモンスターは狙わない。利用者 2026-10-10 夕）。
     /// </summary>
     private void TickAcquireTargetDuringHandIn(FateInfo current)
     {
-        var picked = this.targets.AcquireTarget(current.Id, current.Position, current.Radius);
+        var picked = this.targets.AcquireTarget(current.Id);
 
         if (picked is null)
         {
@@ -3706,26 +3764,6 @@ public sealed class FateRunner(
             return;
         }
 
-        // **戦闘中でも、近接なら間合いを詰める。**
-        //
-        // 以前は戦闘に入った時点で BMR に任せていた。
-        // しかし ApplyCombat で BMR の AI は切ってある（切らないと
-        // プリセットが外される）。AI が無いと BMR は動かないので、
-        // 近接は届く敵しか殴らず、少し離れた敵には寄らなかった
-        // （2026-10-08 実機。遠隔は立ったまま届くので気づきにくい）。
-        //
-        // 遠隔と回復役はその場で届く。動かすと却って的を外すので触らない。
-        if (Svc.Condition[ConditionFlag.InCombat] && !IsMeleeRole())
-        {
-            if (this.approaching)
-            {
-                this.StopApproach();
-                this.trace.Decision("近づくのをやめた", "戦闘に入った（遠隔）");
-            }
-
-            return;
-        }
-
         // **納品 FATE の納品中は、こちらから動かさない。**
         //
         // BMR の FateUtils は、集めた品が 10 個たまると納品 NPC を狙い、
@@ -3744,8 +3782,34 @@ public sealed class FateRunner(
                 this.trace.Decision("近づくのをやめた", "納品は BossMod Reborn に任せる");
             }
 
+            this.ForgetDetour();
             return;
         }
+
+        // **狙っている敵がいれば、その敵へ攻撃が届くかで動く。**
+        //
+        // 狙いは倒れるまで固定してある（TickAcquireTarget）。狙った敵（この FATE の敵だけ）がいれば、
+        // 戦闘の前でも届くまで近づき、4 秒届かなければ迂回する（利用者 2026-10-10）。
+        if (Svc.Targets.Target is { } held && held.GameObjectId == this.lastTargetId &&
+            this.targets.MayAttack(held, fate.Id))
+        {
+            this.TickReachTarget(held);
+            return;
+        }
+
+        // 戦闘中なのに狙う相手が居ない。動かない（狙いが決まれば上へ入る）。
+        if (Svc.Condition[ConditionFlag.InCombat])
+        {
+            if (this.approaching)
+            {
+                this.StopApproach();
+            }
+
+            this.ForgetDetour();
+            return;
+        }
+
+        this.ForgetDetour();
 
         var nearest = this.scanner.FindNearestMob(fate.Id, Player.Position);
 
@@ -3761,40 +3825,6 @@ public sealed class FateRunner(
                 this.BeginApproach(fate.Position, "敵が見えないので中心へ寄る");
             }
 
-            return;
-        }
-
-        // **戦闘中の近接は、狙っている相手まで詰める。**
-        //
-        // 近づく・やめるの判定は下の往復防止と同じ考え方だが、
-        // 距離が違う（届くのは 3m、湧き待ちの寄りは 15m 前後）。
-        if (Svc.Condition[ConditionFlag.InCombat])
-        {
-            var target = Svc.Targets.Target;
-
-            if (target is null)
-            {
-                if (this.approaching)
-                {
-                    this.StopApproach();
-                }
-
-                return;
-            }
-
-            var toTarget = Vector3.Distance(Player.Position, target.Position) - target.HitboxRadius;
-
-            if (toTarget <= MeleeReachMeters)
-            {
-                if (this.approaching)
-                {
-                    this.StopApproach();
-                }
-
-                return;
-            }
-
-            this.BeginApproach(target.Position, $"近接の間合いまで {toTarget:F0}m", MeleeReachMeters);
             return;
         }
 
@@ -3829,6 +3859,197 @@ public sealed class FateRunner(
         }
 
         this.BeginApproach(mob.Position, $"最寄りの敵まで {mob.Distance:F0}m");
+    }
+
+    /// <summary>
+    /// 狙っている敵へ、攻撃が届くまで近づく。
+    ///
+    /// <b>届くかはゲームに聞く</b>（<see cref="AttackReach"/>：射程・視線・RSR の視線）。
+    /// 届いたら自分の移動はやめて、BMR と RSR に任せる。
+    ///
+    /// <b>届かないうちは、今までどおりメッシュの経路で詰める。</b>
+    /// 近接は近接の間合いまで（以前は戦闘中だけだった。BMR の AI を切っているので、
+    /// 少し離れた敵に寄らない＝2026-10-08 実機）。遠隔は 15m まで（射程の内側）。
+    ///
+    /// <b>4 秒届かないままなら迂回する（利用者 2026-10-10）。</b>
+    /// 岩などに向かって走り続けて詰まる、近接攻撃が届かない、を抜けるため。
+    /// 敵の位置を目標にメッシュの経路を引き、それでも届かなければ敵の周りの点を順に試す（<see cref="TickDetour"/>）。
+    /// </summary>
+    private void TickReachTarget(IGameObject target)
+    {
+        var now = DateTime.UtcNow;
+        var melee = IsMeleeRole();
+        var gap = Vector3.Distance(Player.Position, target.Position) - target.HitboxRadius;
+
+        // ゲームに聞けないときは距離で決める（近接は間合い、遠隔は 15m）。
+        var canAttack = this.reach.CanAttack(target, out var why) ?? (melee ? gap <= MeleeReachMeters : gap <= MobReachMeters);
+        var detour = this.attackWatch.Update(target.GameObjectId, canAttack, now);
+
+        if (canAttack)
+        {
+            if (this.approaching)
+            {
+                this.StopApproach();
+                this.trace.Decision("近づくのをやめた", $"{target.Name} に攻撃が届く");
+            }
+
+            this.detourGoal = null;
+            this.lastReachWhy = string.Empty;
+            return;
+        }
+
+        if (string.IsNullOrEmpty(why))
+        {
+            why = $"{gap:F0}m 離れている";
+        }
+
+        if (!detour)
+        {
+            // まだ 4 秒たっていない。遠ければメッシュの経路で詰める。
+            if (melee && gap > MeleeReachMeters)
+            {
+                this.BeginApproach(target.Position, $"近接の間合いまで {gap:F0}m", MeleeReachMeters);
+            }
+            else if (!melee && gap > MobReachMeters)
+            {
+                this.BeginApproach(target.Position, $"射程まで {gap:F0}m", MobReachMeters);
+            }
+
+            return;
+        }
+
+        if (why != this.lastReachWhy)
+        {
+            this.lastReachWhy = why;
+            this.trace.State(
+                "攻撃が届かない",
+                $"{target.Name} {gap:F1}m {why}（{this.attackWatch.BlockedFor(now).TotalSeconds:F0} 秒届いていない）");
+        }
+
+        this.TickDetour(target, melee, why, now);
+    }
+
+    /// <summary>
+    /// 迂回する。狙っている敵を目標にメッシュの経路を引いて近づく。
+    ///
+    /// <b>行き先は順に試す。</b>まず敵の位置（メッシュの上の行ける点へ寄せる）。
+    /// 経路が手前で切れる・詰まる・着いても届かないときは、敵の周り 8 方向の点を自分に近い側から試す
+    /// （<see cref="DetourGoals.Around"/>）。使い切ったら最初へ戻る。諦めない（失敗は止めずに立て直す）。
+    ///
+    /// <b>届いた瞬間にやめる。</b>届くかは毎フレーム <see cref="TickReachTarget"/> が見ている。
+    /// 歩いている間はプリセットの移動を止める（BMR と取り合わない）。
+    /// </summary>
+    private void TickDetour(IGameObject target, bool melee, string why, DateTime now)
+    {
+        // 近接は敵の縁から 2m（近接の間合いの内側）、遠隔は 6m（近いほど岩越しにならない）。
+        var ring = target.HitboxRadius + (melee ? DetourMeleeRingMeters : DetourRangedRingMeters);
+        var targetMoved = Vector3.Distance(target.Position, this.detourTargetAt) > ApproachRepathMeters;
+
+        if (this.detourGoals.Count == 0 || (targetMoved && this.detourGoal is null))
+        {
+            this.detourGoals = DetourGoals.Around(Player.Position, target.Position, ring);
+            this.detourTargetAt = target.Position;
+        }
+
+        if (this.detourGoal is { } goal && this.approaching)
+        {
+            var status = this.navigation.Tick(goal, DetourStopMeters);
+
+            // **迂回の間は、詰まりを早く見切る。** 移動の部品の「止まった」は 15 秒かかる。
+            // 岩に向かって走り続けて動けないなら、3 秒で次の行き先へ。
+            if (Vector3.Distance(Player.Position, this.detourLastPosition) > DetourProgressMeters)
+            {
+                this.detourLastPosition = Player.Position;
+                this.detourLastProgressUtc = now;
+            }
+            else if (status == MoveStatus.Moving && now - this.detourLastProgressUtc > DetourStallLimit)
+            {
+                status = MoveStatus.Stuck;
+            }
+
+            if (status == MoveStatus.Moving && !targetMoved)
+            {
+                return;
+            }
+
+            if (now - this.detourIssuedUtc < ApproachRepathInterval)
+            {
+                return;
+            }
+
+            if (targetMoved)
+            {
+                // 敵が動いた。同じ順番のまま、新しい敵の位置の周りで決め直す。
+                this.detourGoals = DetourGoals.Around(Player.Position, target.Position, ring);
+                this.detourTargetAt = target.Position;
+            }
+            else
+            {
+                // 行き先に着いた・手前で切れた・詰まったのに、まだ届かない。次の行き先へ。
+                this.attackWatch.NextGoal(this.detourGoals.Count);
+                this.trace.State("迂回の行き先を替える", $"{target.Name} 前の行き先は {status}（{why}）");
+            }
+
+            this.detourGoal = null;
+            this.approaching = false;
+        }
+
+        if (now - this.detourIssuedUtc < ApproachRepathInterval)
+        {
+            return;
+        }
+
+        this.detourIssuedUtc = now;
+
+        for (var tries = 0; tries < this.detourGoals.Count; tries++)
+        {
+            var index = this.attackWatch.GoalIndex;
+            var probe = this.detourGoals[index];
+
+            // メッシュの上の行ける点へ寄せる。寄せられない・今いる所と同じなら次へ。
+            if (this.vnavmesh.TryNearestPointReachable(probe, DetourSnapMeters, DetourSnapHeightMeters, out var snapped) &&
+                snapped is { } point &&
+                Vector3.Distance(point, Player.Position) > DetourStopMeters + 0.5f)
+            {
+                if (this.navigation.BeginMove(point, DetourStopMeters, false, out var failure))
+                {
+                    this.ParkPresetMovement();
+                    this.approaching = true;
+                    this.approachTarget = point;
+                    this.approachStopAt = DetourStopMeters;
+                    this.approachIssuedUtc = now;
+                    this.detourGoal = point;
+                    this.detourLastPosition = Player.Position;
+                    this.detourLastProgressUtc = now;
+                    this.trace.Decision(
+                        "迂回する",
+                        $"{target.Name} へ攻撃が届かない（{why}）ため、{(index == 0 ? "敵の位置" : $"敵の周り {index}/{this.detourGoals.Count - 1} 番目")}" +
+                        $"({point.X:F0},{point.Y:F0},{point.Z:F0}) へメッシュの経路で向かいます");
+                    return;
+                }
+
+                // 経路探索の最中なら、ただ待つ。失敗ではない。
+                if (this.navigation.Busy)
+                {
+                    return;
+                }
+
+                this.trace.Trouble("迂回の経路を引けない", failure);
+            }
+
+            this.attackWatch.NextGoal(this.detourGoals.Count);
+        }
+
+        this.trace.Trouble("迂回の行き先が無い", $"{target.Name} の周りにメッシュの行ける点が見つかりません。少し待って試し直します");
+    }
+
+    /// <summary>迂回の記録を捨てる。狙いが無い・納品中・戦闘を畳むときに呼ぶ。</summary>
+    private void ForgetDetour()
+    {
+        this.attackWatch.Reset();
+        this.detourGoal = null;
+        this.detourGoals = [];
+        this.lastReachWhy = string.Empty;
     }
 
     /// <summary>
@@ -3891,16 +4112,22 @@ public sealed class FateRunner(
             // その間 1m しか進んでいなかった）。
             //
             // 進んでいないなら、なおさら間を置く。
+            //
+            // **見張りは、引いたときと同じ距離で見る**（approachStopAt）。
+            // 戦闘に入って近接の間合いへ替わった直後に、15m で引いた経路を 3.5m で見張ると、
+            // 経路の終点で「届いていない」を毎フレーム出し続けた（2026-10-10 12:40 の記録）。
+            var status = this.navigation.Tick(this.approachTarget, this.approachStopAt);
+
             if (DateTime.UtcNow - this.approachIssuedUtc < ApproachRepathInterval)
             {
-                this.navigation.Tick(this.approachTarget, stopAt);
                 return;
             }
 
-            // 間隔が空いていても、狙う先がほとんど動いていないなら引き直さない。
+            // 間隔が空いていても、狙う先がほとんど動いておらず、止める距離も同じなら引き直さない。
             // 同じ場所へ何度も引き直しても結果は変わらない。
             if (moved <= ApproachRepathMeters &&
-                this.navigation.Tick(this.approachTarget, stopAt) is MoveStatus.Moving)
+                MathF.Abs(stopAt - this.approachStopAt) < 0.01f &&
+                status is MoveStatus.Moving)
             {
                 return;
             }
@@ -3937,6 +4164,7 @@ public sealed class FateRunner(
         this.ParkPresetMovement();
         this.approaching = true;
         this.approachTarget = destination;
+        this.approachStopAt = stopAt;
         this.approachIssuedUtc = DateTime.UtcNow;
 
         // 引き直した回数を出す。ガクガクするときはここが増え続ける。
@@ -4091,6 +4319,7 @@ public sealed class FateRunner(
     {
         this.approaching = false;
         this.approachIssues = 0;
+        this.detourGoal = null;
         this.navigation.Stop();
         this.ResumePresetMovement();
     }
@@ -5265,6 +5494,7 @@ public sealed class FateRunner(
         // つまり自分で外すしかない。
         this.targets.ReleaseTarget();
         this.targets.StopAutoAttack();
+        this.ForgetDetour();
 
         // 自分が入れたぶんだけ戻す。利用者が自分で入れていたものは触らない。
         rotation.Release("F.A.T.E 周回の終了");

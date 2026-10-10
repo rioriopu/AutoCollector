@@ -1376,7 +1376,25 @@ public sealed partial class MainWindow : EuWindow
         }
 
         EUi.Spacing();
-        changed |= this.DrawSmoothPathSettings();
+        EUi.Label("移動の見た目");
+
+        var smooth = Plugin.C.SmoothMovement;
+        if (EUi.Checkbox("移動の角を曲線にしてなめらかに動く", ref smooth))
+        {
+            Plugin.C.SmoothMovement = smooth;
+            changed = true;
+        }
+
+        EUi.MutedParagraph("  vnavmesh の経路の角を曲線に整えて動きます。整えられない所は、今までどおり vnavmesh の経路で動きます");
+
+        var smoothFlight = Plugin.C.SmoothFlight;
+        if (EUi.Checkbox("飛んで向かうときも曲線にする", ref smoothFlight))
+        {
+            Plugin.C.SmoothFlight = smoothFlight;
+            changed = true;
+        }
+
+        EUi.MutedParagraph("  新しく作る曲線は、ゲームの当たり判定で地形や物に当たらないと確かめてから使います");
 
         if (changed)
         {
@@ -1384,50 +1402,4 @@ public sealed partial class MainWindow : EuWindow
         }
     }
 
-    /// <summary>
-    /// 曲がり角を丸めて走る設定。
-    ///
-    /// <b>既定は無効。</b>入れると動きの見た目が変わるため、
-    /// 入れた状態と入れない状態を見比べられるようにしてある。
-    /// </summary>
-    private bool DrawSmoothPathSettings()
-    {
-        var changed = false;
-
-        EUi.Label("移動の見た目");
-
-        var smooth = Plugin.C.SmoothPath;
-
-        if (EUi.Checkbox("曲がり角を丸めて走る##smoothpath", ref smooth))
-        {
-            Plugin.C.SmoothPath = smooth;
-            changed = true;
-        }
-
-        EUi.MutedParagraph(
-            "  vnavmesh の経路はナビメッシュの境目を結んだ折れ線なので、" +
-            "そのまま辿ると「直線 → 直角 → 直線」の機械的な動きになります。" +
-            "入れると、角を弧に置き換えて回り込みます。");
-
-        EUi.MutedParagraph(
-            "  経路そのものは変えません。丸めた先がナビメッシュから外れる角は、" +
-            "丸めずに元のまま走ります。");
-
-        if (!smooth)
-        {
-            return changed;
-        }
-
-        var radius = Plugin.C.SmoothMaxRadius;
-
-        if (EUi.SliderFloat("弧の大きさ##smoothradius", ref radius, 1.0f, 5.0f, decimals: 1))
-        {
-            Plugin.C.SmoothMaxRadius = radius;
-            changed = true;
-        }
-
-        EUi.MutedParagraph("  大きいほど大回りになります。狭い通路では丸められず、元のまま走ります。");
-
-        return changed;
-    }
 }

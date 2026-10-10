@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Threading;
@@ -8,6 +8,7 @@ using AutoCollector.Ipc;
 using Dalamud.Game.ClientState.Conditions;
 using ECommons.DalamudServices;
 using ECommons.GameHelpers;
+using SmoothNav.Core;
 
 namespace AutoCollector.Automation;
 
@@ -88,8 +89,17 @@ public enum MoveStatus
 ///
 /// また vnavmesh 側の設定でスタック時に自動再試行が働くため、
 /// 走行フラグは false と true を往復する。1 回 false を見ただけで完了と判定してはいけない。
+///
+/// <b>曲線にする移動（<see cref="SmoothMoveService"/>）。</b>
+/// 有効なら vnavmesh 任せ（SimpleMove）で頼まず、自分で経路を探して角を曲線に整え、その経路を辿らせる。
+/// 整えられない・間に合わないときは公式の経路を辿らせ、経路が無い・頼めないときは今までどおり vnavmesh 任せで頼む。
+/// 到着・止まった・届かないの見張りは今までと同じ。
 /// </summary>
-public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmesh, BossModIpc bossMod)
+public sealed class NavigationService(
+    AnomalyLog anomalyLog,
+    VnavmeshIpc vnavmesh,
+    BossModIpc bossMod,
+    SmoothMoveService? smooth = null)
 {
     /// <summary>
     /// 到着したと認める前に、条件を満たし続ける必要のある判定回数。
@@ -155,13 +165,6 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
     public const float DefaultTolerance = 0.25f;
 
     /// <summary>
-    /// 空中で許す弧の最大半径。
-    ///
-    /// 空いているかを確かめる手立てが無いので、地上より小さく抑える。
-    /// </summary>
-    private const float FlyMaxRadius = 2f;
-
-    /// <summary>
     /// 立ち位置を探す向き（度）。相手から見て、いま自分がいる側を 0 度とする。
     ///
     /// <b>手前から順に試す。</b>いちばん近い側から当たれば移動が短く済む。
@@ -184,9 +187,20 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
     private readonly AnomalyLog anomalyLog = anomalyLog;
     private readonly VnavmeshIpc vnavmesh = vnavmesh;
     private readonly BossModIpc bossMod = bossMod;
+    private readonly SmoothMoveService? smooth = smooth;
 
-    /// <summary>曲がり角を丸める係。経路探索はしない。</summary>
-    private readonly PathSmoother smoother = new(anomalyLog, vnavmesh);
+    /// <summary>曲線に整える部品の入れ物。FATE の接近（<see cref="FateApproach"/>）も同じものを使う。</summary>
+    internal SmoothMoveService? Smooth => this.smooth;
+
+    /// <summary>曲線に整えた経路の頼み先（移動の部品ごとに 1 つ）。</summary>
+    private RoutePlanner? planner;
+
+    /// <summary>自分で頼んだ経路探索の取り消し。目的地を変えた・止めたときに取り消す（遠い探索は十数秒走り続けるため）。</summary>
+    private CancellationTokenSource? searchCancel;
+
+    /// <summary>整えた経路が使えず vnavmesh 任せで頼み直したが、別の探索中で断られ、受け取られるのを待っているか。</summary>
+    private bool fallbackPending;
+    private DateTime fallbackSinceUtc;
 
     /// <summary>
     /// 直前の <see cref="BeginMove(Vector3, float, bool, out string)"/> が
@@ -234,24 +248,8 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
     /// <summary>BMR の AI の移動を、こちらが止めているか。</summary>
     private bool pausedExternalMovement;
 
-    /// <summary>
-    /// いまの移動の世代。
-    ///
-    /// 角を丸めるための経路探索は非同期で、終わるころには別の移動へ
-    /// 移っていることがある。その結果で動き出すと筋が通らないので、
-    /// 番号が違えば捨てる。
-    /// </summary>
-    private int moveGeneration;
-
-    private Task<List<Vector3>>? smoothTask;
-    private CancellationTokenSource? smoothCancel;
-    private int smoothGeneration;
-
-    /// <summary>この移動で、丸めた経路をもう渡したか。渡すのは 1 度だけ。</summary>
-    private bool smoothHandedOver;
-
-    /// <summary>いま丸めようとしている経路が飛行のものか。</summary>
-    private bool smoothedWithFly;
+    /// <summary>この移動で「目的地まで残っている」を記録したか。</summary>
+    private bool shortReported;
 
     public bool IsAvailable => this.vnavmesh.IsLoaded;
 
@@ -464,8 +462,7 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
         this.idleShortFrames = 0;
         this.escapes = 0;
         this.escapeJumpedUtc = default;
-        this.moveGeneration++;
-        this.CancelSmoothing();
+        this.shortReported = false;
         this.startTerritory = Svc.ClientState.TerritoryType;
         this.lastPosition = Player.Available ? Player.Position : default;
         this.lastMovementUtc = DateTime.UtcNow;
@@ -513,7 +510,37 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
         this.vnavmesh.TrySetPathTolerance(this.desiredTolerance);
 
         // 目的地をメッシュへ乗せ直す。飛ぶときは空中の点を狙っているので触らない。
+        //
+        // **曲線に整える前に行う。** 整える元になる経路が、
+        // 到達できない点を終点にしていると、整えても意味が無い。
         var target = fly ? destination : this.Sanitise(destination);
+
+        // 曲線にする移動：自分で経路を探し、整えてから辿らせる（受け取りは Tick）。
+        // 探索を頼めないときは、今までどおり vnavmesh 任せで頼む。
+        //
+        // **今の経路は止めない。** 整った経路を辿らせた時点で差し替わる（Reissue の約束と同じ）。
+        this.CancelPlanning();
+        if (this.smooth is { Enabled: true } && Player.Available)
+        {
+            this.searchCancel = new CancellationTokenSource();
+            if (this.vnavmesh.TryPathfindCancelable(Player.Position, target, fly, this.searchCancel.Token, out var search) &&
+                search is not null)
+            {
+                this.planner ??= this.smooth.CreatePlanner();
+                this.planner.Begin(search, fly, range, this.smooth.Now);
+                this.moveIssued = true;
+                this.issuedWithFly = fly;
+                this.issuedDestination = target;
+
+                // ここから先はこちらが動かす。BMR には手を引いてもらう。
+                this.TakeOverExternalMovement();
+
+                failureReason = string.Empty;
+                return true;
+            }
+
+            this.CancelPlanning();
+        }
 
         if (!this.vnavmesh.TryMoveCloseTo(target, fly, range, out var accepted))
         {
@@ -545,13 +572,6 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
         // ここから先はこちらが動かす。BMR には手を引いてもらう。
         this.TakeOverExternalMovement();
 
-        // **走り出してから、角を丸めた経路に差し替える。**
-        //
-        // 丸めるには経路の形が要るが、経路探索は非同期で数秒かかることがある。
-        // 待ってから走り出すと、街中では目に見えて固まる。
-        // 先に公式へ頼んで走らせ、形が手に入った時点で差し替える。
-        this.BeginSmoothing(target, fly);
-
         failureReason = string.Empty;
         return true;
     }
@@ -579,8 +599,13 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
         var position = Player.Position;
         var now = DateTime.UtcNow;
 
-        // 角を丸めた経路が出来ていれば、ここで差し替える。
-        this.TickSmoothing();
+
+        // 曲線にする移動：整った経路を受け取って辿らせる。最初の経路を渡すまで（探索・整える間）は移動中。
+        if ((this.planner is { Active: true } || this.fallbackPending) &&
+            this.TickPlanner(position, destination, range) is { } planning)
+        {
+            return planning;
+        }
 
         // 走行状態を 3 つとも見る。1 つでも進行中なら移動継続とみなす。
         if (!this.vnavmesh.TryPathIsRunning(out var running) ||
@@ -626,11 +651,16 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
             this.idleShortFrames++;
             if (this.idleShortFrames >= RequiredStableFrames)
             {
-                this.anomalyLog.Info(
-                    "Navigation",
-                    $"経路の終点に着きましたが目的地まで {distance:F1} ヤルム残っています");
+                // 呼び出し側は引き直すまで毎フレーム見張るので、記録は 1 回の移動につき 1 回だけ。
+                if (!this.shortReported)
+                {
+                    this.shortReported = true;
+                    this.anomalyLog.Info(
+                        "Navigation",
+                        $"経路の終点に着きましたが目的地まで {distance:F1} ヤルム残っています");
+                }
 
-                // 到着と同じ扱い。返すのは Stop() を受けたとき。
+                // 到着と同じ扱い。移動権を返すのは Stop() を受けたとき。
                 return MoveStatus.ShortOfTarget;
             }
 
@@ -658,6 +688,10 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
                 "Navigation",
                 $"{StuckWindow.TotalSeconds:F0} 秒間 {StuckProgressMeters:F0} ヤルムも進めていません");
 
+            // 整えている途中の経路があれば捨てる。呼び出し側が別の手を打つので、
+            // いまから整った経路が降ってくると、その手と取り合いになる。
+            this.CancelPlanning();
+
             return this.Finish(MoveStatus.Stuck);
         }
 
@@ -679,11 +713,10 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
             return;
         }
 
+        this.CancelPlanning();
         this.vnavmesh.TryStop();
         this.moveIssued = false;
         this.escapeJumpedUtc = default;
-        this.moveGeneration++;
-        this.CancelSmoothing();
     }
 
     /// <summary>
@@ -883,9 +916,6 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
             this.lastIssueUtc = DateTime.UtcNow;
             this.anomalyLog.Info("Navigation", $"{why}経路を引き直しました");
 
-            // 引き直したら、丸めもやり直す。やり直さないと
-            // 引き直した瞬間から角張ったままになる。
-            this.BeginSmoothing(this.issuedDestination, this.issuedWithFly);
             return;
         }
 
@@ -894,173 +924,6 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
         this.anomalyLog.Info("Navigation", $"{why}経路を引き直そうとしましたが、まだ受け取れません");
     }
 
-    /// <summary>
-    /// 角を丸めた経路を作り始める。
-    ///
-    /// <b>走り出しは止めない。</b>ここへ来た時点で、公式への移動依頼は
-    /// すでに受け取られている。丸めた経路は出来たときに差し替えるだけで、
-    /// 出来なければ公式の経路のまま進む。
-    /// </summary>
-    private void BeginSmoothing(Vector3 destination, bool fly)
-    {
-        this.CancelSmoothing();
-        this.smoothHandedOver = false;
-
-        if (!Plugin.C.SmoothPath || !Player.Available || !this.vnavmesh.IsLoaded)
-        {
-            return;
-        }
-
-        // **飛ぶ経路も対象にする。**
-        //
-        // 当初は地上だけにしていたが、FATE 周回の移動はほとんどが飛行で、
-        // それでは一度も丸まらない（2026-10-09 実機。利用者から
-        // 「全く曲線を描いていない」と報告があった）。
-        //
-        // 空中は、作った点が空いているかを確かめられない。vnavmesh が
-        // 公開している問い合わせは Query.Mesh.* だけで、空中を聞く口が無い
-        // （vnavmesh/IPCProvider.cs:35-39 で確認）。
-        // 弧は必ず「角とその両隣を結んだ三角形の内側」に収まり、
-        // 元の経路から離れる量は半径で頭打ちになる。半径を小さく取って、
-        // ぶつかったら詰まり検知が引き直す、という形にする。
-        //
-        // <b>FateApproach には影響しない。</b>あちらは NavigationService を
-        // 通さず、自分で経路を求めて検査してから渡している。
-        this.smoothCancel = new CancellationTokenSource();
-        this.smoothGeneration = this.moveGeneration;
-        this.smoothedWithFly = fly;
-
-        if (!this.vnavmesh.TryPathfindCancelable(
-                Player.Position, destination, fly, this.smoothCancel.Token, out var task) ||
-            task is null)
-        {
-            this.CancelSmoothing();
-            return;
-        }
-
-        this.smoothTask = task;
-    }
-
-    /// <summary>
-    /// 丸めた経路が出来ていたら差し替える。
-    ///
-    /// <c>Path.MoveTo</c> は経路探索を通さず、渡した点をそのまま辿らせる。
-    /// つまりここで渡すのは「同じ道を、角だけ丸めたもの」になる。
-    /// </summary>
-    private void TickSmoothing()
-    {
-        if (this.smoothTask is not { } task || !task.IsCompleted)
-        {
-            return;
-        }
-
-        var mine = this.smoothGeneration == this.moveGeneration;
-
-        this.smoothTask = null;
-        this.CancelSmoothing();
-
-        if (!mine || this.smoothHandedOver || !Player.Available ||
-            task.IsFaulted || task.IsCanceled)
-        {
-            return;
-        }
-
-        // 空中は弧を小さめに取る。空いているかを確かめられないぶん、
-        // 元の経路から離れる量を抑える。
-        var radius = this.smoothedWithFly
-            ? MathF.Min(Plugin.C.SmoothMaxRadius, FlyMaxRadius)
-            : Plugin.C.SmoothMaxRadius;
-
-        var smoothed = this.smoother.Smooth(
-            task.Result, Plugin.C.SmoothEpsilon, radius, validateOnMesh: !this.smoothedWithFly);
-
-        if (smoothed is null || smoothed.Count < 2)
-        {
-            return;
-        }
-
-        // **探索の間に進んでいる。** 後ろの点を残したまま渡すと、
-        // いま来た道を少し戻ってから走り出すことになる。
-        TrimBehind(smoothed, Player.Position);
-
-        if (smoothed.Count < 2)
-        {
-            // もう終点の近く。差し替える意味が無い。
-            return;
-        }
-
-        // **飛ぶかどうかを引き継ぐ。**
-        //
-        // Path.MoveTo は受け取った真偽値を反転して渡しており
-        // （vnavmesh/IPCProvider.cs:41 followPath.Move(..., !fly)）、
-        // 高さを見るかどうかがここで決まる。固定していると、
-        // 飛んでいる経路を地上あつかいで辿らせることになる。
-        if (!this.vnavmesh.TryMoveAlong(smoothed, this.smoothedWithFly))
-        {
-            return;
-        }
-
-        this.smoothHandedOver = true;
-        this.lastIssueUtc = DateTime.UtcNow;
-    }
-
-    /// <summary>走らせている探索を捨てる。</summary>
-    private void CancelSmoothing()
-    {
-        var cts = this.smoothCancel;
-        this.smoothCancel = null;
-        this.smoothTask = null;
-
-        if (cts is null)
-        {
-            return;
-        }
-
-        // **取り消しに失敗しても必ず捨てる。**
-        // Cancel と Dispose を同じ try に入れると、Cancel が投げたときに
-        // Dispose を飛ばして漏らす。
-        try
-        {
-            cts.Cancel();
-        }
-        catch
-        {
-            // 取り消せなくても、世代番号で結果を捨てる。
-        }
-
-        try
-        {
-            cts.Dispose();
-        }
-        catch
-        {
-            // 捨てられなくても動きは変えない。
-        }
-    }
-
-    /// <summary>いまいる場所より手前の点を落とす。</summary>
-    private static void TrimBehind(List<Vector3> points, Vector3 here)
-    {
-        var nearest = 0;
-        var best = float.MaxValue;
-        var me = new Vector2(here.X, here.Z);
-
-        for (var i = 0; i < points.Count; i++)
-        {
-            var d = Vector2.DistanceSquared(new Vector2(points[i].X, points[i].Z), me);
-
-            if (d < best)
-            {
-                best = d;
-                nearest = i;
-            }
-        }
-
-        if (nearest > 0)
-        {
-            points.RemoveRange(0, nearest);
-        }
-    }
 
     /// <summary>進んでいないことの数え直し。両方の層をまとめて揃える。</summary>
     private void ResetProgress(Vector3 position, DateTime now)
@@ -1137,5 +1000,90 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
                c[ConditionFlag.Jumping] ||
                c[ConditionFlag.Jumping61] ||
                c[ConditionFlag.Unconscious];
+    }
+
+    /// <summary>
+    /// 整った経路を受け取って辿らせる。探索・整える間と、vnavmesh 任せの頼み直しを待つ間は <see cref="MoveStatus.Moving"/>。
+    /// 経路を渡し終えたら null（以後は今までの見張り）。
+    /// </summary>
+    private MoveStatus? TickPlanner(Vector3 position, Vector3 destination, float range)
+    {
+        if (this.fallbackPending)
+        {
+            // vnavmesh が別の探索中で断った。受け取られるまで頼み直す。止まった判定と同じ時間で諦める。
+            if (this.vnavmesh.TryMoveCloseTo(destination, this.issuedWithFly, range, out var accepted) && accepted)
+            {
+                this.fallbackPending = false;
+                this.lastMovementUtc = DateTime.UtcNow;
+                return MoveStatus.Moving;
+            }
+
+            return DateTime.UtcNow - this.fallbackSinceUtc > StuckWindow ? MoveStatus.Stuck : MoveStatus.Moving;
+        }
+
+        if (this.planner!.Tick(position, this.smooth!.Now) is { } plan)
+        {
+            this.Apply(plan, destination, range);
+            if (this.fallbackPending)
+            {
+                // 断られた。頼み直しは次の見張りから。
+                return MoveStatus.Moving;
+            }
+        }
+
+        if (this.planner is { Pending: true })
+        {
+            // 探索・整える間は vnavmesh が走っていない。止まった・届かないと数えない。
+            this.lastMovementUtc = DateTime.UtcNow;
+            this.lastPosition = position;
+            return MoveStatus.Moving;
+        }
+
+        return null;
+    }
+
+    /// <summary>受け取った経路を辿らせる。経路が無いときは今までどおり vnavmesh 任せで頼む。</summary>
+    private void Apply(RoutePlan plan, Vector3 destination, float range)
+    {
+        this.anomalyLog.Info("Navigation", "移動の経路：" + SmoothMoveService.Describe(plan));
+        if (!plan.Fallback)
+        {
+            if (plan.Waypoints.Count == 0)
+            {
+                // 既に目的地から range の内側。動かなくてよい（到着は今までの見張りが判定する）。
+                return;
+            }
+
+            // 途中からの乗り換えは、まだ経路を辿っている間だけ（辿り終えた後に足すと、着いた所から動き直す）。
+            if (plan.Splice && (!this.vnavmesh.TryPathIsRunning(out var running) || !running))
+            {
+                return;
+            }
+
+            if (this.vnavmesh.TryMoveAlong([.. plan.Waypoints], this.issuedWithFly))
+            {
+                this.lastMovementUtc = DateTime.UtcNow;
+                return;
+            }
+        }
+
+        if (!this.vnavmesh.TryMoveCloseTo(destination, this.issuedWithFly, range, out var accepted) || !accepted)
+        {
+            this.fallbackPending = true;
+            this.fallbackSinceUtc = DateTime.UtcNow;
+        }
+    }
+
+    /// <summary>自分で頼んだ探索と整える処理を取り消す。</summary>
+    private void CancelPlanning()
+    {
+        this.planner?.Cancel();
+        this.fallbackPending = false;
+        if (this.searchCancel is not null)
+        {
+            // 取り消しの合図は破棄しない（vnavmesh の探索が後から合図を読むことがある）。
+            this.searchCancel.Cancel();
+            this.searchCancel = null;
+        }
     }
 }
