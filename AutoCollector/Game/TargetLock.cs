@@ -8,10 +8,11 @@ namespace AutoCollector.Game;
 /// </summary>
 /// <param name="Id">GameObjectId。</param>
 /// <param name="NameId">名前の番号（BNpcName）。ObjectTable の枠が別の敵に使い回されたのを見分ける。</param>
-/// <param name="MayAttack">狙ってよい敵か（この FATE の敵か、自分に敵視を持っている敵）。</param>
+/// <param name="MayAttack">
+/// 狙ってよい敵か。FATE の中では「この FATE の敵（FateId が一致＝名札に紫の FATE の印）」だけ。
+/// FATE の外（反撃）では「自分に敵視を持っている敵」。
+/// </param>
 /// <param name="Ally">自分と同じ陣営か（FATE で一緒に戦う NPC）。</param>
-/// <param name="AggroNow">いま敵視リストに載っているか（＝いま自分を攻撃している）。</param>
-/// <param name="MaxHp">最大 HP。大きい敵（ボス・強敵）を先に選ぶのに使う。</param>
 /// <param name="Distance">自分からの距離。</param>
 /// <param name="Forlorn">この FATE のフォーローン（ボーナスの敵）か。</param>
 public readonly record struct MobView(
@@ -19,8 +20,6 @@ public readonly record struct MobView(
     uint NameId,
     bool MayAttack,
     bool Ally,
-    bool AggroNow,
-    uint MaxHp,
     float Distance,
     bool Forlorn);
 
@@ -60,18 +59,36 @@ public readonly record struct LockDecision(LockAction Action, ulong TargetId, st
 /// <b>固定を外すのは次のときだけ。</b>
 /// <list type="bullet">
 /// <item>倒れた・消えた・狙えなくなった（一覧に居ない）</item>
-/// <item>狙ってよい敵でなくなった（FATE の外の敵で、敵視が切れた）</item>
+/// <item>狙ってよい敵でなくなった</item>
 /// <item>フォーローンが出た（利用者の要件 docs/27 §4-3。フォーローンを固定している間は替えない）</item>
 /// <item>同じ陣営（味方の NPC）を狙っていて、ほかに本物の敵が居る（陣営の読み違いを直す）</item>
 /// </list>
 ///
-/// <b>次の相手は「味方でない → いま攻撃してきている → 大きい → 近い」の順で選ぶ。</b>
-/// 攻撃してきた敵を先に片付ける（反撃の方針・資料 7 章）。そのあとは今までどおり大きい敵、近い敵。
+/// <b>次の相手は「一番近い敵」（利用者の要件 2026-10-10 夕）。</b>味方の NPC は後回し。
+/// 以前は「いま攻撃してきている → 大きい → 近い」で、40m 先の敵を選ぶことがあった。
+/// いまのハードターゲットを引き継ぐこともしない（他から置かれた相手は、近いとは限らない）。
+///
+/// <b>狙ってはいけない敵が置かれていたら外す。</b>FATE の中ではフィールドのモンスター（FATE の印の無い敵）を狙わない
+/// （利用者の要件 2026-10-10 夕）。他から置かれていても、狙う敵が居ればその敵へ置き直し、居なければ外す
+/// （RSR の Henched はハードターゲットを殴るため）。
 ///
 /// ゲームに触らないので、ゲーム無しで試せる（tools/regression/fate_combat.py）。
 /// </summary>
 public static class TargetLock
 {
+    /// <summary>
+    /// 狙ってよい敵か（ゲームから読んだ値で決める）。生きている敵かどうかは呼び出し側が先に見る。
+    ///
+    /// <b>FATE の中：その FATE の敵（敵の FateId がいまの FATE の番号と一致）だけ。</b>
+    /// FateId が 0 の敵はフィールドのモンスターで、絡んできても狙わない。番号が違う敵は隣の FATE の敵（利用者 2026-10-10 夕）。
+    /// <b>FATE の外（番号 0）：自分に敵視を持っている敵</b>（周回の移動中に絡まれたときの反撃）。
+    /// </summary>
+    /// <param name="fateId">いま参加している FATE の番号。FATE の外なら 0。</param>
+    /// <param name="mobFateId">敵の FateId。</param>
+    /// <param name="aggroOnMe">自分に敵視を持っているか（FATE の外でだけ見る）。</param>
+    public static bool MayAttack(ushort fateId, ushort mobFateId, bool aggroOnMe)
+        => fateId != 0 ? mobFateId == fateId : aggroOnMe;
+
     /// <param name="locked">固定している相手。無ければ 0。</param>
     /// <param name="lockedNameId">固定したときの名前の番号。</param>
     /// <param name="current">いまのハードターゲット。無ければ 0。</param>
@@ -115,32 +132,23 @@ public static class TargetLock
                 : new(LockAction.Restore, keep.Id, "他から狙いを替えられたので戻す");
         }
 
-        // ここから先は固定が無い（倒れた・消えた・狙ってよい敵でなくなった）。
-
-        // **いまのハードターゲットが狙ってよい敵なら、それを固定する。** 利用者が手で選んだ相手など。
-        var now = mobs.Where(x => x.Id == current).Cast<MobView?>().FirstOrDefault();
-        if (now is { MayAttack: true } chosen && (!chosen.Ally || !hasEnemy))
-        {
-            return new(LockAction.Switch, chosen.Id, "いまのターゲットを固定する");
-        }
-
+        // ここから先は固定が無い（倒れた・消えた・狙ってよい敵でなくなった）。一番近い敵を選ぶ。
         if (Best(mobs) is { } best)
         {
-            return new(LockAction.Switch, best.Id, held is null && locked != 0 ? "前の相手が倒れたので次へ" : "狙う相手を選んだ");
+            return new(LockAction.Switch, best.Id, held is null && locked != 0 ? "前の相手が倒れたので一番近い敵へ" : "一番近い敵を選んだ");
         }
 
-        // 狙う相手が居ない。狙ってはいけない敵が置かれていれば外す（RSR の Henched はハードターゲットを殴るため）。
+        // 狙う相手が居ない。狙ってはいけない敵（フィールドのモンスター）が置かれていれば外す。
+        var now = mobs.Where(x => x.Id == current).Cast<MobView?>().FirstOrDefault();
         return now is { MayAttack: false }
             ? new(LockAction.Clear, 0, "狙ってはいけない敵が置かれていたので外す")
             : new(LockAction.None, 0, "狙う相手が居ない");
     }
 
-    /// <summary>狙ってよい敵の中から、次に固定する相手を選ぶ。居なければ null。</summary>
+    /// <summary>狙ってよい敵の中から、次に固定する相手を選ぶ。味方の NPC は後回しで、あとは一番近い敵。居なければ null。</summary>
     public static MobView? Best(IReadOnlyList<MobView> mobs)
         => mobs.Where(x => x.MayAttack)
             .OrderBy(x => x.Ally)
-            .ThenByDescending(x => x.AggroNow)
-            .ThenByDescending(x => x.MaxHp)
             .ThenBy(x => x.Distance)
             .Cast<MobView?>()
             .FirstOrDefault();

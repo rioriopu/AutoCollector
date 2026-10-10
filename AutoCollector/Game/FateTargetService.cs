@@ -17,7 +17,12 @@ namespace AutoCollector.Game;
 /// <summary>
 /// 狙ってよい敵を決める。
 ///
-/// <b>目指す挙動：自分からは FATE の敵にしか仕掛けない。ただし攻撃されたら反撃する。</b>
+/// <b>目指す挙動（利用者の要件 2026-10-10 夕）：FATE の中では、その FATE の敵（名札に紫の FATE の印がある敵）だけを狙う。
+/// フィールドのモンスターは、絡まれても FATE の中では狙わない。</b>
+/// FATE を終えたあと（周回の移動中）に絡まれたときの反撃（FateRunner.TickSelfDefense）は別で、
+/// そこでは「自分に敵視を持っている敵」を狙う（<see cref="MayAttack"/> に FATE の番号 0 を渡す）。
+/// 以前は FATE の中でも「FATE の敵か、自分に敵視を持っている敵」を狙い、
+/// さらに FateId が 0 の敵（フィールドのモンスター）も円の中なら FATE の敵として扱っていた。
 ///
 /// これを BossMod Reborn（BMR）の設定だけでは表現できない。
 /// BMR の <c>AIHintsBuilder</c> は「敵視リストに載っている敵」を
@@ -39,14 +44,6 @@ namespace AutoCollector.Game;
 /// </summary>
 public sealed unsafe class FateTargetService(AnomalyLog anomalyLog)
 {
-    /// <summary>
-    /// FATE の円からこれだけ外に出た敵も、その FATE の敵として扱う。
-    ///
-    /// 敵は円の縁を越えて動く。厳密に円内だけにすると、
-    /// 追いかけている最中に対象から外れる。
-    /// </summary>
-    private const float FateMobSlackMeters = 8f;
-
     /// <summary>
     /// 一度「自分に敵視がある」と見た敵を、何秒のあいだ覚えておくか。
     ///
@@ -197,56 +194,38 @@ public sealed unsafe class FateTargetService(AnomalyLog anomalyLog)
     /// <summary>
     /// 狙ってよい敵か。
     ///
-    /// <b>「FATE の敵」か「自分に敵視を持っている敵」のどちらか。</b>
-    /// これが要望そのもの。前者が「自分から仕掛ける相手」、
-    /// 後者が「反撃する相手」。
+    /// <b>FATE の中（<paramref name="fateId"/> が 0 でない）：その FATE の敵だけ。</b>
+    /// 絡んできたフィールドのモンスターも狙わない（利用者の要件 2026-10-10 夕「F.A.T.E 該当モブだけ攻撃」「紫色のモブのみ」）。
+    ///
+    /// <b>FATE の外（0）：自分に敵視を持っている敵。</b>FATE を終えて移動している間に絡まれたときの反撃用。
     /// </summary>
     /// <param name="obj">相手。</param>
-    /// <param name="fateId">いま参加している FATE。0 なら FATE の敵は対象外。</param>
-    /// <param name="fateCentre">FATE の中心。円で絞るのに使う。</param>
-    /// <param name="fateRadius">FATE の半径。</param>
-    public bool MayAttack(IGameObject obj, ushort fateId, Vector3 fateCentre, float fateRadius)
+    /// <param name="fateId">いま参加している FATE。0 なら FATE の外。</param>
+    public bool MayAttack(IGameObject obj, ushort fateId)
     {
         if (!IsLiveEnemy(obj))
         {
             return false;
         }
 
-        return this.IsFateMob(obj, fateId, fateCentre, fateRadius) || this.IsAggroOnMe(obj);
+        // 敵視は FATE の外でだけ見る（覚えておく処理があるので、FATE の中では呼ばない）。
+        return TargetLock.MayAttack(fateId, FateIdOf(obj), fateId == 0 && this.IsAggroOnMe(obj));
     }
 
     /// <summary>
     /// この FATE の敵か。
     ///
-    /// <b>FateId と円の両方で見る。</b>
-    /// FateId だけだと、隣の FATE の敵を拾う（番号が違えば弾けるが、
-    /// 読めないこともある）。円だけだと、たまたま通りかかった
-    /// 野良を拾う。両方を要求すれば取り違えない。
+    /// <b>敵の FateId が、いま参加している FATE の番号と一致するものだけ。</b>
+    /// 名札の紫の FATE の印はこの番号で付く。周回の他の所（FateScanner.FindNearestMob）も同じ見方をしている。
+    /// BMR も FATE の敵を <c>FateID</c> で見分ける。
+    ///
+    /// 以前は「番号が 0 なら読めなかったとみなし、円の中にいれば FATE の敵」としていた。
+    /// しかし 0 はフィールドのモンスター（FATE の敵ではない）の値で、円の中のフィールドのモンスターを狙っていた
+    /// （2026-10-10 12:40 の記録：FATE の敵「パックジャッカル」の近くの「ジャッカル」を 40m 先まで追った）。
+    /// 番号が違う敵は隣の FATE の敵で、BMR 側でも優先度 -2（無敵扱い）なので狙わない。
     /// </summary>
-    public bool IsFateMob(IGameObject obj, ushort fateId, Vector3 fateCentre, float fateRadius)
-    {
-        if (fateId == 0)
-        {
-            return false;
-        }
-
-        // **番号が読めたなら、それを信じる。**
-        // 自分の FATE と違えば、隣の FATE の敵。BMR 側でも
-        // 優先度 -2（無敵扱い）になるので、攻撃しても意味がない。
-        var mobFate = FateIdOf(obj);
-
-        if (mobFate != 0)
-        {
-            return mobFate == fateId;
-        }
-
-        // 番号が読めなかった。円の中にいるかで判断する。
-        var flat = Vector2.Distance(
-            new Vector2(obj.Position.X, obj.Position.Z),
-            new Vector2(fateCentre.X, fateCentre.Z));
-
-        return flat <= MathF.Max(fateRadius, 20f) + FateMobSlackMeters;
-    }
+    public static bool IsFateMob(IGameObject obj, ushort fateId)
+        => fateId != 0 && TargetLock.MayAttack(fateId, FateIdOf(obj), false);
 
     /// <summary>
     /// 生きていて、狙える敵か。
@@ -357,14 +336,17 @@ public sealed unsafe class FateTargetService(AnomalyLog anomalyLog)
     /// それをそのまま受け入れていたため、9 秒で 6 回も狙いが替わっていた（2026-10-10 12:40 の記録）。
     /// いまは自分が固定した相手を正とし、他から替えられていたら戻す。判断は <see cref="TargetLock"/>。
     ///
+    /// <b>狙うのは FATE の敵だけで、一番近い敵から</b>（利用者の要件 2026-10-10 夕。<see cref="MayAttack"/>・<see cref="TargetLock.Best"/>）。
+    ///
     /// <b>フォーローンが居れば、何より先にそれを狙う</b>（利用者の要件 docs/27 §4-3）。
     ///
     /// <b>同じ陣営のもの（FATE で一緒に戦う NPC）は後回し。</b>
     /// イエロージャケットなどを狙い、討伐すべき敵を殴らないことがあった（2026-10-08 実機）。
     /// 弾かずに後回しにするのは、陣営を読めなかったときに今までどおりの選び方へ落とすため。
     /// </summary>
+    /// <param name="fateId">いま参加している FATE。0 なら FATE の外（絡まれたときの反撃）。</param>
     /// <returns>置いた相手。居なければ null。</returns>
-    public IGameObject? AcquireTarget(ushort fateId, Vector3 fateCentre, float fateRadius)
+    public IGameObject? AcquireTarget(ushort fateId)
     {
         if (!Player.Available)
         {
@@ -372,7 +354,6 @@ public sealed unsafe class FateTargetService(AnomalyLog anomalyLog)
         }
 
         var here = Player.Position;
-        this.RefreshEnmity();
 
         var views = new List<MobView>();
         var objects = new Dictionary<ulong, IGameObject>();
@@ -388,12 +369,10 @@ public sealed unsafe class FateTargetService(AnomalyLog anomalyLog)
             views.Add(new MobView(
                 obj.GameObjectId,
                 npc.NameId,
-                this.IsFateMob(obj, fateId, fateCentre, fateRadius) || this.IsAggroOnMe(obj),
+                this.MayAttack(obj, fateId),
                 SharesPlayerBattalion(obj),
-                this.enmity.Contains((uint)obj.EntityId),
-                npc.MaxHp,
                 Vector3.Distance(here, obj.Position),
-                fateId != 0 && IsForlorn(obj) && FateIdOf(obj) == fateId));
+                IsForlorn(obj) && IsFateMob(obj, fateId)));
         }
 
         var current = Svc.Targets.Target;
@@ -410,16 +389,28 @@ public sealed unsafe class FateTargetService(AnomalyLog anomalyLog)
             case LockAction.Switch:
                 var target = objects[decision.TargetId];
 
-                if (decision.Action == LockAction.Restore)
+                if (decision.Action == LockAction.Restore && current is not null)
                 {
                     this.Restores++;
 
                     // 取り合いは毎フレーム起きうる。記録は相手ごとに間を空ける。
-                    if (EzThrottler.Throttle($"AutoCollector.TargetRestore.{current?.GameObjectId ?? 0}", 3000))
+                    if (EzThrottler.Throttle($"AutoCollector.TargetRestore.{current.GameObjectId}", 3000))
                     {
                         this.anomalyLog.Info(
                             "Target",
-                            $"他から狙いを {current?.Name.TextValue ?? "なし"} に替えられたので {target.Name} に戻しました（{this.Restores} 回目）");
+                            $"他から狙いを {current.Name.TextValue} に替えられたので {target.Name} に戻しました（{this.Restores} 回目）");
+                    }
+                }
+                else if (decision.Action == LockAction.Restore)
+                {
+                    // **狙いが外れていた（他の相手に替えられたのではない）。置き直すだけで、取り合いには数えない。**
+                    // ゲームは遠すぎる敵などを狙いとして受け付けず、すぐ外す。置き直しが毎フレーム続くので、
+                    // 取り合いと同じに数えると「戻した」が 3 秒で約 170 回も増えた（2026-10-10 13:49・54m 先の敵）。
+                    if (EzThrottler.Throttle($"AutoCollector.TargetReset.{target.GameObjectId}", 10000))
+                    {
+                        this.anomalyLog.Info(
+                            "Target",
+                            $"狙いが外れていたので {target.Name} に置き直しました（{Vector3.Distance(here, target.Position):F0}m。遠いとゲームが受け付けないことがあります）");
                     }
                 }
                 else if (views.First(x => x.Id == decision.TargetId).Ally && EzThrottler.Throttle("AutoCollector.FateAllyTarget", 10000))

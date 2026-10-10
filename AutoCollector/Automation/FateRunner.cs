@@ -1785,7 +1785,8 @@ public sealed class FateRunner(
         // マウントに乗るのが遅れていた（2026-10-08 実機）。
         //
         // 殴る相手がいないなら、用意もしない。
-        var target = this.targets.AcquireTarget(0, Player.Position, 0f);
+        // FATE の番号 0＝FATE の外。自分に敵視を持っている敵だけを狙う。
+        var target = this.targets.AcquireTarget(0);
 
         if (target is null)
         {
@@ -3447,10 +3448,9 @@ public sealed class FateRunner(
     /// <summary>
     /// 狙う相手を決めて、ハードターゲットに置く。
     ///
-    /// <b>自分から仕掛けるのは FATE の敵だけ。絡まれたら反撃する。</b>
+    /// <b>狙うのはこの FATE の敵（名札に紫の FATE の印がある敵）だけで、一番近い敵から。倒れるまで替えない。</b>
+    /// フィールドのモンスターは、絡まれても FATE の中では狙わない（利用者 2026-10-10 夕）。
     /// 判定は <see cref="FateTargetService"/> が持つ。
-    /// 「絡まれたか」はゲームの敵視リスト（<c>UIState.Hater</c>）で見る。
-    /// BMR も同じものを読んでいる（WorldStateGameSync.cs:258-265）。
     ///
     /// <b>納品中は呼ばない。</b>納品へ向かう最中に敵を狙うと、
     /// BMR がそちらへ走って納品に行かない。
@@ -3462,7 +3462,7 @@ public sealed class FateRunner(
             return;
         }
 
-        var picked = this.targets.AcquireTarget(current.Id, current.Position, current.Radius);
+        var picked = this.targets.AcquireTarget(current.Id);
 
         if (picked is null)
         {
@@ -3488,14 +3488,15 @@ public sealed class FateRunner(
     }
 
     /// <summary>
-    /// 納品の最中に絡まれた敵を狙う。
+    /// 納品の最中に、戦闘になっていたら FATE の敵を狙う。
     ///
-    /// 納品へ向かう間は新しい敵を狙わないが、絡まれたら振り払う。
+    /// 納品へ向かう間は新しい敵を狙わないが、戦闘が続いていれば振り払う。
     /// ダイアログは戦闘中に開かないので、片付けないと納品できない。
+    /// ここでも狙うのはこの FATE の敵だけ（フィールドのモンスターは狙わない。利用者 2026-10-10 夕）。
     /// </summary>
     private void TickAcquireTargetDuringHandIn(FateInfo current)
     {
-        var picked = this.targets.AcquireTarget(current.Id, current.Position, current.Radius);
+        var picked = this.targets.AcquireTarget(current.Id);
 
         if (picked is null)
         {
@@ -3776,10 +3777,10 @@ public sealed class FateRunner(
 
         // **狙っている敵がいれば、その敵へ攻撃が届くかで動く。**
         //
-        // 狙いは倒れるまで固定してある（TickAcquireTarget）。戦闘中か、戦闘の前でも狙った敵がいれば、
-        // 届くまで近づき、4 秒届かなければ迂回する（利用者 2026-10-10）。
+        // 狙いは倒れるまで固定してある（TickAcquireTarget）。狙った敵（この FATE の敵だけ）がいれば、
+        // 戦闘の前でも届くまで近づき、4 秒届かなければ迂回する（利用者 2026-10-10）。
         if (Svc.Targets.Target is { } held && held.GameObjectId == this.lastTargetId &&
-            (Svc.Condition[ConditionFlag.InCombat] || this.targets.MayAttack(held, fate.Id, fate.Position, fate.Radius)))
+            this.targets.MayAttack(held, fate.Id))
         {
             this.TickReachTarget(held);
             return;

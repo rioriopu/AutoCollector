@@ -12,9 +12,9 @@ static class Program
     static int count;
     static void Check(bool ok, string name) { if (!ok) throw new Exception(name); count++; Console.WriteLine("PASS " + name); }
 
-    // 敵の写し。既定は「この FATE の敵・味方でない・いま攻撃してきていない」。
-    static MobView Mob(ulong id, float distance, uint hp = 100, bool mayAttack = true, bool ally = false, bool aggro = false, bool forlorn = false, uint nameId = 0)
-        => new(id, nameId == 0 ? (uint)id : nameId, mayAttack, ally, aggro, hp, distance, forlorn);
+    // 敵の写し。既定は「この FATE の敵（狙ってよい）・味方でない」。
+    static MobView Mob(ulong id, float distance, bool mayAttack = true, bool ally = false, bool forlorn = false, uint nameId = 0)
+        => new(id, nameId == 0 ? (uint)id : nameId, mayAttack, ally, distance, forlorn);
 
     public static void Main()
     {
@@ -27,9 +27,16 @@ static class Program
 
     static void TargetLockTests()
     {
+        // 狙ってよい敵の規則（利用者 2026-10-10 夕：FATE の中では紫の印＝その FATE の敵だけ）。
+        Check(!TargetLock.MayAttack(5, 0, true), "FATE の中では、絡んできたフィールドのモンスター（FateId 0）も狙わない");
+        Check(!TargetLock.MayAttack(5, 0, false), "FATE の中では、フィールドのモンスターを狙わない");
+        Check(TargetLock.MayAttack(5, 5, false), "FATE の中では、その FATE の敵を狙う");
+        Check(!TargetLock.MayAttack(5, 6, true), "隣の FATE の敵は狙わない");
+        Check(TargetLock.MayAttack(0, 0, true) && !TargetLock.MayAttack(0, 0, false), "FATE の外では、絡んできた敵だけに反撃する");
+
         var a = Mob(1, 30); var b = Mob(2, 10);
         var d = TargetLock.Decide(0, 0, 0, [a, b]);
-        Check(d is { Action: LockAction.Switch, TargetId: 2 }, "狙いが無ければ選ぶ（同じ大きさなら近い方）");
+        Check(d is { Action: LockAction.Switch, TargetId: 2 }, "狙いが無ければ一番近い敵を選ぶ");
 
         d = TargetLock.Decide(2, 2, 2, [a, b]);
         Check(d is { Action: LockAction.Keep, TargetId: 2 }, "固定した相手が生きていれば、そのまま");
@@ -38,12 +45,12 @@ static class Program
         d = TargetLock.Decide(2, 2, 1, [a, b]);
         Check(d is { Action: LockAction.Restore, TargetId: 2 }, "他から替えられたら固定した相手へ戻す（倒れるまで変えない）");
 
-        var big = Mob(3, 40, hp: 5000);
-        d = TargetLock.Decide(2, 2, 2, [a, b, big]);
-        Check(d is { Action: LockAction.Keep, TargetId: 2 }, "大きい敵が現れても、固定した相手が倒れるまで替えない");
+        var near = Mob(3, 2);
+        d = TargetLock.Decide(2, 2, 2, [a, b, near]);
+        Check(d is { Action: LockAction.Keep, TargetId: 2 }, "もっと近い敵が現れても、固定した相手が倒れるまで替えない");
 
-        d = TargetLock.Decide(2, 2, 2, [a, big]);
-        Check(d is { Action: LockAction.Switch, TargetId: 3 }, "固定した相手が倒れたら（一覧に居ない）次を選ぶ");
+        d = TargetLock.Decide(2, 2, 2, [a, near]);
+        Check(d is { Action: LockAction.Switch, TargetId: 3 }, "固定した相手が倒れたら（一覧に居ない）一番近い敵へ");
         Check(d.Reason.Contains("倒れた"), "倒れたので次へ、を理由に残す");
 
         d = TargetLock.Decide(2, 2, 2, [a, Mob(2, 10, nameId: 999)]);
@@ -61,21 +68,23 @@ static class Program
         d = TargetLock.Decide(5, 5, 5, [ally]);
         Check(d is { Action: LockAction.Keep, TargetId: 5 }, "敵を見分けられないとき（味方しか居ない）は今までどおり狙い続ける");
 
-        var attacker = Mob(6, 12, hp: 50, aggro: true);
-        d = TargetLock.Decide(0, 0, 0, [big, attacker]);
-        Check(d is { Action: LockAction.Switch, TargetId: 6 }, "次の相手は、いま攻撃してきている敵を先に（反撃の方針）");
+        var field = Mob(6, 1, mayAttack: false);
+        d = TargetLock.Decide(0, 0, 0, [field, a]);
+        Check(d is { Action: LockAction.Switch, TargetId: 1 }, "フィールドのモンスターは、一番近くても選ばない");
 
         d = TargetLock.Decide(0, 0, 1, [a, b]);
-        Check(d is { Action: LockAction.Switch, TargetId: 1 }, "固定が無いとき、いまのターゲットが狙ってよい敵ならそれを固定する");
+        Check(d is { Action: LockAction.Switch, TargetId: 2 }, "他から置かれたいまのターゲットは引き継がず、一番近い敵を選ぶ");
 
         var stray = Mob(7, 4, mayAttack: false);
         d = TargetLock.Decide(0, 0, 7, [stray]);
         Check(d is { Action: LockAction.Clear }, "狙ってはいけない敵が置かれていて他に居なければ外す（Henched が殴らないように）");
         d = TargetLock.Decide(0, 0, 7, [stray, a]);
         Check(d is { Action: LockAction.Switch, TargetId: 1 }, "狙ってはいけない敵が置かれていても、狙う敵が居ればそちらを固定する");
+        d = TargetLock.Decide(2, 2, 7, [stray, a, b]);
+        Check(d is { Action: LockAction.Restore, TargetId: 2 }, "固定している間にフィールドのモンスターへ替えられたら戻す");
 
         d = TargetLock.Decide(2, 2, 2, [a, Mob(2, 10, mayAttack: false)]);
-        Check(d is { Action: LockAction.Switch, TargetId: 1 }, "固定した相手が狙ってよい敵でなくなったら（FATE 外で敵視が切れた）次へ");
+        Check(d is { Action: LockAction.Switch, TargetId: 1 }, "固定した相手が狙ってよい敵でなくなったら次へ");
 
         d = TargetLock.Decide(0, 0, 0, []);
         Check(d.Action == LockAction.None, "誰も居なければ何もしない");
