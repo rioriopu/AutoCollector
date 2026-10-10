@@ -928,7 +928,16 @@ public sealed class PresetTab(Plugin plugin)
     }
 
     /// <summary>
-    /// 周回と交換をここから始める・止める。
+    /// 稼ぎと交換をここから始める・止める。
+    ///
+    /// **出す操作は、その通貨の稼ぎ方で決まる。**
+    /// 稼ぎ方は <see cref="AutoCollector.Earning.EarnerRegistry"/> が持っており、
+    /// 戦闘・クラフター・FATE・ギャザラーの 4 つがある。
+    /// これを見ずに、FATE 以外をすべて AutoDuty の周回として扱っていたため、
+    /// クラフターのプリセットに「周回を開始する」「止める」が並んでいた。
+    /// 製作で稼ぐ通貨に、コンテンツ周回の操作は何の関係も無い
+    /// （しかも AutoDuty 未導入なら、押せないボタンと
+    ///  「AutoDuty が導入されていません」だけが出ていた。2026-10-10 指摘）。
     ///
     /// **プリセットを有効にしただけでは AutoDuty は始まらない。**
     /// 自動交換は周回への相乗りとして動く設計で、こちらから周回を起こすことはない
@@ -945,6 +954,21 @@ public sealed class PresetTab(Plugin plugin)
         if (this.plugin.CurrencyCatalog.TryResolve(preset, out var currencyId))
         {
             var earner = this.plugin.Earners.FindFor(currencyId);
+
+            // **製作で稼ぐ通貨は、製作の側に操作がある。**
+            //
+            // 始める・止めるは、交換計画の下の「回しています／素材を確かめて開始する」
+            // （DrawGoalRunState）が受け持つ。ここで周回の操作を出すと、
+            // 操作が 2 か所に分かれたうえ、押しても製作には何も起きない。
+            if (earner?.KindName == "クラフター" || this.plugin.Crafter.CanEarn(currencyId))
+            {
+                EUi.MutedParagraph(
+                    "この通貨は製作で稼ぎます。始める・止めるは、上の交換計画にある" +
+                    "「素材を確かめて開始する」から行います（コンテンツ周回とは関係しません）");
+
+                return;
+            }
+
             if (earner?.KindName == "FATE")
             {
                 var fateBusy = this.plugin.ExchangeExecutor.IsBusy || this.plugin.GoalRunner.IsRunning ||
