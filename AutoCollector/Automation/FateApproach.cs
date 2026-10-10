@@ -9,6 +9,7 @@ using AutoCollector.Ipc;
 using Dalamud.Game.ClientState.Conditions;
 using ECommons.DalamudServices;
 using ECommons.GameHelpers;
+using SmoothNav.Core;
 
 namespace AutoCollector.Automation;
 
@@ -75,7 +76,8 @@ public sealed class FateApproach(
     AnomalyLog anomalyLog,
     FateTrace trace,
     VnavmeshIpc vnavmesh,
-    MountService mount)
+    MountService mount,
+    SmoothMoveService? smooth = null)
 {
     /// <summary>外周点を円のどれだけ外に置くか。</summary>
     private const float EntryMarginMeters = 10f;
@@ -189,6 +191,7 @@ public sealed class FateApproach(
     private readonly FateTrace trace = trace;
     private readonly VnavmeshIpc vnavmesh = vnavmesh;
     private readonly MountService mount = mount;
+    private readonly SmoothMoveService? smooth = smooth;
 
     /// <summary>いまの段階。</summary>
     public ApproachPhase Phase { get; private set; } = ApproachPhase.Idle;
@@ -230,6 +233,15 @@ public sealed class FateApproach(
     /// <summary>走らせている経路探索。</summary>
     private Task<List<Vector3>>? pending;
     private CancellationTokenSource? pendingCancel;
+
+    /// <summary>
+    /// 確かめ終えた経路の角を曲線に整えている途中（<see cref="SmoothMoveService"/>）。
+    /// 整えた経路にも同じ確かめ（<see cref="Validate"/>・降下の形）をかけ、通ったときだけ使う。
+    /// 整えるのは予算の間だけ（途中からの乗り換えはしない。降下の段や経路の見守りとぶつかるため）。
+    /// </summary>
+    private RoutePlanner? smoothPlanner;
+    private List<Vector3>? smoothOfficial;
+    private int smoothGeneration;
     private int pendingGeneration;
 
     /// <summary>この段階で経路を渡したか。段階ごとに 1 度だけ渡す。</summary>
@@ -868,6 +880,29 @@ public sealed class FateApproach(
             }
         }
 
+        // 確かめ終えた経路を曲線に整えている。
+        if (this.smoothPlanner is { Active: true } planning)
+        {
+            if (this.smoothGeneration != this.generation)
+            {
+                // 段階が変わった。整えた結果は使わない。
+                planning.Cancel();
+                this.smoothOfficial = null;
+            }
+            else if (planning.Tick(Player.Position, this.smooth!.Now) is not { } plan)
+            {
+                this.Detail = $"{describe}の経路を整えています";
+                return;
+            }
+            else
+            {
+                var official = this.smoothOfficial!;
+                this.smoothOfficial = null;
+                this.IssuePath(this.ChooseSmoothed(official, plan, destination, describe), destination, fly, describe);
+                return;
+            }
+        }
+
         // 探索の結果を待っている。
         if (this.pending is { } task)
         {
@@ -919,19 +954,19 @@ public sealed class FateApproach(
                 return;
             }
 
-            if (!this.vnavmesh.TryMoveAlong(waypoints, fly))
+            // 角を曲線に整えてから渡す（受け取りは次から）。整えられなければ、この経路をそのまま渡す。
+            if (this.smooth is { Enabled: true } && waypoints.Count > 2)
             {
-                this.OnPathRejected(describe, "経路を渡せませんでした");
+                this.smoothPlanner ??= this.smooth.CreatePlanner();
+                this.smoothPlanner.LateRefineSeconds = 0;
+                this.smoothPlanner.Begin(Task.FromResult(waypoints), fly, 0, this.smooth.Now);
+                this.smoothOfficial = waypoints;
+                this.smoothGeneration = this.generation;
+                this.Detail = $"{describe}の経路を整えています";
                 return;
             }
 
-            this.pathIssued = true;
-            this.issuedDestination = destination;
-
-            this.trace.Decision(
-                $"{describe}の経路を渡した",
-                $"{waypoints.Count}点 終点({destination.X:F0},{destination.Y:F0},{destination.Z:F0}) fly={fly}");
-
+            this.IssuePath(waypoints, destination, fly, describe);
             return;
         }
 
@@ -954,6 +989,50 @@ public sealed class FateApproach(
 
         this.pending = started;
         this.Detail = $"{describe}の経路を探しています";
+    }
+
+    /// <summary>確かめ終えた経路を辿らせる。</summary>
+    private void IssuePath(List<Vector3> waypoints, Vector3 destination, bool fly, string describe)
+    {
+        if (!this.vnavmesh.TryMoveAlong(waypoints, fly))
+        {
+            this.OnPathRejected(describe, "経路を渡せませんでした");
+            return;
+        }
+
+        this.pathIssued = true;
+        this.issuedDestination = destination;
+
+        this.trace.Decision(
+            $"{describe}の経路を渡した",
+            $"{waypoints.Count}点 終点({destination.X:F0},{destination.Y:F0},{destination.Z:F0}) fly={fly}");
+    }
+
+    /// <summary>
+    /// 整えた経路を使うか決める。整えた経路にも公式の経路と同じ確かめ（<see cref="Validate"/>・降下の形）をかけ、
+    /// 通らなければ公式の経路を使う（公式より悪くしない）。
+    /// </summary>
+    private List<Vector3> ChooseSmoothed(List<Vector3> official, RoutePlan plan, Vector3 destination, string describe)
+    {
+        if (!plan.Smoothed || plan.Waypoints.Count == 0)
+        {
+            this.trace.State($"{describe}の経路は公式のまま", SmoothMoveService.Describe(plan));
+            return official;
+        }
+
+        // 渡す経路は出発点を除いた点の並び。確かめは公式の経路と同じ形（出発点つき）で行う。
+        var smoothed = new List<Vector3>(plan.Waypoints.Count + 1) { official[0] };
+        smoothed.AddRange(plan.Waypoints);
+        if (!this.Validate(smoothed, destination, out var why) ||
+            (this.Phase == ApproachPhase.Descending && this.descentStages.Count == 0 &&
+             !this.IsDescentAcceptable(smoothed, this.landing, out why)))
+        {
+            this.trace.Trouble($"{describe}の整えた経路を使わない", $"{why} 公式の経路で進みます");
+            return official;
+        }
+
+        this.trace.Decision($"{describe}の経路を曲線に整えた", SmoothMoveService.Describe(plan));
+        return smoothed;
     }
 
     /// <summary>
@@ -1358,6 +1437,11 @@ public sealed class FateApproach(
 
     private void CancelPending()
     {
+        // 整えている途中の経路も捨てる（呼ばれるのは段階を変える・止めるとき）。
+        // 探索の結果を受け取った直後にも呼ばれるが、整え始めるのはその後なので消えない。
+        this.smoothPlanner?.Cancel();
+        this.smoothOfficial = null;
+
         var cts = this.pendingCancel;
         this.pendingCancel = null;
         this.pending = null;

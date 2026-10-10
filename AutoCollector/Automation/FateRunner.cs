@@ -601,7 +601,7 @@ public sealed class FateRunner(
     /// <b>飛行の間はこれが移動を持つ。</b>
     /// 段階ごとに経路を引き直すので、ここで同時に経路を積まない。
     /// </summary>
-    private readonly FateApproach approach = new(anomalyLog, trace, vnavmesh, mount);
+    private readonly FateApproach approach = new(anomalyLog, trace, vnavmesh, mount, navigation.Smooth);
 
     /// <summary>
     /// 開始したときに固定した巡回ルート。

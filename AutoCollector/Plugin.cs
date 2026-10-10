@@ -106,6 +106,9 @@ public sealed class Plugin : IDalamudPlugin
 
     internal VnavmeshIpc Vnavmesh { get; private set; } = null!;
 
+    /// <summary>移動の角を曲線に整える部品の入れ物（移動の部品 4 つで共有）。</summary>
+    internal SmoothMoveService SmoothMove { get; private set; } = null!;
+
     internal MenuService MenuService { get; private set; } = null!;
 
     internal LifestreamIpc Lifestream { get; private set; } = null!;
@@ -536,6 +539,7 @@ public sealed class Plugin : IDalamudPlugin
         this.CallbackRecorder.CurrencySampler = this.SampleSpecialCurrencies;
         this.AddonOwnership = new AddonOwnershipTracker(this.AnomalyLog);
         this.Vnavmesh = new VnavmeshIpc(this.AnomalyLog);
+        this.SmoothMove = new SmoothMoveService();
         this.MenuService = new MenuService(this.AnomalyLog);
         this.Lifestream = new LifestreamIpc(this.AnomalyLog);
         this.AetheryteService = new AetheryteService(this.AnomalyLog);
@@ -572,7 +576,7 @@ public sealed class Plugin : IDalamudPlugin
         this.VentureBellRunner = new VentureBellRunner(
             this.AnomalyLog,
             this.FateTrace,
-            new NavigationService(this.AnomalyLog, this.Vnavmesh),
+            new NavigationService(this.AnomalyLog, this.Vnavmesh, this.SmoothMove),
             this.AutoRetainer);
         this.VentureWatcher = new VentureWatcher(
             this.AnomalyLog,
@@ -585,7 +589,7 @@ public sealed class Plugin : IDalamudPlugin
         this.FateRunner = new FateRunner(
             this.AnomalyLog,
             this.FateScanner,
-            new NavigationService(this.AnomalyLog, this.Vnavmesh),
+            new NavigationService(this.AnomalyLog, this.Vnavmesh, this.SmoothMove),
             this.BossMod,
             this.BuddyService,
             this.MountService,
@@ -607,7 +611,7 @@ public sealed class Plugin : IDalamudPlugin
             this.ShopService,
             this.CurrencyService,
             this.ExchangeResolver,
-            new NavigationService(this.AnomalyLog, this.Vnavmesh),
+            new NavigationService(this.AnomalyLog, this.Vnavmesh, this.SmoothMove),
             new InteractionService(this.AnomalyLog),
             this.MenuService,
             this.AddonOwnership,
@@ -648,7 +652,7 @@ public sealed class Plugin : IDalamudPlugin
 
             // 呼び鈴まで歩くための足。交換の移動とは別物にする。
             // 同時には走らない（GoalRunner が順番に動かす）ので取り合わない。
-            new NavigationService(this.AnomalyLog, this.Vnavmesh),
+            new NavigationService(this.AnomalyLog, this.Vnavmesh, this.SmoothMove),
             this.BellLocations);
         this.CraftRunner = new CraftRunner(this.AnomalyLog, this.CurrencyService, this.Artisan);
 
@@ -1205,6 +1209,16 @@ public sealed class Plugin : IDalamudPlugin
         // AutomaticReloading 時に古いインスタンスが動き続ける。
         Svc.Framework.Update -= this.OnFrameworkUpdate;
         this.FateRunner?.DisposeStarter();
+
+        // 曲線に整える部品も毎フレームの処理を外す。待っている当たり判定の照会は捨てる。
+        try
+        {
+            this.SmoothMove?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            Svc.Log.Error($"[Auto Collector] 移動を曲線にする部品の解放に失敗しました: {ex}");
+        }
 
         // 画面の接続も同じ理由で先に外す。
         // 外し忘れると、読み込み直したあとに古い画面が描かれ続ける。

@@ -1375,6 +1375,26 @@ public sealed partial class MainWindow : EuWindow
             changed = true;
         }
 
+        EUi.Spacing();
+
+        var smooth = Plugin.C.SmoothMovement;
+        if (EUi.Checkbox("移動の角を曲線にしてなめらかに動く", ref smooth))
+        {
+            Plugin.C.SmoothMovement = smooth;
+            changed = true;
+        }
+
+        EUi.MutedParagraph("  vnavmesh の経路の角を曲線に整えて動きます。整えられない所は、今までどおり vnavmesh の経路で動きます");
+
+        var smoothFlight = Plugin.C.SmoothFlight;
+        if (EUi.Checkbox("飛んで向かうときも曲線にする", ref smoothFlight))
+        {
+            Plugin.C.SmoothFlight = smoothFlight;
+            changed = true;
+        }
+
+        EUi.MutedParagraph("  新しく作る曲線は、ゲームの当たり判定で地形や物に当たらないと確かめてから使います");
+
         if (changed)
         {
             EzConfig.Save();

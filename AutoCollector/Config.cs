@@ -299,6 +299,17 @@ public sealed class Config
     public float NpcApproachRange { get; set; } = 3.0f;
 
     /// <summary>
+    /// 移動の角を曲線にしてなめらかに動くか（SmoothNav）。
+    ///
+    /// vnavmesh の経路は角で向きを急に変える。角を曲線に整えた経路で動くと、人が歩くように角を回る。
+    /// 整えられない・間に合わない所は vnavmesh の経路のまま、経路が無いときは今までどおり vnavmesh 任せで動く。
+    /// </summary>
+    public bool SmoothMovement { get; set; } = true;
+
+    /// <summary>飛んで向かうときも曲線にするか。新しい線はゲームの当たり判定で確かめてから使う（1 フレーム 1 ミリ秒まで）。</summary>
+    public bool SmoothFlight { get; set; } = true;
+
+    /// <summary>
     /// 収集品の納品窓口を固定する場合の ENpcBase.RowId。0 なら自動で選ぶ。
     ///
     /// 窓口は 9 都市にあり、どれを使っても納品できる。
