@@ -7,7 +7,7 @@
     上書きすると SDK 更新に追従できなくなるため、ここでは書かない。
   -->
   <PropertyGroup>
-    <Version>0.1.5.17</Version>
+    <Version>0.2.0.0</Version>
     <EstellUtilsProject Condition="'$(EstellUtilsProject)' == ''">..\..\EstellUtils\src\EstellUtils\EstellUtils.csproj</EstellUtilsProject>
     <RootNamespace>AutoCollector</RootNamespace>
     <AssemblyName>AutoCollector</AssemblyName>
