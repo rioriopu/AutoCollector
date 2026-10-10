@@ -244,6 +244,61 @@ public sealed class FateApproach(
     private int smoothGeneration;
     private int pendingGeneration;
 
+    // ---- 先に求める飛行の経路（2026-10-10・空中も曲線に）----
+    //
+    // 乗る・離陸する間（実機で 2 秒ほど）に、外周上空への経路と降下の経路を先に求め、1 本につないで曲線に整えておく。
+    // 離陸したらすぐ辿らせるので、離陸の後に止まって経路を待たない。外周上空でも止まらず、角を曲線で回って降下へ入る。
+    // 整える予算も長く取れる（以前は 0.25 秒で、長い経路 10 本のうち 4 本が間に合わず公式のままだった＝10-10 の記録）。
+    // 求められない・確かめを通らないときは、今までどおり段階ごとに求める（RunPath）。
+
+    /// <summary>先に求める経路の進み具合。</summary>
+    private enum PrePlanState
+    {
+        /// <summary>何もしていない（使い終えた・使わない）。</summary>
+        Idle,
+
+        /// <summary>経路を探している。</summary>
+        Searching,
+
+        /// <summary>つないだ経路の角を曲線に整えている。</summary>
+        Smoothing,
+
+        /// <summary>渡せる経路がある。</summary>
+        Ready,
+
+        /// <summary>使えなかった。段階ごとに求める。</summary>
+        Failed,
+    }
+
+    private PrePlanState preState;
+    private int preGeneration;
+    private Vector3 preOrigin;
+    private Task<List<Vector3>>? preToEntry;
+    private Task<List<Vector3>>? preDescent;
+    private CancellationTokenSource? preCancel;
+    private RoutePlanner? prePlanner;
+    private List<Vector3>? preRaw;
+    private List<Vector3>? prePlan;
+    private bool preJoined;
+
+    /// <summary>いま辿っている経路が、外周上空から降下までつないだものか。外周で止めずに降下の段へ移る。</summary>
+    private bool joinedDescent;
+
+    /// <summary>離陸の合図に渡す点の高さ（真上へ何 m）。先に求める経路もこの点から求める。</summary>
+    private const float TakeoffLiftMeters = 5f;
+
+    /// <summary>乗る・離陸する間に整えるときの予算（秒）。飛んでいる最中に始めたときは今までどおり 0.25 秒。</summary>
+    private const double PrePlanRefineSeconds = 1.5;
+
+    /// <summary>飛んでいる最中に先に求め始めたときの予算（秒）。待つ間は空中で止まるので、今までの予算と同じにする。</summary>
+    private const double FlyingRefineSeconds = .25;
+
+    /// <summary>外周上空へ向かう段で、先に求めている経路をこれ以上は待たない（段階ごとに求め直す）。</summary>
+    private static readonly TimeSpan PrePlanSearchLimit = TimeSpan.FromSeconds(15);
+
+    private double preBudget = PrePlanRefineSeconds;
+    private DateTime preStartedUtc;
+
     /// <summary>この段階で経路を渡したか。段階ごとに 1 度だけ渡す。</summary>
     private bool pathIssued;
 
@@ -290,6 +345,8 @@ public sealed class FateApproach(
 
         this.generation++;
         this.CancelPending();
+        this.CancelPrePlan();
+        this.joinedDescent = false;
 
         this.spawnKey = (Svc.ClientState.TerritoryType, fate.Id, fate.StartTimeEpoch);
         this.centre = fate.Position;
@@ -325,8 +382,10 @@ public sealed class FateApproach(
 
         this.generation++;
         this.CancelPending();
+        this.CancelPrePlan();
         this.vnavmesh.TryStop();
         this.pathIssued = false;
+        this.joinedDescent = false;
         this.descentStages = [];
         this.descentStage = 0;
         this.Phase = ApproachPhase.Idle;
@@ -400,6 +459,9 @@ public sealed class FateApproach(
             this.OnPhaseTimeout();
             return;
         }
+
+        // 先に求めている経路を進める（乗る・離陸する間も裏で進む）。
+        this.TickPrePlan();
 
         switch (this.Phase)
         {
@@ -475,6 +537,9 @@ public sealed class FateApproach(
             $"着地({this.landing.X:F0},{this.landing.Y:F0},{this.landing.Z:F0}) " +
             $"外周上空({this.entry.X:F0},{this.entry.Y:F0},{this.entry.Z:F0}) " +
             $"やり直し{this.replans}回目");
+
+        // 乗る・離陸する間に、外周上空から降下までの経路を先に求めて整えておく。
+        this.BeginPrePlan();
 
         // もう飛んでいるなら、乗る・離陸は済んでいる。
         if (MountService.IsFlying)
@@ -577,9 +642,16 @@ public sealed class FateApproach(
             if (this.flyingFrames >= FlyingStableFrames)
             {
                 this.trace.Decision("離陸した", $"高さ {Player.Position.Y:F0}");
+                this.SetPhase(ApproachPhase.FlyToEntry, "外周上空へ向かっています");
+
+                // 先に求めた経路があれば、止めずにそのまま辿らせる（離陸の合図の経路と差し替わる）。
+                if (this.TryIssuePrePlan())
+                {
+                    return;
+                }
+
                 this.vnavmesh.TryStop();
                 this.pathIssued = false;
-                this.SetPhase(ApproachPhase.FlyToEntry, "外周上空へ向かっています");
             }
 
             return;
@@ -617,6 +689,42 @@ public sealed class FateApproach(
         var flat = Flat(Player.Position, this.entry);
         var height = MathF.Abs(Player.Position.Y - this.entry.Y);
 
+        // **外周上空から降下までつないだ経路を辿っている。止めずに降下の段へ移る。**
+        //
+        // 角を曲線に整えると外周点の内側を回るので、外周点に着く代わりに「外周を越えた」でも移る。
+        if (this.joinedDescent && this.pathIssued)
+        {
+            if ((flat <= EntryReachedFlatMeters && height <= EntryReachedHeightMeters) ||
+                FlightJoin.PassedEntry(Player.Position, this.entry, this.landing))
+            {
+                this.trace.Decision(
+                    "外周上空を通った",
+                    $"水平{flat:F1}m 高さ差{height:F1}m → 止まらずに中心の地上へ降ります");
+                this.descentStages = [];
+                this.descentStage = 0;
+                this.SetPhase(ApproachPhase.Descending, "中心の地上へ降りています");
+                return;
+            }
+
+            if (!this.vnavmesh.TryNumWaypoints(out var left))
+            {
+                this.Detail = "外周上空への経路の状態を読めません";
+                return;
+            }
+
+            if (left > 0)
+            {
+                this.Detail = $"外周上空へ向かっています（残り {flat:F0}m）";
+                return;
+            }
+
+            // 経路を使い切ったのに外周を越えていない。降下の段で求め直す。
+            this.joinedDescent = false;
+            this.pathIssued = false;
+            this.SetPhase(ApproachPhase.Descending, "中心の地上へ降りています");
+            return;
+        }
+
         // **水平だけで着いたことにしない。** 高さも揃ってから降下に移る。
         if (flat <= EntryReachedFlatMeters && height <= EntryReachedHeightMeters)
         {
@@ -632,6 +740,26 @@ public sealed class FateApproach(
             this.descentStage = 0;
 
             this.SetPhase(ApproachPhase.Descending, "中心の地上へ降りています");
+            return;
+        }
+
+        // 先に求めている経路が間に合えば、それを使う（段階ごとに同じ探索を二重に頼まない）。
+        // 長く待たない。上限を過ぎたら捨てて、段階ごとに求め直す。
+        if (!this.pathIssued && this.preState is PrePlanState.Searching or PrePlanState.Smoothing)
+        {
+            if (DateTime.UtcNow - this.preStartedUtc <= PrePlanSearchLimit)
+            {
+                this.Detail = "外周上空への経路を整えています";
+                return;
+            }
+
+            this.trace.Trouble("先に求めた経路が間に合わない", $"{PrePlanSearchLimit.TotalSeconds:F0} 秒たっても求まらないので、段階ごとに求め直します");
+            this.CancelPrePlan();
+            this.preState = PrePlanState.Failed;
+        }
+
+        if (!this.pathIssued && this.TryIssuePrePlan())
+        {
             return;
         }
 
@@ -664,6 +792,7 @@ public sealed class FateApproach(
             this.trace.Decision("着地点の上に来た", $"水平{flat:F1}m 高さ{above:F1}m");
             this.vnavmesh.TryStop();
             this.pathIssued = false;
+            this.joinedDescent = false;
             this.groundFrames = 0;
             this.groundPosition = Player.Position;
             this.SetPhase(ApproachPhase.GroundConfirm, "地表に降りています");
@@ -812,6 +941,7 @@ public sealed class FateApproach(
             this.trace.State("降りてしまった", "着地点の近くなので、そのまま地表の確認へ移ります");
             this.vnavmesh.TryStop();
             this.pathIssued = false;
+            this.joinedDescent = false;
             this.groundFrames = 0;
             this.groundPosition = Player.Position;
             this.SetPhase(ApproachPhase.GroundConfirm, "地表に降りています");
@@ -822,6 +952,7 @@ public sealed class FateApproach(
         this.trace.Trouble("飛行が解けた", "乗り直して飛び直します");
         this.vnavmesh.TryStop();
         this.pathIssued = false;
+        this.joinedDescent = false;
         this.flyingFrames = 0;
         this.SetPhase(ApproachPhase.Mounting, "乗り直しています");
         return false;
@@ -1036,6 +1167,219 @@ public sealed class FateApproach(
     }
 
     /// <summary>
+    /// 外周上空から降下までの経路を先に求め始める（乗る・離陸する間に裏で進む）。
+    ///
+    /// <b>曲線にする移動を切ってあるときはしない</b>（今までどおり段階ごとに求める）。
+    /// 飛んでいないなら、離陸の合図の点（真上 5m）から求める。離陸した所から辿らせるので、ずれない。
+    /// vnavmesh は経路探索を 1 本ずつ順に処理する（NavmeshManager.QueryPath の ExecuteWhenIdle）ので、続けて 2 本頼んでよい。
+    /// </summary>
+    private void BeginPrePlan()
+    {
+        this.CancelPrePlan();
+
+        if (!Player.Available || this.smooth is not { Enabled: true })
+        {
+            return;
+        }
+
+        var flying = MountService.IsFlying;
+        this.preOrigin = flying ? Player.Position : Player.Position with { Y = Player.Position.Y + TakeoffLiftMeters };
+        this.preBudget = flying ? FlyingRefineSeconds : PrePlanRefineSeconds;
+        this.preGeneration = this.generation;
+        this.preStartedUtc = DateTime.UtcNow;
+        this.preCancel = new CancellationTokenSource();
+
+        if (!this.vnavmesh.TryPathfindCancelable(this.preOrigin, this.entry, true, this.preCancel.Token, out var toEntry) ||
+            toEntry is null)
+        {
+            this.preState = PrePlanState.Failed;
+            return;
+        }
+
+        this.preToEntry = toEntry;
+
+        // 降下の経路は外周上空の点から求める。頼めなくても外周上空までは先に求める（降下は外周で求め直す）。
+        if (this.vnavmesh.TryPathfindCancelable(this.entry, this.landing, true, this.preCancel.Token, out var descent))
+        {
+            this.preDescent = descent;
+        }
+
+        this.preState = PrePlanState.Searching;
+    }
+
+    /// <summary>
+    /// 先に求めている経路を進める。毎フレーム呼ぶ。
+    ///
+    /// 探し終えたら確かめ（<see cref="Validate(List{Vector3}, Vector3, Vector3, out string)"/>・降下の形）をかけ、
+    /// 外周上空への経路と降下の経路をつなぎ（<see cref="FlightJoin.Join"/>）、角を曲線に整える。
+    /// 降下の経路が確かめを通らないときは、外周上空までだけを使い、降下は今までどおり外周で求め直す（段に分けて降りる等）。
+    /// </summary>
+    private void TickPrePlan()
+    {
+        if (this.preState is not (PrePlanState.Searching or PrePlanState.Smoothing))
+        {
+            return;
+        }
+
+        if (this.preGeneration != this.generation)
+        {
+            this.CancelPrePlan();
+            return;
+        }
+
+        if (this.preState == PrePlanState.Searching)
+        {
+            if (this.preToEntry is not { IsCompleted: true } toEntry || this.preDescent is { IsCompleted: false })
+            {
+                return;
+            }
+
+            var why = "外周上空への経路探索に失敗しました";
+            if (toEntry.Status != TaskStatus.RanToCompletion ||
+                !this.Validate(toEntry.Result, this.entry, this.preOrigin, out why))
+            {
+                this.trace.State("先に求めた経路を使わない", why);
+                this.CancelPrePlan();
+                this.preState = PrePlanState.Failed;
+                return;
+            }
+
+            List<Vector3>? descent = null;
+            if (this.preDescent is { Status: TaskStatus.RanToCompletion } found)
+            {
+                if (this.Validate(found.Result, this.landing, this.entry, out var bad) &&
+                    this.IsDescentAcceptable(found.Result, this.landing, this.entry, out bad))
+                {
+                    descent = found.Result;
+                }
+                else
+                {
+                    this.trace.State("降下は外周上空で求め直す", bad);
+                }
+            }
+            else
+            {
+                this.trace.State("降下は外周上空で求め直す", "降下の経路を先に求められませんでした");
+            }
+
+            this.preRaw = FlightJoin.Join(toEntry.Result, descent);
+            this.preJoined = descent is not null;
+
+            if (this.smooth is { Enabled: true } && this.preRaw.Count > 2)
+            {
+                this.prePlanner ??= this.smooth.CreatePlanner();
+                this.prePlanner.LateRefineSeconds = 0;
+                this.prePlanner.RefineBudgetSeconds = this.preBudget;
+                this.prePlanner.Begin(Task.FromResult(this.preRaw), true, 0, this.smooth.Now);
+                this.preState = PrePlanState.Smoothing;
+                return;
+            }
+
+            this.prePlan = this.preRaw;
+            this.preState = PrePlanState.Ready;
+            return;
+        }
+
+        if (this.prePlanner!.Tick(this.preOrigin, this.smooth!.Now) is not { } plan)
+        {
+            return;
+        }
+
+        this.prePlan = this.ChoosePrePlan(this.preRaw!, plan, this.preJoined);
+        this.preState = PrePlanState.Ready;
+    }
+
+    /// <summary>
+    /// 先に求めた経路の、整えた形を使うか決める。整えた経路にも同じ確かめをかけ、通らなければつないだ公式の経路を使う。
+    /// </summary>
+    /// <param name="raw">つないだ公式の経路（出発点つき）。</param>
+    /// <param name="plan">整えた結果。</param>
+    /// <param name="joined">降下までつないでいるか。</param>
+    private List<Vector3> ChoosePrePlan(List<Vector3> raw, RoutePlan plan, bool joined)
+    {
+        if (!plan.Smoothed || plan.Waypoints.Count == 0)
+        {
+            this.trace.State("先に求めた経路は公式のまま", SmoothMoveService.Describe(plan));
+            return raw;
+        }
+
+        var smoothed = new List<Vector3>(plan.Waypoints.Count + 1) { raw[0] };
+        smoothed.AddRange(plan.Waypoints);
+
+        if (!this.Validate(smoothed, joined ? this.landing : this.entry, this.preOrigin, out var why) ||
+            (joined && !this.IsDescentAcceptable(smoothed, this.landing, this.entry, out why)))
+        {
+            this.trace.Trouble("先に求めた整えた経路を使わない", $"{why} 公式の経路をつないで進みます");
+            return raw;
+        }
+
+        this.trace.Decision("先に求めた経路を曲線に整えた", SmoothMoveService.Describe(plan));
+        return smoothed;
+    }
+
+    /// <summary>
+    /// 先に求めた経路があれば渡す。渡せたら true。
+    /// 離陸の合図の点がもうすぐそばなら飛ばして、2 点目へそのまま向かわせる（<see cref="FlightJoin.FromHere"/>）。
+    /// </summary>
+    private bool TryIssuePrePlan()
+    {
+        if (this.preState != PrePlanState.Ready || this.prePlan is not { Count: > 0 } plan || this.preGeneration != this.generation)
+        {
+            return false;
+        }
+
+        var joined = this.preJoined;
+        this.preState = PrePlanState.Idle;
+        this.prePlan = null;
+
+        var path = FlightJoin.FromHere(plan, Player.Position, TakeoffLiftMeters + 2f);
+        if (!this.vnavmesh.TryMoveAlong(path, fly: true))
+        {
+            this.trace.Trouble("先に求めた経路を渡せない", "段階ごとに求め直します");
+            return false;
+        }
+
+        this.pathIssued = true;
+        this.joinedDescent = joined;
+        this.issuedDestination = joined ? this.landing : this.entry;
+
+        var end = this.issuedDestination;
+        this.trace.Decision(
+            "先に求めた経路を渡した",
+            $"{path.Count}点 {(joined ? "外周上空から中心の地上までつないだ" : "外周上空まで")} 終点({end.X:F0},{end.Y:F0},{end.Z:F0}) fly=True");
+        return true;
+    }
+
+    /// <summary>先に求めている経路を捨てる。取り消しの合図は Cancel だけで、Dispose しない（vnavmesh の探索が後から合図を読むことがある）。</summary>
+    private void CancelPrePlan()
+    {
+        this.prePlanner?.Cancel();
+
+        try
+        {
+            this.preCancel?.Cancel();
+        }
+        catch
+        {
+            // 取り消せなくても、世代番号と状態で結果を捨てる。
+        }
+
+        Observe(this.preToEntry);
+        Observe(this.preDescent);
+        this.preCancel = null;
+        this.preToEntry = null;
+        this.preDescent = null;
+        this.preRaw = null;
+        this.prePlan = null;
+        this.preJoined = false;
+        this.preState = PrePlanState.Idle;
+    }
+
+    /// <summary>捨てた探索の例外を拾っておく（拾わないと、後で「観測されない例外」として記録に出る）。</summary>
+    private static void Observe(Task? task)
+        => task?.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
+
+    /// <summary>
     /// 経路が使えるかを確かめる。
     ///
     /// <b>末尾が目的地であることは、証明にならない。</b>
@@ -1045,6 +1389,13 @@ public sealed class FateApproach(
     /// 点の数と、途中の形を見る。
     /// </summary>
     private bool Validate(List<Vector3>? waypoints, Vector3 destination, out string why)
+        => this.Validate(waypoints, destination, Player.Position, out why);
+
+    /// <summary>
+    /// 経路が使えるかを確かめる（出発点を指定する形）。
+    /// 先に求める経路は、いまの位置ではなく離陸の合図の点・外周上空の点から求めるので、その点で測る。
+    /// </summary>
+    private bool Validate(List<Vector3>? waypoints, Vector3 destination, Vector3 from, out string why)
     {
         if (waypoints is null || waypoints.Count == 0)
         {
@@ -1064,7 +1415,7 @@ public sealed class FateApproach(
         // **1 点だけの経路は、目的地を足しただけのもの。**
         // 探索が何も見つけられなかったときにこうなる。
         // ただし目的地がすぐ近くなら、1 点でも正しい。
-        if (waypoints.Count == 1 && Vector3.Distance(Player.Position, destination) > 15f)
+        if (waypoints.Count == 1 && Vector3.Distance(from, destination) > 15f)
         {
             why = "経路が目的地 1 点だけでした（探索できていません）";
             return false;
@@ -1100,8 +1451,11 @@ public sealed class FateApproach(
     /// </summary>
     /// <returns>斜めに降りていれば true。</returns>
     private bool IsDescentAcceptable(List<Vector3> waypoints, Vector3 landingPoint, out string why)
+        => this.IsDescentAcceptable(waypoints, landingPoint, Player.Position, out why);
+
+    /// <summary>降下の経路の形を確かめる（出発点を指定する形。先に求める経路は外周上空の点から測る）。</summary>
+    private bool IsDescentAcceptable(List<Vector3> waypoints, Vector3 landingPoint, Vector3 from, out string why)
     {
-        var from = Player.Position;
         var totalDrop = from.Y - landingPoint.Y;
         var totalFlat = Flat(from, landingPoint);
 
@@ -1183,8 +1537,10 @@ public sealed class FateApproach(
 
         // 向きを変えて外周点を取り直す。
         this.generation++;
+        this.CancelPrePlan();
         this.vnavmesh.TryStop();
         this.pathIssued = false;
+        this.joinedDescent = false;
         this.SetPhase(ApproachPhase.PlanEntry, "別の向きから進入し直します");
     }
 
@@ -1402,8 +1758,10 @@ public sealed class FateApproach(
 
                 this.generation++;
                 this.CancelPending();
+                this.CancelPrePlan();
                 this.vnavmesh.TryStop();
                 this.pathIssued = false;
+                this.joinedDescent = false;
                 this.SetPhase(ApproachPhase.PlanEntry, "別の向きから進入し直します");
                 return;
         }
@@ -1427,8 +1785,10 @@ public sealed class FateApproach(
     {
         this.generation++;
         this.CancelPending();
+        this.CancelPrePlan();
         this.vnavmesh.TryStop();
         this.pathIssued = false;
+        this.joinedDescent = false;
         this.FailureReason = why;
         this.Phase = ApproachPhase.Failed;
         this.Detail = why;

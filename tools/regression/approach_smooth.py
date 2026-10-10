@@ -22,8 +22,12 @@ def method(signature):
     return text[a:b]
 
 
-parts = [method(s) for s in ["private List<Vector3> ChooseSmoothed(", "private bool Validate(",
-                             "private bool IsDescentAcceptable(", "private static float Flat("]]
+parts = [method(s) for s in ["private List<Vector3> ChooseSmoothed(", "private List<Vector3> ChoosePrePlan(",
+                             "private bool Validate(List<Vector3>? waypoints, Vector3 destination, out string why)",
+                             "private bool Validate(List<Vector3>? waypoints, Vector3 destination, Vector3 from, out string why)",
+                             "private bool IsDescentAcceptable(List<Vector3> waypoints, Vector3 landingPoint, out string why)",
+                             "private bool IsDescentAcceptable(List<Vector3> waypoints, Vector3 landingPoint, Vector3 from, out string why)",
+                             "private static float Flat("]]
 consts = [line for line in text.splitlines() if re.match(r"\s+private const float (LandingFlatMeters|LandingHeightMeters|MaxVerticalTailMeters|MaxVerticalTailFlatMeters) ", line)]
 assert len(consts) == 4, consts
 enum_start = text.index("public enum ApproachPhase")

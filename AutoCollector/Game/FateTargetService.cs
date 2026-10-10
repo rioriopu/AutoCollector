@@ -349,17 +349,19 @@ public sealed unsafe class FateTargetService(AnomalyLog anomalyLog)
         => obj is IBattleNpc npc && npc.NameId is 6737 or 6738;
 
     /// <summary>
-    /// 狙う相手を選んで、ハードターゲットに置く。
+    /// 狙う相手を決めて、ハードターゲットに置く。
     ///
-    /// <b>フォーローンが居れば、何より先にそれを狙う。</b>
-    /// いまの相手が生きていても切り替える（利用者の要件）。
+    /// <b>1 回狙ったら、その敵が倒れるまで変えない（利用者の要件 2026-10-10）。</b>
+    /// 以前は「いまのハードターゲットが狙ってよい敵なら、それを使う」だけだった。
+    /// RSR の Auto が次に撃つ技の相手へハードターゲットを移すと（RSCommands_Actions.cs:310-316）、
+    /// それをそのまま受け入れていたため、9 秒で 6 回も狙いが替わっていた（2026-10-10 12:40 の記録）。
+    /// いまは自分が固定した相手を正とし、他から替えられていたら戻す。判断は <see cref="TargetLock"/>。
     ///
-    /// <b>それ以外は、いまの相手が有効なら変えない。</b>
-    /// 毎フレーム選び直すと、撃破する前に別の敵へ移ってしまう。
+    /// <b>フォーローンが居れば、何より先にそれを狙う</b>（利用者の要件 docs/27 §4-3）。
     ///
-    /// <b>選ぶ順は「大きい敵 → 近い敵」。</b>
-    /// 最大 HP が大きいものはボスや強敵で、倒さないと達成度が伸びない。
-    /// 同じなら近いほうから。NorthHornAutoFates も同じ順で選んでいる。
+    /// <b>同じ陣営のもの（FATE で一緒に戦う NPC）は後回し。</b>
+    /// イエロージャケットなどを狙い、討伐すべき敵を殴らないことがあった（2026-10-08 実機）。
+    /// 弾かずに後回しにするのは、陣営を読めなかったときに今までどおりの選び方へ落とすため。
     /// </summary>
     /// <returns>置いた相手。居なければ null。</returns>
     public IGameObject? AcquireTarget(ushort fateId, Vector3 fateCentre, float fateRadius)
@@ -369,87 +371,96 @@ public sealed unsafe class FateTargetService(AnomalyLog anomalyLog)
             return null;
         }
 
-        // 現在の通常ターゲットを保持する前に、参加中の FATE のボーナス敵を見る。
-        var forlorn = Svc.Objects
-            .Where(x => IsForlorn(x) && IsLiveEnemy(x) && fateId != 0 && FateIdOf(x) == fateId)
-            .OrderBy(x => Vector3.DistanceSquared(Player.Position, x.Position))
-            .FirstOrDefault();
-        if (forlorn is not null)
-        {
-            Svc.Targets.Target = forlorn;
-            this.ownedTarget = forlorn.GameObjectId;
-            return forlorn;
-        }
-
         var here = Player.Position;
+        this.RefreshEnmity();
 
-        IGameObject? best = null;
-        var bestAlly = true;
-        var bestHp = 0u;
-        var bestDistance = float.MaxValue;
+        var views = new List<MobView>();
+        var objects = new Dictionary<ulong, IGameObject>();
 
         foreach (var obj in Svc.Objects)
         {
-            if (!this.MayAttack(obj, fateId, fateCentre, fateRadius))
+            if (!IsLiveEnemy(obj) || obj is not IBattleNpc npc)
             {
                 continue;
             }
 
-            // **同じ陣営のものは後回しにする。**
-            //
-            // FATE で一緒に戦ってくれる NPC（イエロージャケットなど）を
-            // 狙ってしまい、討伐すべき敵を殴らないことがあった
-            // （2026-10-08 実機）。
-            //
-            // 弾くのではなく後回しにするのは、陣営を読めなかったときに
-            // 今までどおりの選び方へ落とすため。読めなければ全部が
-            // 「味方ではない」と見えるので、並びは変わらない。
-            var ally = SharesPlayerBattalion(obj);
-            var hp = obj is IBattleNpc npc ? npc.MaxHp : 0u;
-            var distance = Vector3.Distance(here, obj.Position);
-
-            var better = best is null
-                || (bestAlly && !ally)
-                || (bestAlly == ally && (hp > bestHp || (hp == bestHp && distance < bestDistance)));
-
-            if (better)
-            {
-                best = obj;
-                bestAlly = ally;
-                bestHp = hp;
-                bestDistance = distance;
-            }
+            objects[obj.GameObjectId] = obj;
+            views.Add(new MobView(
+                obj.GameObjectId,
+                npc.NameId,
+                this.IsFateMob(obj, fateId, fateCentre, fateRadius) || this.IsAggroOnMe(obj),
+                SharesPlayerBattalion(obj),
+                this.enmity.Contains((uint)obj.EntityId),
+                npc.MaxHp,
+                Vector3.Distance(here, obj.Position),
+                fateId != 0 && IsForlorn(obj) && FateIdOf(obj) == fateId));
         }
 
-        // **いま狙っている相手を、そのまま使ってよいか。**
-        //
-        // 有効であっても、味方で、ほかに敵が居るなら乗り換える。
-        // 乗り換えないと、一度味方を狙った時点で動けなくなる。
-        if (Svc.Targets.Target is { } current &&
-            this.MayAttack(current, fateId, fateCentre, fateRadius) &&
-            (!SharesPlayerBattalion(current) || best is null || bestAlly))
+        var current = Svc.Targets.Target;
+        var decision = TargetLock.Decide(this.lockedTarget, this.lockedNameId, current?.GameObjectId ?? 0, views);
+        this.LastDecision = decision;
+
+        switch (decision.Action)
         {
-            this.ownedTarget = current.GameObjectId;
-            return current;
+            case LockAction.Keep:
+                this.ownedTarget = decision.TargetId;
+                return objects[decision.TargetId];
+
+            case LockAction.Restore:
+            case LockAction.Switch:
+                var target = objects[decision.TargetId];
+
+                if (decision.Action == LockAction.Restore)
+                {
+                    this.Restores++;
+
+                    // 取り合いは毎フレーム起きうる。記録は相手ごとに間を空ける。
+                    if (EzThrottler.Throttle($"AutoCollector.TargetRestore.{current?.GameObjectId ?? 0}", 3000))
+                    {
+                        this.anomalyLog.Info(
+                            "Target",
+                            $"他から狙いを {current?.Name.TextValue ?? "なし"} に替えられたので {target.Name} に戻しました（{this.Restores} 回目）");
+                    }
+                }
+                else if (views.First(x => x.Id == decision.TargetId).Ally && EzThrottler.Throttle("AutoCollector.FateAllyTarget", 10000))
+                {
+                    this.anomalyLog.Warn("Fate", $"敵を見分けられないため、同じ陣営の {target.Name} を狙います");
+                }
+
+                if (current?.GameObjectId != target.GameObjectId)
+                {
+                    Svc.Targets.Target = target;
+                }
+
+                this.lockedTarget = target.GameObjectId;
+                this.lockedNameId = target is IBattleNpc locked ? locked.NameId : 0;
+                this.ownedTarget = target.GameObjectId;
+                return target;
+
+            case LockAction.Clear:
+                this.anomalyLog.Info("Target", $"狙ってはいけない {current?.Name.TextValue ?? "相手"} が置かれていたので外しました");
+                Svc.Targets.Target = null;
+                this.lockedTarget = 0;
+                this.ownedTarget = 0;
+                return null;
+
+            default:
+                this.lockedTarget = 0;
+                return null;
         }
-
-        if (best is null)
-        {
-            return null;
-        }
-
-        if (bestAlly && EzThrottler.Throttle("AutoCollector.FateAllyTarget", 10000))
-        {
-            this.anomalyLog.Warn(
-                "Fate",
-                $"敵を見分けられないため、同じ陣営の {best.Name} を狙います");
-        }
-
-        Svc.Targets.Target = best;
-        this.ownedTarget = best.GameObjectId;
-
-        return best;
     }
+
+    /// <summary>直前の <see cref="AcquireTarget"/> の判断。記録に使う。</summary>
+    public LockDecision LastDecision { get; private set; }
+
+    /// <summary>他から替えられた狙いを戻した回数（周回を始め直すまで数える）。</summary>
+    public int Restores { get; private set; }
+
+    /// <summary>倒れるまで狙い続ける相手。無ければ 0。</summary>
+    private ulong lockedTarget;
+
+    /// <summary>固定した相手の名前の番号。ObjectTable の枠が別の敵に使い回されたのを見分ける。</summary>
+    private uint lockedNameId;
 
     /// <summary>
     /// ターゲットを外す。
@@ -483,6 +494,9 @@ public sealed unsafe class FateTargetService(AnomalyLog anomalyLog)
         }
 
         this.ownedTarget = 0;
+
+        // 外したら固定もやめる。納品・離脱のあとに前の相手へ戻さない。
+        this.lockedTarget = 0;
     }
 
     /// <summary>
@@ -552,6 +566,8 @@ public sealed unsafe class FateTargetService(AnomalyLog anomalyLog)
         this.enmity.Clear();
         this.enmityReadUtc = DateTime.MinValue;
         this.ownedTarget = 0;
+        this.lockedTarget = 0;
+        this.Restores = 0;
     }
 
     /// <summary>

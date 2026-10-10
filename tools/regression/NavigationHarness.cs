@@ -119,6 +119,20 @@ static class Program
             Check(nav.Reissue(new Vector3(25, 0, 25), 3, out _) && vnav.StopCalls == 0 && vnav.Running, "頼み直しは今の経路を止めない（整った経路で差し替える）");
             Check(vnav.LastToken != firstToken && nav.Tick(new Vector3(25, 0, 25), 3) == MoveStatus.Moving, "頼み直しの探索の間も移動中");
         }
+        {
+            // 経路の終点で止まったのに目的地まで遠い：呼び出し側は引き直すまで毎フレーム見張る。記録は 1 回だけ（10-10 に 45 件並んだ）。
+            var (nav, vnav, smooth, log) = Make();
+            smooth.Enabled = false;
+            nav.BeginMove(Goal, 3, false, out _);
+            vnav.Running = false; Player.Position = Start;
+            var statuses = Enumerable.Range(0, 20).Select(_ => nav.Tick(Goal, 3)).ToList();
+            Check(statuses[^1] == MoveStatus.ShortOfTarget, "経路の終点で止まって遠ければ届かないと返す");
+            Check(log.Lines.Count(l => l.Contains("ヤルム残っています")) == 1, "届かないの記録は 1 回の移動につき 1 回だけ");
+            nav.BeginMove(Goal, 3, false, out _);
+            vnav.Running = false;
+            for (var i = 0; i < 5; i++) nav.Tick(Goal, 3);
+            Check(log.Lines.Count(l => l.Contains("ヤルム残っています")) == 2, "頼み直したら、また 1 回だけ記録する");
+        }
         Console.WriteLine($"回帰試験（移動・曲線）{count} 件 合格");
     }
 }

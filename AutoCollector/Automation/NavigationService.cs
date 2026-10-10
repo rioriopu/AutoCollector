@@ -98,6 +98,9 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
     private DateTime lastMovementUtc;
     private bool retriedAfterStuck;
 
+    /// <summary>この移動で「目的地まで残っている」を記録したか。</summary>
+    private bool shortReported;
+
     public bool IsAvailable => this.vnavmesh.IsLoaded;
 
     /// <summary>
@@ -185,6 +188,7 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
         this.stableFrames = 0;
         this.idleShortFrames = 0;
         this.retriedAfterStuck = false;
+        this.shortReported = false;
         this.startTerritory = Svc.ClientState.TerritoryType;
         this.lastPosition = Player.Available ? Player.Position : default;
         this.lastMovementUtc = DateTime.UtcNow;
@@ -339,9 +343,15 @@ public sealed class NavigationService(AnomalyLog anomalyLog, VnavmeshIpc vnavmes
             this.idleShortFrames++;
             if (this.idleShortFrames >= RequiredStableFrames)
             {
-                this.anomalyLog.Info(
-                    "Navigation",
-                    $"経路の終点に着きましたが目的地まで {distance:F1} ヤルム残っています");
+                // 呼び出し側は引き直すまで毎フレーム見張るので、記録は 1 回の移動につき 1 回だけ。
+                if (!this.shortReported)
+                {
+                    this.shortReported = true;
+                    this.anomalyLog.Info(
+                        "Navigation",
+                        $"経路の終点に着きましたが目的地まで {distance:F1} ヤルム残っています");
+                }
+
                 return MoveStatus.ShortOfTarget;
             }
 
