@@ -607,6 +607,18 @@ public sealed class PresetTab(Plugin plugin)
             EUi.MutedParagraph(trigger is null
                     ? $"  現在 {current:N0}（発動条件を計算できません）"
                     : $"  現在 {current:N0} / 発動 {trigger:N0}");
+
+            // **満たせない条件を黙って受け取らない。**
+            //
+            // 所持上限を超える固定値は、所持数がそこまで増えないため永久に偽になる。
+            // 以前は何も言わずに周回し続けていた。上限として扱っていることを出す。
+            if (this.plugin.CurrencyService.FixedThresholdExceedsCap(preset.Threshold, currencyId) is { } cap)
+            {
+                EUi.WrapColored(
+                    $"  入れた値 {preset.Threshold.Value:N0} は所持上限 {cap:N0} を超えています。" +
+                    $"そのままでは条件を満たせないため、上限 {cap:N0} に達したら交換を始めます",
+                    NoteKind.Warning);
+            }
         }
 
         // --- 交換モード ---

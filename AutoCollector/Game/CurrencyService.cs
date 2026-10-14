@@ -302,7 +302,7 @@ public sealed class CurrencyService(AnomalyLog anomalyLog)
 
         return setting.Mode switch
         {
-            ThresholdMode.Fixed => current >= setting.Value,
+            ThresholdMode.Fixed => current >= ClampFixed(setting.Value, cap),
             ThresholdMode.Percentage => cap > 0 && current >= (long)cap * Math.Clamp(setting.Value, 0, 100) / 100,
             ThresholdMode.BeforeCap => cap > 0 && current >= cap - Math.Max(0, setting.Value),
             _ => false,
@@ -317,10 +317,50 @@ public sealed class CurrencyService(AnomalyLog anomalyLog)
 
         return setting.Mode switch
         {
-            ThresholdMode.Fixed => setting.Value,
+            ThresholdMode.Fixed => ClampFixed(setting.Value, cap),
             ThresholdMode.Percentage => cap > 0 ? (int)((long)cap * Math.Clamp(setting.Value, 0, 100) / 100) : null,
             ThresholdMode.BeforeCap => cap > 0 ? cap - Math.Max(0, setting.Value) : null,
             _ => null,
         };
+    }
+
+    /// <summary>
+    /// 設定された固定値を、所持上限で頭打ちにする。
+    ///
+    /// <b>上限を超える固定値は、絶対に満たせない条件になる。</b>
+    /// 所持上限が 2000 の通貨に「2500 以上になったら交換する」と入れると、
+    /// 所持数は 2000 で止まるため条件が永久に偽のままになり、
+    /// 交換へ行かず周回だけを続けることになる。しかも画面には
+    /// 「監視中」としか出ないので、理由が分からない
+    /// （2026-10-14 実機。欲しい装備に要る合計が上限を超える設定で起きていた）。
+    ///
+    /// 上限より大きい値を入れた意図は「貯まりきったら交換する」以外に無いので、
+    /// 上限として扱う。上限が読めないときは頭打ちにしない
+    /// （上限の無い通貨があるため、0 を上限として扱うと即座に発火してしまう）。
+    /// </summary>
+    public static int ClampFixed(int value, int cap)
+        => cap > 0 ? Math.Min(value, cap) : value;
+
+    /// <summary>
+    /// 設定された固定値が、所持上限を超えているか。超えていなければ null。
+    ///
+    /// 画面で「その値では発火しないので上限として扱っている」と知らせるために使う。
+    /// </summary>
+    public int? FixedThresholdExceedsCap(ThresholdSetting setting, uint currencyItemId)
+    {
+        if (setting.Mode != ThresholdMode.Fixed)
+        {
+            return null;
+        }
+
+        var stackCap = this.GetEffectiveCap(currencyItemId);
+
+        if (stackCap is null or 0)
+        {
+            return null;
+        }
+
+        var cap = (int)Math.Min(stackCap.Value, int.MaxValue);
+        return setting.Value > cap ? cap : null;
     }
 }
