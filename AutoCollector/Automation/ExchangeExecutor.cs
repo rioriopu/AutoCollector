@@ -455,8 +455,20 @@ public sealed unsafe class ExchangeExecutor(
     private int aethernetTransferAttempts;
 
     /// <summary>
+    /// この 1 回ぶんに与える、実際に動いている時間の上限。
+    ///
+    /// 納品は品数ぶん繰り返すため長くかかる。移動と会話を含めても
+    /// 15 分あれば足りる。これを超えるのは何かが噛み合っていないとき。
+    ///
+    /// <b>待っている時間は含まない。</b>コンテンツが終わるのを待つ・
+    /// 外部プラグインが手を離すのを待つ、はどちらも正しい動作で、
+    /// それに時間がかかったことを理由に打ち切る意味が無い。
+    /// </summary>
+    private static readonly TimeSpan TripBudget = TimeSpan.FromMinutes(15);
+
+    /// <summary>
     /// この 1 回ぶん全体の締切。段階ごとの締切とは別に持つ。
-    /// 安全な状態を待つ段階では見ない。
+    /// 安全な状態を待つ段階では見ないうえ、待っている間は先送りする。
     /// </summary>
     private DateTime tripDeadlineUtc = DateTime.MinValue;
 
@@ -1032,9 +1044,7 @@ public sealed unsafe class ExchangeExecutor(
         this.menuSignatureSinceUtc = DateTime.MinValue;
         this.ResetCategoryState();
 
-        // 納品は品数ぶん繰り返すため長くかかる。移動と会話を含めても
-        // 15 分あれば足りる。これを超えるのは何かが噛み合っていないとき。
-        this.tripDeadlineUtc = DateTime.UtcNow.AddMinutes(15);
+        this.tripDeadlineUtc = DateTime.UtcNow.Add(TripBudget);
         this.deliveryFailure = string.Empty;
         this.deliverySummary = string.Empty;
         this.closeAttempts = 0;
@@ -1080,8 +1090,26 @@ public sealed unsafe class ExchangeExecutor(
         // 安全待ちに時間を使ったあとここへ入ると、待つのが正しい状態のまま
         // 「制限時間を超えたため中止しました（SuppressExternal で停止）」になり、
         // しかも失敗として数えられてプリセットが自動で無効化されていた。
-        if (this.Step is not (ExchangeStep.Idle or ExchangeStep.Done or ExchangeStep.Error
-                or ExchangeStep.WaitingSafeWindow or ExchangeStep.SuppressExternal or ExchangeStep.ResumeEarners) &&
+        var waiting = this.Step is ExchangeStep.Idle or ExchangeStep.Done or ExchangeStep.Error
+            or ExchangeStep.WaitingSafeWindow or ExchangeStep.SuppressExternal or ExchangeStep.ResumeEarners;
+
+        // **待っている間は時計も止める。**
+        //
+        // 判定を飛ばすだけでは足りなかった。締切は開始時に「いまから 15 分」で
+        // 決め打ちしており、待っている間も時間は過ぎていく。
+        // コンテンツが終わるのを 15 分より長く待つと、待ち終えて動き出した
+        // 最初の段（Teleport）へ入った瞬間に締切を過ぎており、
+        // 0.1 秒で「制限時間を超えたため中止しました（Teleport で停止）」になっていた
+        // （2026-10-18 実機。コンテンツを 23 分待ったあとに発生）。
+        //
+        // 15 分は「実際に動いている時間」に与えた予算なので、
+        // 待っている間は締切を先送りして使わせない。
+        if (waiting)
+        {
+            this.tripDeadlineUtc = DateTime.UtcNow.Add(TripBudget);
+        }
+
+        if (!waiting &&
             this.tripDeadlineUtc != DateTime.MinValue &&
             DateTime.UtcNow > this.tripDeadlineUtc)
         {
